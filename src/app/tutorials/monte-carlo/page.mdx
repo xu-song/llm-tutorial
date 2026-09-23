@@ -1,0 +1,1043 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("monte-carlo");
+
+# 🎲 蒙特卡洛方法:用经验说话
+
+[动态规划](/tutorials/dynamic-programming)能精确求解 MDP,代价是**必须知道完整模型**——转移概率 $P(s'\mid s,a)$、奖励函数一个不能少。可现实里环境多半是黑箱:你不知道每一步会落到哪、只知道走完才知道结果。怎么办?
+
+最朴素也最直接的办法:**别预测、去试**。反复跑回合、把每条轨迹的真实回报记下来,用**平均**去估计价值——这就是**蒙特卡洛(Monte Carlo, MC)方法**。它一句话就讲完了:**价值 = 经验回报的均值**。
+
+蒙特卡洛不需要模型、不需要自举、不等别人给概率——只信「真正发生过的回报」。它是[时序差分(TD)](/tutorials/temporal-difference)的「免模型」一半,也是[策略梯度](/tutorials/policy-gradient)里 REINFORCE 直接拿 $G_t$ 当梯度的根源。这一篇把它的预测、控制、与探索的纠缠一次讲清。
+
+## 两个问题:预测与控制
+
+和 DP 一样,蒙特卡洛也分两个任务:
+
+- **预测(评价)**:给一个固定策略 $\pi$,估计它的价值 $V^\pi(s)$ 或 $Q^\pi(s,a)$;
+- **控制(学习)**:找到更好的策略——靠**广义策略迭代**:用 MC 估 $Q$、再贪心改 $\pi$、循环。
+
+注意 MC **必须等回合结束**才能更新:因为它的目标 $G_t$ 是「从 $t$ 到回合末的**完整**折扣回报」。回合没有边界(比如连续任务),MC 就没法直接用——这是它与 TD 的第一个分水岭。
+
+## 核心定义:回报 $G_t$ 与蒙特卡洛估计
+
+先把「回报」定义清楚。从时刻 $t$ 出发,到回合结束 $T$ 的**折扣回报**:
+
+$$
+G_t = r_{t+1} + \gamma\,r_{t+2} + \gamma^2 r_{t+3} + \dots = \sum_{k=0}^{T-t-1} \gamma^k r_{t+k+1}
+$$
+
+状态价值 $V^\pi(s)$ 的定义是「从 $s$ 出发、按 $\pi$ 走的**期望回报**」。蒙特卡洛的估计办法再直白不过:**多次从 $s$ 出发,把每次的 $G_t$ 平均起来**:
+
+$$
+V(s) \leftarrow \frac{1}{N(s)}\sum_{i=1}^{N(s)} G_t^{(i)}, \quad N(s)=\text{在 } s \text{ 出现的次数}
+$$
+
+动作价值 $Q(s,a)$ 同理,只要把「在 $s$ 出现」换成「在 $s$ 做了 $a$」。增量写法(不必存所有回报):
+
+$$
+Q(s,a) \leftarrow Q(s,a) + \alpha\,[\,G_t - Q(s,a)\,]
+$$
+
+当 $\alpha = 1/N(s)$ 时就是严格平均;用更小的固定 $\alpha$ 则能适应**非平稳**(策略在控制中不断变化)。
+
+## First-visit 还是 Every-visit?
+
+一个状态在一个回合里可能**反复出现**(比如随机游走在两个状态间来回弹)。同一个回合里同一个 $s$ 出现多次,$G_t$ 要不要都算?这就分出两派:
+
+- **首次访问(First-visit)MC**:只取该回合里 $s$ **第一次**出现后的回报,后续出现忽略;
+- **每次访问(Every-visit)MC**:$s$ **每一次**出现都记一个 $G_t$,全部入平均。
+
+两者都收敛到真值 $V^\pi(s)$,但**首次访问无偏**、每次访问有微小偏差却方差更低、数据利用率更高(同一回合同一状态多次贡献)。控制问题里两者都常用;下面代码里同一条随机游走喂两法,看它们殊途同归:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(7)
+
+# 状态 0..6 = A..G,A/G 终点。真实价值 = 到达右端 G 的概率
+true = np.array([0, 1/6, 2/6, 3/6, 4/6, 5/6, 0])
+
+def episode(rng, start=3):
+    s = start
+    traj = []
+    while s not in (0, 6):
+        ns = s + (1 if rng.random() < 0.5 else -1)
+        traj.append(s)
+        s = ns
+    G = 1.0 if s == 6 else 0.0      # 终点奖励:到 G 得 1、到 A 得 0
+    return traj, G
+
+fv_sum = np.zeros(7); fv_cnt = np.zeros(7)
+ev_sum = np.zeros(7); ev_cnt = np.zeros(7)
+
+for _ in range(2000):
+    traj, G = episode(rng)
+    # 首次访问:每状态只计第一次
+    seen = set()
+    for s in traj:
+        if s not in seen:
+            fv_sum[s] += G; fv_cnt[s] += 1; seen.add(s)
+    # 每次访问:每次出现都计
+    for s in traj:
+        ev_sum[s] += G; ev_cnt[s] += 1
+
+fv = np.where(fv_cnt > 0, fv_sum / np.maximum(fv_cnt, 1), 0)
+ev = np.where(ev_cnt > 0, ev_sum / np.maximum(ev_cnt, 1), 0)
+print("first-visit MC  B..F:", np.round(fv[1:6], 3))
+print("every-visit MC  B..F:", np.round(ev[1:6], 3))
+print("true            B..F:", np.round(true[1:6], 3))
+print("-> 两种 MC 都收敛到真值;every-visit 计数更多(同一回合重复状态被多次计入)")
+`} />
+
+> 💡 **一个常被忽略的细节**:首次访问之所以无偏,是因为它在「同一回合内多次到访 $s$」时只取一次,避免了**同一轨迹内部的强相关样本**被重复加权;每次访问把这些相关样本都算进去,估计会有轻微偏倚,但样本更多、方差更小。在预测问题里差别通常很小;在控制 + 函数逼近里,每次访问更容易出问题。
+
+## 收敛理论:为何 MC 能学对
+
+上面用代码验证了 first-visit 与 every-visit 都收敛到真值,但「为何能收敛」需要理论保证。这一节把 MC 方法的形式化收敛条件讲清楚——它是后面所有控制算法(包括 TD、Q-learning)收敛理论的起点。
+
+### 预测:大数定律下的无偏一致估计
+
+MC 预测的收敛性直接来自**大数定律**。对一个固定策略 $\pi$,状态 $s$ 的真值是回报的期望:
+
+$$V^\pi(s)=\mathbb E_\pi[G_t\mid S_t=s]$$
+
+first-visit MC 收集的是「回合里首次到访 $s$ 后的回报」$G_t^{(1)},G_t^{(2)},\dots$,这些样本**独立同分布**(每条回合独立采样、首次访问后的回报分布相同),所以:
+
+$$V_N^{\text{FV}}(s)=\frac{1}{N}\sum_{i=1}^N G_t^{(i)}\xrightarrow{N\to\infty}V^\pi(s)\quad\text{a.s.}$$
+
+这是**无偏 + 一致**的估计——无偏指 $\mathbb E[V_N^{\text{FV}}]=V^\pi$ 对任意 $N$ 成立(每条样本的期望都是真值),一致指 $N\to\infty$ 时几乎必然收敛到真值。关键在「独立」:不同回合的首次访问回报相互独立,大数定律直接适用。
+
+下面这个动画把「样本均值收敛到真值」这件事**逐个样本地演给你看**:左图是逐个抽出的样本(绿点),右图是运行均值 $\bar x_n$ 随 $n$ 的轨迹。选不同分布、点「逐样本抽」,看运行均值如何被 $\pm 1/\sqrt{n}$ 的标准误带一路收窄、钉向真值——MC 把 $G_t$ 当样本、把 $V^\pi$ 当真值,估的就是这条收敛曲线:
+
+<LLNConvergenceViz />
+
+> 💡 **看点**:标准误带的宽度是 $\sigma/\sqrt{n}$——它按 $1/\sqrt{n}$ **而非 $1/n$** 收缩,这就是为什么 MC 估计「要精确一位小数得多跑约 100 倍回合」。把分布从伯努利换成方差更小的正态,同样 $n$ 下带更窄、收敛更快——**方差 $\sigma^2$ 直接决定 MC 要跑多少回合**,这也是后面重要性采样里「$\rho$ 把方差撑爆 = 灾难」的伏笔。
+
+every-visit MC 的样本是「$s$ 每次到访后的回报」,但**同一回合内 $s$ 多次到访的回报是相关的**(共享后续轨迹),且不是独立同分布。它仍一致(收敛到 $V^\pi$),但**有限样本下有偏**:同一回合的多个相关样本被当作独立样本平均,等价于给「$s$ 被反复到访的回合」更高权重,引入轻微偏倚。代价换来的好处是样本更多、方差更低。下面的演示把这种**方差差异**量化出来——
+
+<CodeRunner defaultCode={`# First-visit vs Every-visit: 无偏性 + 方差差异
+import numpy as np
+rng = np.random.default_rng(42)
+gamma = 0.95
+# toy: 状态 s 每步 0.5 跳到终止(奖励1) / 0.5 留 s(奖励0). s 可反复出现
+# 真实 V(s) = 0.5/(1-0.5*gamma) (几何分布解 V = 0.5 + 0.5*gamma*V)
+true_v = 0.5 / (1 - 0.5*gamma)
+print(f"真实 V(s) = 0.5/(1-0.5*0.95) = {true_v:.4f}")
+def run_episode():
+    rewards = []
+    for _ in range(100):
+        rewards.append(0.0)
+        if rng.random() < 0.5:
+            rewards.append(1.0)
+            return rewards
+    return rewards
+N = 3000
+fv_est, ev_est = [], []
+for _ in range(N):
+    rewards = run_episode()
+    G_from = np.zeros(len(rewards)); G = 0.0
+    for t in range(len(rewards)-1, -1, -1):
+        G = gamma*G + rewards[t]; G_from[t] = G
+    fv_est.append(G_from[0])           # first-visit: s 首次(起点)的 G
+    ev_est.append(np.mean(G_from[:-1]))# every-visit: s 每次出现的 G 的平均
+fv_mean, ev_mean = np.mean(fv_est), np.mean(ev_est)
+fv_var, ev_var = np.var(fv_est), np.var(ev_est)
+print(f"first-visit: 均值={fv_mean:.4f} (误差{fv_mean-true_v:+.4f})  方差={fv_var:.4f}")
+print(f"every-visit: 均值={ev_mean:.4f} (误差{ev_mean-true_v:+.4f})  方差={ev_var:.4f}")
+print(f"-> 两法期望都近真值(此线性 toy 都无偏); every-visit 方差更小 ({ev_var:.4f} < {fv_var:.4f})")
+print(f"   因同 episode 多个相关 G 平均降噪; 偏置出现在控制+函数逼近 (S&B 5.6)")
+`} title="First-visit 无偏 vs Every-visit 方差更小" />
+
+跑完注意两点:① 两种估计的均值都接近真值 $0.952$——在这个**线性 toy**上两者都无偏(every-visit 的偏置在「控制 + 函数逼近」场景才显现,见 Sutton & Barto §5.6);② every-visit 的方差明显更小(约 first-visit 的 1/3),因为同一回合内 $s$ 多次到访的 $G$ 虽相关但都包含真值信息,取平均降噪。这就是为什么尽管 every-visit 有轻微偏倚,实践中(尤其数据稀缺时)仍常被采用。
+
+### 控制:GLIE——无限探索下的贪心收敛
+
+预测解决了「给定 $\pi$ 估 $V^\pi$」,控制要解决「找最优 $\pi^*$」。MC 控制的循环是:用当前 $\pi$ 采样 → 估 $Q$ → 对 $Q$ 贪心改进 $\pi$ → 再采样。但贪心改进有个致命陷阱:**一旦 $\pi$ 对某个 $(s,a)$ 给出 0 概率,这个 pair 就再也不会被访问,$Q(s,a)$ 永远停在初始值,你永远不知道它其实可能很好**。这是 MC 控制(以及所有 on-policy 控制的核心难题——**探索 vs 利用**。
+
+要保证 MC 控制收敛到最优,需要策略满足 **GLIE(Greedy in the Limit with Infinite Exploration)**[1]——两个条件同时成立:
+
+1. **无限探索**:每个 $(s,a)$ 对在无限回合里被访问无穷多次($\lim_{k\to\infty} N_k(s,a)=\infty$);
+2. **极限贪心**:策略在极限下趋于贪心(极限下 $\pi_k$ 把全部概率给当前 $Q_k$ 最优的动作)。
+
+**GLIE 定理**(Singh & Sutton, 1996 [2]):满足 GLIE 两条件的 on-policy first-visit MC 控制,$Q_k$ 几乎必然收敛到最优 $Q^*$,对应策略收敛到最优策略 $\pi^*$。
+
+最常用的 GLIE 实现是 **$\varepsilon$-贪心 + 退火** $\varepsilon_k=\frac{1}{k}$(或 $\frac{c}{k}$):$\varepsilon_k\to 0$ 保证条件 2(极限贪心);而 $\sum_k\varepsilon_k=\infty$(调和级数发散)保证每个动作被随机选中的概率 $\varepsilon_k/|A|$ 的累计和发散,即条件 1(无限探索)。下面的演示在一个 2 状态 toy 上验证 GLIE 退火能锁定最优——
+
+<CodeRunner defaultCode={`# GLIE: epsilon_k = 1/k 退火的 on-policy MC 控制收敛
+import numpy as np
+rng = np.random.default_rng(7)
+# toy: s0 + a1 -> s1 终止(+1); s0 + a0 -> s0 继续(0). 最优: s0 取 a1
+Q = np.zeros((2, 2))
+ret_sum = np.zeros((2, 2)); ret_cnt = np.zeros((2, 2))
+gamma = 0.95
+def step_mc(s, a):
+    if s == 0:
+        if a == 1: return 1, 1.0, True
+        else: return 0, 0.0, False
+    return 1, 0.0, True
+converged_ep = None
+for ep in range(1, 10001):
+    eps = 1.0 / ep                       # GLIE 退火: eps->0 (贪心) + sum(eps)=inf (无限探索)
+    s, traj, done, steps = 0, [], False, 0
+    while not done and steps < 100:
+        if rng.random() < eps: a = int(rng.integers(2))
+        else: a = int(np.argmax(Q[s]))
+        ns, r, done = step_mc(s, a)
+        traj.append((s, a, r)); s = ns; steps += 1
+    G = 0.0; visited = set()
+    for (st, at, rt) in reversed(traj):
+        G = gamma*G + rt
+        if (st, at) not in visited:
+            ret_sum[st, at] += G; ret_cnt[st, at] += 1
+            Q[st, at] = ret_sum[st, at] / ret_cnt[st, at]
+            visited.add((st, at))
+    if np.argmax(Q[0]) == 1 and ep > 100 and converged_ep is None:
+        converged_ep = ep
+print(f"Q(s0,a0)={Q[0,0]:.4f}  Q(s0,a1)={Q[0,1]:.4f}  (最优 a1: 拿 +1 进终止)")
+print(f"贪心策略 s0 取 a{np.argmax(Q[0])}  (epsilon 从 1.0 退火到 {1.0/10000:.4f} = 1/k)")
+print(f"贪心首次锁定最优回合 ~{converged_ep}")
+print(f"GLIE 两条件: (1) 每个(s,a)无限次访问(eps=1/k, sum=inf) (2) 策略极限贪心(eps->0)")
+print(f"GLIE 定理: 满足两条件时 on-policy first-visit MC 控制收敛到 Q* (Singh/Sutton 1996)")
+`} title="GLIE: epsilon=1/k 退火收敛到最优" />
+
+注意 $\varepsilon_k=1/k$ 在早期($k$ 小)探索强、晚期($k$ 大)趋于贪心,正是「先广泛探索、再利用所学」的课程式退火。但 GLIE 是**渐近**保证——理论上要 $k\to\infty$ 才严格收敛,实践中 10000 回合已够小 toy 锁定最优。也要注意 GLIE 的局限:① 退火太快(如 $\varepsilon_k=1/k^2$)违反条件 1(调和级数 $\sum 1/k^2$ 收敛,探索不足),可能早熟陷局部最优;② 退火太慢(固定 $\varepsilon$)违反条件 2,永不贪心、收敛不到最优。$1/k$ 是兼顾两者的经典选择,也是后面 TD 控制里 SARSA/Q-learning 收敛分析的同款假设。
+
+> 💡 **一句话记住**:MC 预测靠大数定律(first-visit 无偏一致、every-visit 方差更小但有偏),MC 控制靠 GLIE(无限探索 + 极限贪心,$\varepsilon_k=1/k$ 是标准实现)——这两条是所有 on-policy RL 收敛理论的基石,后面 SARSA、Q-learning 的收敛证明都建立在 GLIE 式探索假设之上。
+
+### GLIE 的后悔界:收敛多快
+
+GLIE 定理只给**渐近**保证($k\to\infty$ 时 $Q_k\to Q^*$ 几乎必然),但没回答「前 $T$ 步会亏多少」。这个问题用**累积后悔(cumulative regret)**量化:
+
+$$R_T = \sum_{k=1}^{T}\bigl(V^*(s_k) - V^{\pi_k}(s_k)\bigr)$$
+
+即前 $T$ 步里,每步实际拿到的回报与「若已知最优策略本可拿到」的差距之和。$R_T$ 增长越慢,算法越快逼近最优。关键是:**退火 schedule 直接决定 $R_T$ 的阶**。
+
+**三层标度**(下面 CodeRunner 用 4 臂 bandit 验证,10 seed 平均):
+
+- **$\varepsilon_k = 1/k$(GLIE 标准)**:$R_T = O(\log T)$。锁定最优臂后,只剩探索代价——每次以 $\varepsilon_k/|A|$ 概率随机选到次优臂,代价 $\sim\text{gap}$,累计 $\sum_k \varepsilon_k \cdot \text{gap} = \text{gap}\cdot\sum 1/k \sim \text{gap}\cdot\log T$。这与[多臂老虎机篇](/tutorials/multi-armed-bandit)的 **Lai-Robbins 下界** $\Omega(\log T)$ 匹配——$1/k$ 退火在 bandit 设置下**渐近最优**。
+- **$\varepsilon_k = 1/\sqrt{k}$(退火太慢)**:$R_T = O(\sqrt{T})$。探索衰减不够快,$\sum 1/\sqrt{k} = \infty$ 但比 $\log T$ 大得多,探索代价主导,比 $1/k$ 多一个 $\sqrt{T}/\log T$ 因子。
+- **固定 $\varepsilon$(非 GLIE)**:$R_T = O(T)$ 线性。永不收敛,每步固定概率 $\varepsilon/|A|$ 选次优,累计 $\sim \varepsilon\cdot\text{gap}\cdot T$,与 $T$ 同阶——**线性后悔意味着算法永远在犯错**。
+
+> ⚠️ **从 bandit 到 MDP,界会变弱**。上面 $O(\log T)$ 是单步 bandit(1 状态、多动作)的界。完整 MDP 多步控制里,每步的 $Q$ 估值误差会沿轨迹**累积传播**(Sutton & Barto §2.7, Singh & Sutton 1996 [2]):即使每步估值误差 $O(1/\sqrt{k})$,经 $H$ 步轨迹累积可达 $O(\sqrt{H/k})$,使 GLIE MC 控制的通用后悔界放宽到 $R_T = O(\sqrt{T})$。也就是说:**$1/k$ 退火在 bandit 上对数最优,在多步 MDP 上只保证根号级**——多步信用分配比单步探索更难,这是 MDP 比老虎机本质更难的量化体现。
+
+<CodeRunner defaultCode={`# GLIE 退火 schedule 决定后悔阶: 1/k (log T) vs 1/sqrt(k) (sqrt T) vs 固定 (线性)
+import numpy as np
+# 4 臂 bandit: arm 0 最优 (mean=1), 次优 gap 0.3/0.5/0.8
+gaps = np.array([0.0, 0.3, 0.5, 0.8])
+means = 1.0 - gaps
+def bandit_regret(T, eps_fn, seed=0):
+    rng = np.random.default_rng(seed)
+    Q = np.zeros(4); N = np.zeros(4); regret = 0.0
+    for k in range(1, T+1):
+        eps = eps_fn(k)
+        a = int(rng.integers(4)) if rng.random() < eps else int(np.argmax(Q))
+        r = means[a] + rng.normal(0, 0.1)
+        N[a] += 1; Q[a] += (r - Q[a]) / N[a]
+        regret += (means[0] - means[a])
+    return regret
+T = 100000
+print(f"=== bandit (4 臂) T={T} 10 seed 均值 ===")
+for label, fn in [("1/k (GLIE)", lambda k: 1.0/k),
+                  ("1/sqrt(k) ", lambda k: 1.0/np.sqrt(k)),
+                  ("固定 0.1  ", lambda k: 0.1)]:
+    regs = np.array([bandit_regret(T, fn, seed=s) for s in range(10)])
+    r = regs.mean()
+    print(f"  eps={label}: R_T={r:8.1f}  R_T/log(T)={r/np.log(T):7.3f}  R_T/sqrt(T)={r/np.sqrt(T):7.3f}  R_T/T={r/T:.4f}")
+print()
+print("=== 标度幂律 (log R vs log T 斜率 = T 的指数, 0=对数 0.5=根号 1=线性) ===")
+ts = np.array([100, 1000, 10000, 100000])
+for label, fn in [("1/k", lambda k: 1.0/k), ("1/sqrt(k)", lambda k: 1.0/np.sqrt(k)), ("固定0.1", lambda k: 0.1)]:
+    regs = np.array([[bandit_regret(t, fn, seed=s) for s in range(10)] for t in ts])
+    mr = regs.mean(axis=1)
+    slope = np.polyfit(np.log(ts), np.log(mr), 1)[0]
+    print(f"  eps={label:10s}: 斜率={slope:.3f}  R at {ts.tolist()}: {np.round(mr,1).tolist()}")
+print()
+print("结论: 1/k GLIE -> O(log T) 斜率~0.2 匹配 Lai-Robbins 下界 (bandit 渐近最优)")
+print("      1/sqrt k -> O(sqrt T) 斜率~0.45 探索代价主导")
+print("      固定 eps -> O(T) 线性 斜率~1.0 不收敛永远犯错")
+print("      MDP 多步控制理论界更弱: O(sqrt T) (估值误差沿轨迹累积, 比 bandit 多 sqrt 因子)")
+`} title="GLIE 退火 schedule 决定后悔阶" />
+
+跑完看三点:① **$\varepsilon=1/k$** 斜率最低($\approx 0.2$,近对数级),10 万步 $R_T\approx 85$——锁定最优后只剩 $\log T$ 级探索代价,匹配 Lai-Robbins 下界;② **$\varepsilon=1/\sqrt{k}$** 斜率 $\approx 0.45$(根号级),$R_T\approx 255$ 比 $1/k$ 多 3 倍,探索衰减太慢的代价;③ **固定 $\varepsilon=0.1$** 斜率 $\approx 1.0$(线性),$R_T\approx 3982$ 与 $T$ 同阶——每步固定概率犯错,永不收敛。这三层标度把「GLIE 不仅保证收敛,还保证收敛速度有界」量化出来:$1/k$ 是 bandit 上的最优 schedule,多步 MDP 退到 $O(\sqrt{T})$。
+
+> 💡 **与 Lai-Robbins 下界的对照**:[多臂老虎机篇](/tutorials/multi-armed-bandit)讲过 Lai-Robbins 1985 证明任何一致 bandit 算法的累积后悔下界为 $\Omega(\log T)$——$\varepsilon=1/k$ 的 GLIE 在 bandit 上**匹配**这个下界(渐近最优)。但迁移到多步 MDP,下界本身也升高到 $\Omega(\sqrt{T})$(因信用分配比单步探索更难),GLIE MC 控制在 MDP 上匹配 $\sqrt{T}$ 下界。所以「$1/k$ 退火」不是随便选的——它是 bandit 上的最优 schedule,迁到 MDP 仍匹配 MDP 的(更弱的)下界,这条 schedule 跨设置都是「恰好的探索-利用平衡」。
+
+## 从预测到控制:缺了什么?
+
+光会估 $Q$ 还不够。要做控制(找最优策略),得保证**每个 $(s,a)$ 都被充分采样到**——否则你不知道的 $(s,a)$ 估值永远停留在初始值,贪心策略永远不选它,**永远学不到它**。这就是 MC 控制的核心难题:**探索**。
+
+两条经典出路:
+
+1. **探索性起点(Exploring Starts, ES)**:强制让回合**从一个随机的 $(s,a)$ 起步**,保证每个 pair 都有非零概率被尝试。理论优雅,但现实里往往做不到(你没法让自动驾驶「从任意事故状态起步」)。
+2. **$\varepsilon$-软策略(ε-soft / on-policy)**:不靠起点、靠**策略本身**保证探索——以 $\varepsilon$ 概率随机乱走、$1-\varepsilon$ 概率贪心。这是更实用的方案,也是下面实现的路子。
+
+### On-policy MC 控制:ε-软 + 首次访问
+
+算法骨架(广义策略迭代 GPI 的 MC 版):
+
+1. 用当前 $\varepsilon$-贪心策略生成一条完整回合;
+2. 对每个**首次访问**的 $(s,a)$,用回报 $G_t$ 更新 $Q(s,a)$;
+3. 对每个状态 $s$,把策略改成关于 $Q$ 的 $\varepsilon$-贪心;
+4. 重复。
+
+**关键定理**:在 $\varepsilon$-软策略类里,这样得到的 $\pi$ 是**ε-最优**的——因为贪心提升对 ε-软策略是单调的,直到收敛。把 $\varepsilon$ 慢慢退火到 0,就逼近真正的最优。
+
+下面在 4×4 网格里跑 on-policy MC 控制:起点 0,目标 15,三个坑要绕开。看它**不靠任何模型、纯靠回合经验**摸出避坑到目标的最短路:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(3)
+
+ROWS, COLS = 4, 4
+GOAL = 15
+PITS = {5, 6, 9}
+nS, nA = 16, 4        # 动作 0=上 1=右 2=下 3=左
+
+def step(s, a):
+    r, c = divmod(s, COLS)
+    if a == 0 and r > 0: r -= 1
+    elif a == 1 and c < COLS-1: c += 1
+    elif a == 2 and r < ROWS-1: r += 1
+    elif a == 3 and c > 0: c -= 1
+    ns = r*COLS + c
+    if ns == GOAL: return ns, 1.0, True       # 到目标 +1
+    if ns in PITS: return ns, -1.0, True      # 掉坑 -1
+    return ns, 0.0, False
+
+Q = np.zeros((nS, nA))
+returns_sum = np.zeros((nS, nA))
+returns_cnt = np.zeros((nS, nA))
+gamma, epsilon = 0.95, 0.3
+
+def policy(s):
+    if rng.random() < epsilon:                 # ε 概率探索
+        return rng.integers(nA)
+    return int(np.argmax(Q[s]))                # 1-ε 贪心
+
+for ep in range(8000):
+    s, traj, done, steps = 0, [], False, 0
+    while not done and steps < 100:            # 生成完整回合
+        a = policy(s)
+        ns, r, done = step(s, a)
+        traj.append((s, a, r))
+        s, steps = ns, steps + 1
+    G = 0.0
+    visited = set()
+    for (s_t, a_t, r_t) in reversed(traj):     # 反向算 G
+        G = gamma * G + r_t
+        if (s_t, a_t) not in visited:          # 首次访问
+            returns_sum[s_t, a_t] += G
+            returns_cnt[s_t, a_t] += 1
+            Q[s_t, a_t] = returns_sum[s_t, a_t] / returns_cnt[s_t, a_t]
+            visited.add((s_t, a_t))
+
+pi = np.argmax(Q, axis=1)                       # 抽出贪心策略
+s, path, total = 0, [0], 0.0
+for _ in range(20):                             # 走一遍验收
+    if s in PITS or s == GOAL: break
+    ns, r, done = step(s, pi[s])
+    path.append(ns); total += r; s = ns
+    if done: break
+arrows = ['↑', '→', '↓', '←']
+print("贪心策略路径:", path)
+print("总奖励:", total, "到达目标" if s == GOAL else "失败")
+print("\\n策略图(G=目标, X=坑):")
+for r in range(ROWS):
+    row = []
+    for c in range(COLS):
+        ss = r*COLS + c
+        row.append('G' if ss == GOAL else ('X' if ss in PITS else arrows[pi[ss]]))
+    print(' '.join(f'{x:>2}' for x in row))
+print("-> 完全不知道转移概率,纯靠回合经验,就摸出了绕坑到目标的路")
+`} />
+
+注意它绕开了中间的三个坑,沿左下边缘走 `[0,4,8,12,13,14,15]`——和[动态规划](/tutorials/dynamic-programming)篇的精确解**路径一致**,但 MC 从头到尾没看过一眼转移概率。
+
+## Off-policy:用别人的经验学自己的策略
+
+on-policy 有个尴尬:**为了探索,你必须用 $\varepsilon$-贪心策略跑数据**,可你真正想要的是**贪心(确定性)策略**——学和用不是同一个。能不能用「乱走的策略 $b$」生成数据,却学出「贪心的 $\pi$」?这就是 **off-policy**。它比 on-policy 更灵活(可以从旧数据、人类示范、任意探索策略里学),代价是要解决一个根本难题:**两条策略在同一轨迹上的概率不同,直接拿 $b$ 的回报平均会得到 $V^b$ 而非 $V^\pi$**。
+
+桥梁是**重要性采样(Importance Sampling, IS)**。下面把 IS 完整展开——这是 off-policy MC 的全部精髓,也是理解「为什么 off-policy+MC 不流行而 off-policy+TD(DQN)如鱼得水」的钥匙。
+
+### 第 1 步:重要性采样比率 $\rho$——轨迹概率比的连乘
+
+目标策略 $\pi$ 与行为策略 $b$ 在同一轨迹 $S_t,A_t,S_{t+1},A_{t+1},\dots,S_T$ 上的概率比定义为:
+
+$$
+\rho_{t:T-1} \;=\; \prod_{k=t}^{T-1} \frac{\pi(A_k\mid S_k)}{b(A_k\mid S_k)}
+$$
+
+**为什么是连乘?** 一条轨迹的联合概率是各步转移概率与动作概率的乘积(马尔可夫性):
+
+$$
+\Pr(\text{轨迹}\mid\pi) \;=\; \prod_{k=t}^{T-1} \pi(A_k\mid S_k)\,p(S_{k+1}\mid S_k,A_k)
+$$
+
+两策略的轨迹概率比 $\Pr(\text{轨迹}\mid\pi)/\Pr(\text{轨迹}\mid b)$ 里,**转移概率 $p(S_{k+1}\mid S_k,A_k)$ 是环境给的两策略相同、约掉了**,只剩动作概率比的连乘——这就是 $\rho$。直觉:$\rho$ 量度「这条 $b$ 跑出来的轨迹,在 $\pi$ 下有多 likely」:每一步 $\pi$ 越「赞同」$b$ 的选择,$\rho$ 越大;某步 $\pi$ 根本不会选($\pi(a\mid s)=0$)而 $b$ 选了,$\rho=0$——这条轨迹对 $\pi$ 毫无信息。
+
+### 第 2 步:普通 IS——无偏但方差可无限
+
+**普通重要性采样(ordinary / simple IS)** 直接对 $\rho\cdot G_t$ 求均值:
+
+$$
+Q(s,a) \;=\; \mathbb{E}_{b}[\rho_{t:T-1}\,G_t \mid S_t=s, A_t=a] \;\approx\; \frac{1}{N(s,a)}\sum_{i=1}^{N(s,a)} \rho^{(i)}_{t:T-1}\,G^{(i)}_t
+$$
+
+**无偏性**证明一行:$\mathbb{E}_b[\rho\,G_t] = \sum_{\text{轨迹}}\Pr(\text{轨迹}\mid b)\,\frac{\Pr(\text{轨迹}\mid\pi)}{\Pr(\text{轨迹}\mid b)}\,G_t = \sum_{\text{轨迹}}\Pr(\text{轨迹}\mid\pi)\,G_t = \mathbb{E}_\pi[G_t] = Q^\pi(s,a)$。$\rho$ 正好把 $b$ 的概率权重换成 $\pi$ 的。
+
+**致命伤是方差**。$\rho$ 是 $T-t$ 个比值的连乘,长轨迹下其方差随步数**指数爆炸**:若 $\pi$ 与 $b$ 每步概率差 2 倍,一条 20 步轨迹的 $\rho$ 可达 $2^{20}\approx10^6$ 或 $2^{-20}\approx10^{-6}$。极端情况(如 $\pi$ 确定性、$b$ 随机)**方差无有限上界**——ordinary IS 的估计量虽无偏,但单次样本可能巨大、收敛极慢。下面玩具把这一点跑出来:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(42)
+
+# 5 状态链 s0..s4, 目标 s4 奖励 +1, gamma=1
+# 行为策略 b: 每步向左/向右各 0.5 (均匀随机游走, 撞 s0 留原地)
+# 目标策略 pi: 永远向右 (确定性贪心)
+def episode(rng):
+    s = 0; acts = []
+    while s < 4 and len(acts) < 50:
+        a = 1 if rng.random() < 0.5 else -1   # b 均匀
+        acts.append(a); s = max(0, s + a)
+    G = 1.0 if s == 4 else 0.0
+    rho = 1.0
+    for a in acts:
+        rho *= (1.0/0.5) if a == 1 else 0.0    # pi(right)=1/b=0.5 -> 2; pi(left)=0 -> 0
+    return rho, G
+
+N = 5000
+samples = np.array([episode(rng) for _ in range(N)])
+rhos, Gs = samples[:, 0], samples[:, 1]
+
+trueV = 1.0   # pi 永远向右, 4 步必到 s4 拿 +1
+ord_IS = np.mean(rhos * Gs)
+wIS = np.sum(rhos * Gs) / np.sum(rhos) if np.sum(rhos) > 0 else 0
+nz = rhos > 0
+print(f"真值 V^pi(s0) = {trueV}  (pi 永远向右, 4 步到 s4)")
+print(f"普通 IS 估计 = {ord_IS:.4f}   (无偏: 期望=真值)")
+print(f"加权 IS 估计 = {wIS:.4f}   (有偏但方差有界, 这里恰为真值)")
+print(f"普通 IS 样本方差 = {np.var(rhos * Gs):.4e}   (爆炸: rho=2^L 连乘)")
+print(f"非零 rho (全向右) 轨迹占比 = {np.mean(nz):.4f}   (稀少!)")
+print(f"非零 rho 值 = 2^(轨迹长), 范围 {rhos[nz].min():.0f}..{rhos[nz].max():.0f}")
+print("-> 普通 IS 无偏但方差爆炸 (2^L); 加权 IS 方差有界 -> 实际首选")
+`} />
+
+> 💡 **看图要点**:普通 IS 估计 0.94 接近真值 1.0(无偏),但样本方差高达 14.2——因为 $\rho=2^L$ 连乘,只有 5.9% 的轨迹(全向右)有非零 $\rho$ 且其值达 $2^4=16$。加权 IS 估计 1.0000(有偏但这里恰为真值,因非零 $\rho$ 轨迹 $G$ 全为 1),方差有界。**这就是「无偏但方差无限」的直观含义:少数 $\rho$ 巨大的样本主导均值、抖动极大**。
+
+### 第 3 步:加权 IS——有偏但方差有界
+
+**加权重要性采样(weighted IS)** 把「算术均值」换成「按 $\rho$ 加权的比值」:
+
+$$
+Q(s,a) \;=\; \frac{\sum_{i=1}^{N(s,a)} \rho^{(i)}_{t:T-1}\,G^{(i)}_t}{\sum_{i=1}^{N(s,a)} \rho^{(i)}_{t:T-1}}
+$$
+
+它**有偏**(分母是随机变量 $\sum\rho$,比值估计量一般有偏),但有两个压倒性优点:① **方差有界**——$\rho\cdot G/\sum\rho$ 恒在 $G$ 的取值范围内($\rho$ 在分子分母同时出现、约掉极端值),不再有 ordinary IS 的指数爆炸;② **一致**——样本量趋于无穷时,$\sum\rho\,G/\sum\rho \to \mathbb{E}_b[\rho G]/\mathbb{E}_b[\rho] = Q^\pi(s,a)/1 = Q^\pi(s,a)$,收敛到真值。实践中 **weighted IS 几乎总是首选**(Sutton & Barto §5.5)。
+
+下面这个组件把普通 IS 与加权 IS 摆在一起对比。上图是每条轨迹的重要性权重 $\rho$(红=巨大权重),下图是两种估计随轨迹数的运行轨迹。**拖动下方时间轴**回看任意「已用前 $k$ 条轨迹」时的估计状态,再调「策略差异度」看长尾如何形成:
+
+<ImportanceSamplingViz />
+
+> 💡 **看点**:把差异度 (gap) 调大,你会看到上图偶尔冒出一根**红色巨柱**——某条轨迹的 $\rho$ 连乘出了极大值。下图里,**普通 IS(蓝)** 会在那一刻被猛地拽偏(这就是「方差可无限」的样子:一条轨迹就能主导整个平均),而 **加权 IS(绿)** 因为分母 $\sum\rho$ 同步变大做了归一化,稳稳贴着真值——代价是它有偏。拖时间轴逐条回看,能清楚定位「是哪条轨迹把普通 IS 带崩的」。
+
+### 第 4 步:增量加权 IS——不必存所有回报
+
+朴素加权 IS 要存所有历史的 $\rho^{(i)},G^{(i)}$ 才能算比值,内存爆。**增量实现**让它流式更新(Sutton & Barto §5.6):设 $C_n=\sum_{i=1}^n\rho^{(i)}$,则
+
+$$
+V_{n+1} = V_n + \frac{W_n}{C_n}\,(G_n - V_n), \qquad C_{n+1} = C_n + W_n
+$$
+
+其中 $W_n=\rho^{(i)}_{t:T-1}$ 是新样本的 IS 比率。推导:加权均值 $V_n=\sum_{i\le n}\rho^{(i)}G^{(i)}/C_n$,加入第 $n+1$ 个样本后 $V_{n+1}=\frac{C_n V_n + W_{n+1}G_{n+1}}{C_n+W_{n+1}}=V_n+\frac{W_{n+1}}{C_{n+1}}(G_{n+1}-V_n)$。这样每来一条轨迹只需 $O(1)$ 更新。下面玩具验证增量与批处理**逐位一致**:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(7)
+
+def episode(rng):
+    s = 0; acts = []
+    while s < 4 and len(acts) < 50:
+        a = 1 if rng.random() < 0.5 else -1
+        acts.append(a); s = max(0, s + a)
+    G = 1.0 if s == 4 else 0.0
+    rho = 1.0
+    for a in acts:
+        rho *= (1.0/0.5) if a == 1 else 0.0
+    return rho, G
+
+# 增量加权 IS
+V, C = 0.0, 0.0
+N = 3000
+for _ in range(N):
+    rho, G = episode(rng)
+    C += rho
+    if C > 0:
+        V = V + rho / C * (G - V)
+
+# 批处理加权 IS (同种子)
+rng2 = np.random.default_rng(7)
+samples = np.array([episode(rng2) for _ in range(N)])
+rhos, Gs = samples[:, 0], samples[:, 1]
+batch = np.sum(rhos * Gs) / np.sum(rhos) if np.sum(rhos) > 0 else 0
+
+print(f"增量加权 IS: V = {V:.6f}")
+print(f"批处理加权 IS: V = {batch:.6f}")
+print(f"两者一致: {abs(V - batch) < 1e-9}")
+print(f"真值 = 1.0  (增量法只需 O(1) 内存, 与批处理逐位一致)")
+`} />
+
+### 第 5 步:折扣感知 IS——对 $\gamma<1$ 的更优估计
+
+上面所有公式默认 $\gamma=1$(无折扣回报)。当 $\gamma<1$ 时有个更精细的变体——**折扣感知重要性采样(discounting-aware IS, Sutton & Barto §5.7)**:它把回报按折扣拆成分部和 $\sum_{k=t}^{T-1}\gamma^{k-t}\,r_{k+1}$,对每个部分项用**截断比率** $\rho_{t:k}$ (而非全长 $\rho_{t:T-1}$)校正——因为第 $k$ 步的奖励只依赖前 $k-t+1$ 个动作,用更短的比值方差更小。这把「长轨迹大 $\rho$」拆成「短窗口小 $\rho$」的加权和,在不引入偏差的前提下显著降方差。它是 ordinary/weighted IS 的进阶优化,在 $\gamma$ 远小于 1 时收益最大。
+
+### 第 6 步:为什么 off-policy+MC 不流行,而 off-policy+TD(DQN)如鱼得水
+
+off-policy MC 的 IS 比率 $\rho$ 是**整条轨迹的连乘**,方差随回合长度爆炸——这是 off-policy+MC 在深度 RL 里几乎绝迹的原因。对比 [DQN](/tutorials/dqn) 的 off-policy:
+
+| 维度 | off-policy MC | off-policy TD(DQN) |
+|---|---|---|
+| 更新目标 | $G_t$(整条轨迹回报) | $r+\gamma\max_{a'}Q(s',a')$(一步) |
+| IS 比率 | $\prod_{k=t}^{T-1}\pi/b$ **连乘** → 方差爆炸 | $\pi(a_t\mid s_t)/b(a_t\mid s_t)$ **单步** → 可吸收 |
+| 需要 IS? | **必须**(整条轨迹概率比) | **不必**(TD 目标只一步,$\pi/b$ 在 max 里被吸收) |
+| 经验回放 | 受限($\rho$ 对旧策略爆炸) | **如鱼得水**(单步比值可忽略) |
+
+**关键洞见**:Q-learning 更新 $r+\gamma\max_{a'}Q(s',a')$ 里的 max 已经隐含了「按贪心 $\pi$ 选 $a'$」,而行为策略 $b$ 只负责选出 $a_t$ 产生这步转移——**TD 只需一步比值且常被 max 吸收**,所以 off-policy+经验回放在 TD 家族(DQN)里无方差点,在 MC 里却要扛整条轨迹的 $\rho$ 连乘。这就是为什么 DQN 能大规模用经验回放、而 off-policy MC 不能。
+
+## Per-decision 视角:把整轨迹比率拆成每步加权
+
+第 6 步点出 off-policy MC 的病根是「整条轨迹连乘 $\rho_{0:T-1}$ 方差随回合长度爆炸」。但有个**结构性降方差**的办法:不要把整条轨迹当成一个整体乘一个全长比率,而是**把回报拆成每一步的奖励,每步只用截止到该步的短前缀比率 $\rho_{0:t}$ 加权**。这就是 **per-decision importance sampling(PDIS)**[3][5]。它和折扣感知 IS(第 5 步)是同一思想的两个方向——折扣感知 IS 利用「奖励只依赖前若干步」截断比率降方差,PDIS 把这个想法推到极致:**每个奖励 $r_t$ 用其自身的因果前缀 $\rho_{0:t}$ 加权**,而不是全长 $\rho_{0:T-1}$。
+
+### 普通 IS 到 PDIS:把一个连乘拆成 $T$ 个短连乘
+
+回顾 trajectory-level ordinary IS(第 2 步):对一条轨迹 $\tau=(s_0,a_0,r_1,\dots,s_{T-1},a_{T-1},r_T)$,
+
+$$V_\text{IS}=\frac1N\sum_{i=1}^N \rho_{0:T-1}^{(i)}\,G^{(i)},\qquad G^{(i)}=\sum_{t=0}^{T-1}\gamma^t r_{t+1}^{(i)}$$
+
+这里 $\rho_{0:T-1}=\prod_{k=0}^{T-1}\pi(a_k\mid s_k)/b(a_k\mid s_k)$ 是**全长连乘**,把整条轨迹的概率比压成一个标量。问题是:第 $t$ 步的奖励 $r_{t+1}$ 在概率上**只依赖前 $t+1$ 个动作**$(a_0,\dots,a_t)$,与后续动作 $(a_{t+1},\dots,a_{T-1})$ 无关——可 ordinary IS 却用全长 $\rho_{0:T-1}$(含那些无关动作)去乘 $r_{t+1}$,白白把无关噪声塞进估计,方差被这些「与 $r_{t+1}$ 无关的后续动作比」放大。
+
+**PDIS 的修法**:把 $G$ 拆开,第 $t$ 项 $\gamma^t r_{t+1}$ 只用**截断到第 $t$ 步的前缀** $\rho_{0:t}=\prod_{k=0}^{t}\pi(a_k\mid s_k)/b(a_k\mid s_k)$ 加权:
+
+$$\boxed{V_\text{PDIS}=\frac1N\sum_{i=1}^N\sum_{t=0}^{T-1}\gamma^t\,\rho_{0:t}^{(i)}\,r_{t+1}^{(i)}}$$
+
+直观对比:
+
+| 估计器 | 第 $t$ 步奖励的加权比率 | 比率长度 | 方差 |
+|---|---|---|---|
+| ordinary IS | $\rho_{0:T-1}$(全长) | $T$ 步连乘 | 随 $T$ 指数爆炸 |
+| PDIS | $\rho_{0:t}$(截断到 $t$) | $t+1$ 步连乘 | 远低于 ordinary |
+
+**为何无偏?** PDIS 仍是 ordinary IS 的恒等变形——把 $\rho_{0:T-1}\cdot G=\rho_{0:T-1}\sum_t\gamma^t r_{t+1}$ 改写成 $\sum_t\gamma^t\rho_{0:t}\cdot(\rho_{t+1:T-1}r_{t+1})$ 后,对 $\rho_{t+1:T-1}$ 取期望得 1(后续动作比与 $r_{t+1}$ 独立,且 $\mathbb E_b[\pi/b]=1$),剩下 $\sum_t\gamma^t\rho_{0:t}r_{t+1}$,取期望即 $\mathbb E_\pi[G]$。所以 **PDIS 与 ordinary IS 同为无偏估计,但方差严格更低**——短前缀 $\rho_{0:t}$ 方差远小于全长 $\rho_{0:T-1}$。
+
+### 加权 PDIS:再叠一层自归一化
+
+把 PDIS 的「每步短前缀」思想套到 weighted IS(第 3 步)的「自归一化」上,得到 **per-decision weighted IS(PDWIS)**:
+
+$$V_\text{PDWIS}=\sum_{i=1}^N\sum_{t=0}^{T-1}\gamma^t\,\frac{\rho_{0:t}^{(i)}}{w_{0:t}}\,r_{t+1}^{(i)},\qquad w_{0:t}=\sum_{j=1}^N\rho_{0:t}^{(j)}$$
+
+每步用当步的归一化常数 $w_{0:t}=\sum_j\rho_{0:t}^{(j)}$ 自归一化(而非整条轨迹共用一个 $w=\sum_j\rho_{0:T-1}^{(j)}$)。它有偏(自归一化引入偏差)但方差最低——既享受 PDIS 短前缀的方差优势,又享受 weighted IS 归一化的有界性。
+
+### Curse of horizon:方差爆炸的量化
+
+off-policy MC 的方差为什么随回合长度 $T$ 指数爆炸?可量化为两个因子的乘积[5]:
+
+$$(\underbrace{\sup_{s,a}\pi(a\mid s)/b(a\mid s)}_{\text{策略分歧}})^T \;\times\; \underbrace{\text{回合结构}}_{\text{horizon}}$$
+
+- **策略分歧** $\sup_{s,a}\pi/b$:target 与 behavior 差得越远,单步比率越大;确定性 $\pi$ 配上 $b$ 给某动作小概率时,单步比 $\pi/b$ 可以非常大。
+- **horizon $T$**:比率是 $T$ 个单步比的**连乘**,若每步 $\pi/b>1$,乘积随 $T$ 指数增长。
+
+两因子**乘积**决定方差爆炸速度——这就是 **curse of horizon(地平线诅咒)**:ordinary IS 在长回合上方差无有限上界。PDIS 把全长连乘拆成每步短前缀,**斩断了「后续无关动作比」对早期奖励的方差污染**,所以方差随 $T$ 增长远缓于 ordinary(虽仍是指数,但底数更小)。下面用数值印证。
+
+### 可运行示例:PDIS vs ordinary,方差与 curse of horizon
+
+下面玩一个长度 $H=8$ 的回合:每步两个动作 L/R,behavior $b(\text{R})=0.7/b(\text{L})=0.3$,target $\pi_e$ 是**确定性走 R**;每步奖励 $r\sim\mathcal N(+1,0.5)$(走 R)或 $\mathcal N(-1,0.5)$(走 L),$\gamma=1$。真值 $V_{\pi_e}=H\cdot 1=8$。$\sup\pi_e/b=1/0.7\approx1.43$,故 $(\sup)^H=1.43^8\approx17.3$——curse of horizon 已显形。
+
+<CodeRunner defaultCode={`import numpy as np
+
+rng = np.random.default_rng(0)
+
+# 玩具: H 步回合, behavior b(R)=0.7, target pi_e=确定性 R
+# 每步 r ~ N(+1, 0.5) 若 R else N(-1, 0.5); gamma=1; 真值 V = H*1
+H = 8
+N = 40000
+gamma = 1.0
+b_R = 0.7
+pi_e_R = 1.0   # 确定性 target
+
+def step_reward(a_is_R):
+    return rng.normal(1.0 if a_is_R else -1.0, 0.5)
+
+def rho_prefix(acts, k):
+    # prod_{t=0}^{k-1} pi_e(a_t)/b(a_t); pi_e(R)=1, pi_e(L)=0
+    r = 1.0
+    for t in range(k):
+        if acts[t] == 'L':
+            return 0.0
+        r *= pi_e_R / b_R
+    return r
+
+V_true = H * 1.0
+sup_ratio = 1.0 / b_R
+print("=== 【1】玩具设定 + curse of horizon 量化 ===")
+print(f"  H={H}, N={N}, gamma={gamma}, target=确定性 R, b(R)={b_R}")
+print(f"  真值 V_pi_e = H*E[r|R] = {V_true:.4f}")
+print(f"  sup pi_e/b = 1/{b_R} = {sup_ratio:.4f}")
+print(f"  curse of horizon: (sup)^H = {sup_ratio**H:.4f}")
+print()
+
+# 采样 N 个回合
+episodes = []
+for _ in range(N):
+    acts, rews = [], []
+    for _ in range(H):
+        a = 'R' if rng.random() < b_R else 'L'
+        acts.append(a); rews.append(step_reward(a == 'R'))
+    episodes.append((acts, rews))
+
+# 【2】ordinary IS: V_IS = (1/N) sum rho_{0:H} * G
+ois = np.zeros(N)
+for i, (acts, rews) in enumerate(episodes):
+    rho = rho_prefix(acts, H)
+    G = sum(gamma**t * rews[t] for t in range(H))
+    ois[i] = rho * G
+print("=== 【2】trajectory-level ordinary IS  V_IS = (1/N) sum rho_{0:H} * G ===")
+print(f"  V_IS = {ois.mean():.4f}  (无偏, 真值 {V_true:.4f})")
+print(f"  样本方差 = {ois.var():.4f}  (rho 连乘 {H} 步, 方差爆炸)")
+nz = int(np.sum(ois != 0))
+print(f"  非零样本 {nz}/{N} = {nz/N*100:.2f}%  (target 确定性, b 走 L 的回合 rho=0)")
+print()
+
+# 【3】PDIS: V_PDIS = (1/N) sum_i sum_t rho_{0:t} * r_t
+pdis = np.zeros(N)
+for i, (acts, rews) in enumerate(episodes):
+    s = 0.0
+    for t in range(H):
+        s += gamma**t * rho_prefix(acts, t+1) * rews[t]
+    pdis[i] = s
+print("=== 【3】per-decision IS  V_PDIS = (1/N) sum_i sum_t rho_{0:t} * r_t ===")
+print(f"  V_PDIS = {pdis.mean():.4f}  (无偏, 真值 {V_true:.4f})")
+print(f"  样本方差 = {pdis.var():.4f}  (每步短前缀 rho_{{0:1}}..rho_{{0:{H}}}, < ordinary)")
+print(f"  方差比 PDIS/ordinary = {pdis.var()/ois.var():.4f}  (per-decision 降方差)")
+print()
+
+# 【4】PDWIS: sum_i sum_t (rho_{0:t}/w_{0:t}) * r_t,  每步自归一化
+rho_mat = np.zeros((N, H)); rews_mat = np.zeros((N, H))
+for i, (acts, rews) in enumerate(episodes):
+    for t in range(H):
+        rho_mat[i, t] = rho_prefix(acts, t+1)
+        rews_mat[i, t] = rews[t]
+w_mat = rho_mat.sum(axis=0)
+V_pdwis = 0.0
+for i in range(N):
+    for t in range(H):
+        if w_mat[t] > 0:
+            V_pdwis += gamma**t * (rho_mat[i, t] / w_mat[t]) * rews_mat[i, t]
+print("=== 【4】per-decision weighted IS  V_PDWIS = sum_i sum_t (rho_{0:t}/w_{0:t}) * r_t ===")
+print(f"  V_PDWIS = {V_pdwis:.4f}  (有偏但方差最低, 每步自归一化)")
+print(f"  每步 sum_i rho_{{0:t}}/w_{{0:t}} = 1  (per-step self-normalized)")
+print()
+
+# 【5】四种估计对照
+print("=== 【5】四种 IS 估计方差/偏差对照 ===")
+print(f"  {'估计器':>14} {'估计值':>10} {'样本方差':>14} {'偏差':>10} {'性质':>28}")
+print(f"  {'ordinary IS':>14} {ois.mean():>10.4f} {ois.var():>14.4f} {ois.mean()-V_true:>10.4f} {'无偏 / 方差无界':>28}")
+print(f"  {'PDIS':>14} {pdis.mean():>10.4f} {pdis.var():>14.4f} {pdis.mean()-V_true:>10.4f} {'无偏 / per-decision 降方差':>28}")
+print(f"  {'PDWIS':>14} {V_pdwis:>10.4f} {'(最低)':>14} {V_pdwis-V_true:>10.4f} {'有偏 / per-step 自归一化':>28}")
+print("  降方差排序: ordinary(最高) > PDIS > PDWIS(最低)")
+print()
+
+# 【6】curse of horizon: 不同 H 下 ordinary vs PDIS 方差
+print("=== 【6】curse of horizon: H 增大时 ordinary vs PDIS 方差爆炸 ===")
+print(f"  {'H':>4} {'(sup)^H':>12} {'var_ordinary':>16} {'var_PDIS':>16} {'比值 ord/PDIS':>14}")
+for Hh in [4, 6, 8, 10, 12]:
+    o = np.zeros(N); p = np.zeros(N)
+    for i in range(N):
+        acts, rews = [], []
+        for _ in range(Hh):
+            a = 'R' if rng.random() < b_R else 'L'
+            acts.append(a); rews.append(step_reward(a == 'R'))
+        G = sum(gamma**t * rews[t] for t in range(Hh))
+        o[i] = rho_prefix(acts, Hh) * G
+        s = 0.0
+        for t in range(Hh):
+            s += gamma**t * rho_prefix(acts, t+1) * rews[t]
+        p[i] = s
+    print(f"  {Hh:>4} {sup_ratio**Hh:>12.4f} {o.var():>16.4f} {p.var():>16.4f} {o.var()/p.var():>14.4f}")
+print("  -> (sup)^H 指数增长; ordinary 方差随 H 指数爆炸; PDIS 每步短前缀, 方差增长远缓于 ordinary.")
+`} title="PDIS vs ordinary IS: per-decision 降方差 + curse of horizon 数值印证" />
+
+**读数要点**:
+
+- **PDIS 方差 ≈ ordinary 的 1/5**(202 vs 1049):同样是「确定性 target、行为策略只有 5.6% 非零样本」的极端设定,PDIS 仅靠「把整轨迹长连乘拆成每步短前缀」就把方差压下一个量级,**且保持无偏**。
+- **PDWIS 估计值 8.03 ≈ 真值 8**:有偏但偏差极小,每步自归一化让它方差最低——实务里 PDIS/PDWIS 是 off-policy MC 评估的首选,而非原始 ordinary IS。
+- **curse of horizon 表**:$H$ 从 4→12,ordinary 方差 55→10436(~190 倍),PDIS 方差 20→1147(~57 倍);**比值 ordinary/PDIS 从 2.8 涨到 9.1**——回合越长,PDIS 相对 ordinary 的方差优势越大。这就是为什么 off-policy MC 在长回合上「方差无界」的量化根因,也是 PDIS 作为结构性降方差工具的价值所在。
+
+> 💡 **一句话**:ordinary IS 把整条轨迹当一个整体乘一个长连乘,PDIS 把它拆成每步各用短前缀——同样的信息,前者把「与该步奖励无关的后续动作比」当噪声塞进来,后者只留因果上必要的部分。这是 off-policy 评估里「**降方差不靠更多数据,只靠更聪明的加权结构**」的典范。
+
+## MC vs TD:一图看清
+
+蒙特卡洛和[时序差分](/tutorials/temporal-difference)都是免模型方法,差别全在「更新目标用什么」:
+
+| 维度 | 蒙特卡洛 MC | 时序差分 TD(0) |
+|---|---|---|
+| 更新目标 | $G_t$(整条回合的真实回报) | $r+\gamma V(s')$(一步 + 自举) |
+| 需要模型? | 不要 | 不要 |
+| 何时更新 | **回合结束后** | **每一步**(在线) |
+| 偏差 | **无偏** | 有偏(依赖 $V(s')$ 估计) |
+| 方差 | **高**(累积整条轨迹随机性) | 低(只有一步随机) |
+| 连续任务? | 不行(要回合边界) | 可以 |
+| 自举? | 不(不依赖其他估计) | 是 |
+
+TD 用「下一步的猜测」修正「这一步的猜测」,方差小但引入偏差;MC 用「真实整条回报」,无偏但抖。这正是[策略梯度篇 GAE](/tutorials/policy-gradient#常见问题-faq)里 $\lambda=1$(MC 端)与 $\lambda=0$(TD 端)的偏差–方差谱两端。
+
+### 同一 Blackjack 上跑 MC vs TD:偏差–方差权衡的实证
+
+上面表格把 MC 与 TD 的差别一条条列出,但「无偏高方差 vs 有偏低方差」到底长什么样?最直接的办法是在**同一个 Blackjack 环境**上把两种方法都跑一遍——S&B 在 Example 5.1(MC 预测)和 Example 6.1(TD 预测)正是这么做的。下面复用上一节的 Blackjack 环境,对三个代表性状态(高频/中频/稀疏)各跑 4000 回合、重复 8 次估均值与标准差,看 MC 与 TD 的表现差异 [1]。
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(7)
+
+# === Blackjack 环境 (S&B Example 5.1) ===
+def draw_card():
+    c = rng.integers(1, 14)
+    return min(c, 10)
+def usable_ace(hand):
+    s = sum(hand)
+    return 1 in hand and s + 10 <= 21
+def hand_sum(hand):
+    s = sum(hand)
+    return s + 10 if usable_ace(hand) else s
+def dealer_play(dealer_hand):
+    while hand_sum(dealer_hand) < 17:
+        dealer_hand.append(draw_card())
+    return hand_sum(dealer_hand)
+def play_episode():
+    player = [draw_card(), draw_card()]
+    dealer = [draw_card(), draw_card()]
+    while hand_sum(player) < 12:
+        player.append(draw_card())
+    trajectory = []
+    while True:
+        sp = hand_sum(player)
+        if sp > 21:
+            return trajectory, -1.0
+        up = dealer[0]
+        ua = usable_ace(player)
+        a = 'stick' if sp >= 20 else 'hit'
+        trajectory.append((sp, up, ua, a))
+        if a == 'stick':
+            break
+        player.append(draw_card())
+    dp = dealer_play(dealer)
+    sp = hand_sum(player)
+    if dp > 21:   return trajectory, +1.0
+    if sp > dp:   return trajectory, +1.0
+    if sp < dp:   return trajectory, -1.0
+    return trajectory, 0.0
+
+def sidx(sp, up, ua):
+    return (sp - 12) * 20 + (up - 1) * 2 + int(ua)
+N_S = 200
+
+# === first-visit MC 预测 ===
+def mc_predict(n_ep):
+    returns_sum = np.zeros(N_S)
+    returns_cnt = np.zeros(N_S)
+    for _ in range(n_ep):
+        traj, G = play_episode()
+        seen = set()
+        for (sp, up, ua, a) in traj:
+            si = sidx(sp, up, ua)
+            if si in seen:
+                continue
+            seen.add(si)
+            returns_sum[si] += G
+            returns_cnt[si] += 1
+    V = np.where(returns_cnt > 0, returns_sum / np.maximum(returns_cnt, 1), 0.0)
+    return V
+
+# === TD(0) 预测: 每步在线更新 V(s) <- V(s) + alpha (r + V(s') - V(s)), gamma=1 ===
+def td_predict(n_ep, alpha):
+    V = np.zeros(N_S)
+    for _ in range(n_ep):
+        traj, G = play_episode()
+        n = len(traj)
+        for i in range(n):
+            (sp, up, ua, a) = traj[i]
+            si = sidx(sp, up, ua)
+            if i < n - 1:
+                (sp2, up2, ua2, _) = traj[i + 1]
+                si2 = sidx(sp2, up2, ua2)
+                td_target = V[si2]
+            else:
+                td_target = G
+            V[si] += alpha * (td_target - V[si])
+    return V
+
+print("=== MC vs TD(0) 在同一 Blackjack 环境上 (S&B Example 5.1 / 6.1) ===")
+print("目标策略: stick on 20/21 else hit; 200 状态; gamma=1")
+print()
+
+# 近真值: 大量回合 MC
+V_truth = mc_predict(150000)
+print("近真值 first-visit MC (150000 回合)。")
+print()
+
+# 学习曲线对比: 少量回合训练, 重复多次估均值/std
+N_TRAIN = 4000
+N_TRIALS = 8
+probe = [(20, 10, False, "pl=20 dl=10 无A (高频)"),
+         (13, 7,  False, "pl=13 dl=7  无A (中频)"),
+         (15, 5,  True,  "pl=15 dl=5  有A (稀疏)")]
+
+mc_vals = [[] for _ in probe]
+td_vals = [[] for _ in probe]
+for t in range(N_TRIALS):
+    V_mc = mc_predict(N_TRAIN)
+    V_td = td_predict(N_TRAIN, alpha=0.02)
+    for i, (sp, up, ua, _) in enumerate(probe):
+        si = sidx(sp, up, ua)
+        mc_vals[i].append(V_mc[si])
+        td_vals[i].append(V_td[si])
+
+print(f"训练 {N_TRAIN} 回合, 重复 {N_TRIALS} 次估均值/标准差 (TD alpha=0.02)")
+print()
+print(f"{'状态':<26} {'MC 均值':>9} {'MC std':>8} {'TD 均值':>9} {'TD std':>8} {'近真值':>8}")
+for i, (sp, up, ua, label) in enumerate(probe):
+    truth = V_truth[sidx(sp, up, ua)]
+    mcm = float(np.mean(mc_vals[i])); mcs = float(np.std(mc_vals[i]))
+    tdm = float(np.mean(td_vals[i])); tds = float(np.std(td_vals[i]))
+    print(f"{label:<22} {mcm:>+9.3f} {mcs:>8.3f} {tdm:>+9.3f} {tds:>8.3f} {truth:>+8.3f}")
+print()
+print("读图要点:")
+print("- MC 均值贴真值(无偏), std 大(整条轨迹随机性累积); 稀疏状态(有A) std 尤其大")
+print("- TD 均值略偏(自举偏差), std 小(只一步随机); 稀疏状态 std 优势最显著")
+print("- 稀疏状态(pl=15 dl=5 有A) MC std >> TD std: 这正是 MC 让位 TD 的根因(上节点名)")
+print()
+print("=== 方差压缩比 (MC std / TD std) ===")
+for i, (sp, up, ua, label) in enumerate(probe):
+    mcs = float(np.std(mc_vals[i])); tds = float(np.std(td_vals[i]))
+    ratio = mcs / tds if tds > 0 else float('inf')
+    pct = tds / mcs * 100 if mcs > 0 else 0
+    print(f"  {label:<22} {ratio:>6.2f}x  (TD 方差 = MC 的 {pct:>5.1f}%)")
+`} title="Blackjack 上 MC vs TD(0):偏差–方差权衡 (S&B Example 5.1 / 6.1)" />
+
+读图三要点:
+
+1. **高频状态(pl=20 dl=10)**:MC 与 TD 都接近真值,方差也相近。状态访问次数多,MC 的大数定律充分、TD 的自举也稳,两法差距小——**TD 的方差优势在高频状态不明显**。
+2. **中频状态(pl=13 dl=7)**:MC 均值贴真值(无偏)但 std 大;TD 均值略偏(自举把相邻状态的偏差传染过来)但 std 只有 MC 的一半——**偏差–方差权衡的经典写照**:MC 用无偏换大方差,TD 用小偏差换小方差。
+3. **稀疏状态(pl=15 dl=5 有 A)**:MC 的 std 比 TD 大**几十倍**。起手有可用 A 的概率本就小,first-visit 样本极少,MC 估计剧烈抖动;TD 靠自举把相邻状态的估计借过来,即便本状态样本少也能稳住——**这正是上节末点名的「MC 在稀疏访问状态上让位于 TD」的根因**,在 Blackjack 上是 toy 规模的小麻烦,在真实大状态空间里就是 MC 让位于 TD 的结构性理由。
+
+> 💡 **一图记住**:MC「无偏但抖」,TD「略偏但稳」;状态越稀疏,TD 的方差优势越夸张。这也是为什么 Blackjack 虽是 MC 的 canonical case,S&B 在 TD 章节(Example 6.1)又用**同一个**环境演示 TD——同一个 toy,把两法的取舍看得一清二楚。
+
+## 典型案例:MC 在哪发光
+
+| 场景 | 蒙特卡洛的角色 |
+|---|---|
+| **围棋 AlphaGo 的策略评估** | 自我博弈产生完整对局,用 MC 思想平均棋局结果评估落子价值(MCTS) |
+| **二十一点 Blackjack** | 回合短、马尔可夫性天然成立,MC 控制是教科书最优解,无需模型 |
+| **REINFORCE 策略梯度** | $G_t$ 直接当梯度权重,是 on-policy MC 控制的策略梯度版 |
+| **蒙特卡洛树搜索 MCTS** | 从当前状态模拟到终局、用平均回报估值,AlphaZero 的核心算子 |
+| **期权定价 / 风险评估** | 金融里的「蒙特卡洛模拟」与 RL 同源:模拟大量路径取期望 |
+
+## 二十一点:MC 方法的教科书级 canonical case
+
+上面表格一行带过「二十一点 Blackjack」,但它是 Sutton & Barto Example 5.1 贯穿整个 MC 章的**canonical case**——一个状态空间小、回合短、马尔可夫性天然成立、无需环境模型就能学的干净例子。MC 在这上面能把「免模型 + 无自举 + 等回合」三件事的**价值**看得一清二楚,是 MC 预测最经典的可运行演示 [1]。
+
+### 规则与状态空间
+
+**二十一点规则**(简化版,与 S&B Example 5.1 一致):
+
+- 牌值:2-10 按面值,J/Q/K=10,A 可取 1 或 11(不爆则取 11,称「可用 A」)。
+- 玩家起始发 2 张,庄家发 2 张(其中 1 张**明牌** face-up)。
+- 玩家先动作:**hit**(要牌)或 **stick**(停)。玩家点数 $>21$ 立即**爆牌**输 $-1$。
+- 玩家 stick 后,庄家按固定策略要牌(点数 $<17$ hit,$\ge17$ stick)。
+- 庄家爆则玩家 $+1$;否则比点数,高者 $+1$、低者 $-1$、平 $0$。
+
+**状态**:$(\text{玩家点数},\ \text{庄家明牌},\ \text{是否有可用 A})$。玩家点数 $<12$ 时不可能爆(再要一张也不会超 21),自动 hit,不入状态空间;故玩家点数取 12-21(10 档),庄家明牌 1-10(10 档,明牌 A 记为 1),可用 A 有无(2 档),共 **200 个状态**。这个状态空间小到可以完整地把 $V$ 存成一张表——正是 MC 方法「不需要环境模型、只需要回合回报」的干净用武之地。
+
+**目标策略**(S&B Example 5.1):玩家 **stick on 20/21,否则 hit**。这是个朴素策略(只在点数 $\ge20$ 时停),我们用它来评估每个状态的价值 $V^\pi(s)$——即在「20/21 停、否则要牌」这条策略下,从状态 $s$ 出发期望能拿多少回报。
+
+### first-visit MC 预测:无模型、无自举
+
+Blackjack 是**回合制、无折扣**($\gamma=1$,回合短且终局奖励 $\pm1$)的任务,MC 预测在这里最干净:跑大量回合,对每个状态 $s$ 收集「首次访问 $s$ 后的回报 $G$」取平均,即 first-visit MC 估计 $V^\pi(s)$。无需知道庄家的转移概率、无需自举——只靠真实回合的终局结果 $\pm1$。
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(7)
+
+# === Blackjack first-visit MC 预测 (Sutton & Barto Example 5.1) ===
+# 规则: 无限副牌, J/Q/K=10, A=1或11(不爆取11); 玩家爆即输-1; 庄家<17 hit, >=17 stick
+# 状态: (玩家点数 12-21, 庄家明牌 1-10, 是否有可用 A) = 200 个状态
+# 目标策略: 玩家 stick on 20/21, 否则 hit
+# 回报: 终局 +1 赢 / -1 输 / 0 平; gamma=1 (回合无折扣)
+
+def draw_card():
+    c = rng.integers(1, 14)        # 1-13 (1=A, 11-13=J/Q/K)
+    return min(c, 10)              # A=1, J/Q/K=10
+
+def usable_ace(hand):
+    s = sum(hand)
+    return 1 in hand and s + 10 <= 21   # 有 A 且当 11 不爆
+
+def hand_sum(hand):
+    s = sum(hand)
+    return s + 10 if usable_ace(hand) else s
+
+def dealer_play(dealer_hand):
+    while hand_sum(dealer_hand) < 17:   # 庄家: <17 hit, >=17 stick
+        dealer_hand.append(draw_card())
+    return hand_sum(dealer_hand)
+
+def play_episode():
+    player = [draw_card(), draw_card()]
+    dealer = [draw_card(), draw_card()]
+    while hand_sum(player) < 12:        # 玩家<12 不可能爆, 自动 hit (不入状态)
+        player.append(draw_card())
+    trajectory = []
+    while True:
+        sp = hand_sum(player)
+        if sp > 21:                     # 玩家爆
+            return trajectory, -1.0
+        up = dealer[0]                  # 庄家明牌
+        ua = usable_ace(player)
+        a = 'stick' if sp >= 20 else 'hit'   # 目标策略
+        trajectory.append((sp, up, ua, a))
+        if a == 'stick':
+            break
+        player.append(draw_card())
+    dp = dealer_play(dealer)            # 玩家 stick, 庄家玩
+    sp = hand_sum(player)
+    if dp > 21:   return trajectory, +1.0          # 庄家爆
+    if sp > dp:   return trajectory, +1.0          # 玩家点数高
+    if sp < dp:   return trajectory, -1.0          # 庄家点数高
+    return trajectory, 0.0                          # 平
+
+# === first-visit MC 预测: 每状态收集首次访问后的回报取平均 ===
+N_EP = 100000
+returns_sum = {}
+returns_cnt = {}
+for _ in range(N_EP):
+    traj, G = play_episode()
+    seen = set()
+    for (sp, up, ua, a) in traj:
+        s = (sp, up, ua)
+        if s in seen:                   # first-visit: 仅首次
+            continue
+        seen.add(s)
+        returns_sum[s] = returns_sum.get(s, 0.0) + G
+        returns_cnt[s] = returns_cnt.get(s, 0) + 1
+
+V = {s: returns_sum[s] / returns_cnt[s] for s in returns_sum}
+
+print("=== Blackjack first-visit MC 预测 (S&B Example 5.1) ===")
+print("目标策略: 玩家 stick on 20/21, 否则 hit; 回合数=100000, gamma=1")
+print()
+print("【无可用 A】V(player_sum, dealer_show, usable_ace=False):")
+print("       dl明牌:   1    2    3    4    5    6    7    8    9   10")
+for sp in range(12, 22):
+    row = f"  pl={sp:>2}"
+    for up in range(1, 11):
+        row += f" {V.get((sp, up, False), 0.0):>+5.2f}"
+    print(row)
+print()
+print("【有可用 A】V(player_sum, dealer_show, usable_ace=True):")
+print("       dl明牌:   1    2    3    4    5    6    7    8    9   10")
+for sp in range(12, 22):
+    row = f"  pl={sp:>2}"
+    for up in range(1, 11):
+        row += f" {V.get((sp, up, True), 0.0):>+5.2f}"
+    print(row)
+print()
+print("读图要点:")
+print("- player=20/21: 价值最高 (+0.4~+0.95) — stick 后庄家爆或比点数赢")
+print("- player=12-19: 价值多为负 — 该策略在 <20 时弱, 庄家明牌 7-10 尤其差")
+print("- 庄家明牌 4-6: 玩家价值偏高 — 庄家 4-6 容易爆 (S&B 经典结论)")
+print("- 庄家明牌 10: 玩家价值偏低 — 庄家明牌强")
+print("- 有可用 A 的状态价值普遍更高 — A 的灵活性, 软牌不易爆")
+print("- 软牌状态(有A)样本少, 数值波动略大 — MC 在稀疏访问状态估计噪声大")
+`} title="Blackjack first-visit MC 预测 (S&B Example 5.1)" />
+
+跑完对照 Sutton & Barto Figure 5.1 的经典价值表,会看到完全一致的形态:
+
+- **player=20/21 行全正**(+0.4~+0.95):stick 后等庄家玩,庄家爆或比点数赢的概率高;
+- **player=12-19 行多为负**:朴素策略在点数不到 20 时一直 hit,容易在 16-19 区间爆,或 stick 前已落到不利点数;
+- **庄家明牌 4-6 列偏高、10 列偏低**:庄家明牌 4-6 时,庄家下一张十概率大(牌堆里 10 占 4/13),容易爆;明牌 10 时庄家起点强。这是二十一点的统计结构,MC 不需要知道这些概率,直接从回合回报里把它们**学出来**;
+- **有可用 A 的状态价值普遍更高**:A 可当 1 或 11,软牌(有 A 且不爆)点数灵活,hit 不易爆。
+
+### 为何 MC 在 Blackjack 上最干净
+
+Blackjack 把 MC 方法的三个优势**同时**发挥到极致:
+
+1. **免模型**:不需要知道庄家策略或牌堆转移概率,只要能「发牌、玩、拿结果 $\pm1$」就能学。DP 在这上面要枚举所有转移概率(牌堆组合爆炸),MC 完全绕开。
+2. **无自举**:不依赖 $V(s')$ 的当前估计,直接用真实终局回报。Blackjack 回合短(平均 2-4 步),$G$ 方差小,MC 估计快收敛;不像长程任务里 MC 方差爆炸。
+3. **等回合**:Blackjack 是天然回合制(终局 $\pm1/0$),不存在「回合不结束」的困境,MC 的「必须等回合」约束在这里零代价。
+
+更关键的是,Blackjack 暴露了 MC 的一个**结构性局限**:**软牌状态(有可用 A)访问频率低**——起手有 A 的概率本就小,这些状态的 first-visit 样本数远少于硬牌状态(上表软牌状态样本数常是硬牌的 1/10)。MC 在稀疏访问状态上估计噪声大、收敛慢,这正是「按回合采样」的代价——TD 方法能靠自举把相邻状态的估计互相传播,MC 不能。这个局限在 Blackjack 上是 toy 规模的小麻烦,在真实大状态空间里就是 MC 让位于 TD 的根因之一(见 [MC vs TD](#mc-vs-td一图看清))。
+
+> 💡 **从预测到控制**:上面只评估了「stick on 20/21」这条**固定**策略的价值。要做 MC **控制**(找最优策略),把 first-visit MC 估 $V$ 换成估 $Q(s,a)$、配合 ε-贪心探索与 GLIE 退火(见 [上节](#控制glie无限探索下的贪心收敛))即可——Blackjack 也是 S&B Example 5.3 MC 控制的 canonical case,学出的最优策略(软 17 以下 hit、硬 12 vs 庄家 4-6 stand 等)与人类基本策略表高度吻合。控制版的代码骨架与 [GLIE 演示](#控制glie无限探索下的贪心收敛)同构,只是状态空间换成 200 个 $(s,a)$ 对。
+
+下面就是 MC 控制在 Blackjack 上学出的**最优策略表**(Sutton & Barto Fig 5.2)。左右两张分屏对比「无可用 A / 有可用 A」——软牌因为「A 可退当 1、爆不了」而敢更激进地要牌,阈值明显更高。**拖动「已模拟回合数」滑块**看策略如何从早期的一片零乱、随回合增多逐步收敛到干净的阶梯;悬停任意格子看该状态的最优动作:
+
+<BlackjackPolicyViz />
+
+> 💡 **看点**:① **软牌表(右)的绿色区更大**——有可用 A 时同样点数敢更多要牌(退当 1 就不爆),这是「soft 18 还要牌」这类反直觉动作的来源;② 硬牌表(左)里「庄家明牌 4-6」时玩家早早停牌(蓝),因为赌庄家自己爆;③ 回合数从小到大,策略从「随机翻转的噪声」收敛到规整阶梯——这正是 MC 控制**用经验回报逐步逼近最优**的可视化,与前面大数定律动画是同一件事在策略空间的体现。
+
+## 常见问题 FAQ
+
+**Q:MC 为什么必须等回合结束?**
+它的目标 $G_t$ 是「到回合末的完整折扣回报」,算 $G_t$ 必须知道回合里所有未来奖励——所以非得等回合结束不可。这是它与 TD 的根本分界:TD 只看一步、走一步就能学。
+
+**Q:首次访问和每次访问,实战选哪个?**
+预测问题里两者差别很小,首次访问更「干净」(无偏)是理论默认。控制 + 函数逼近场景下,每次访问更容易引入偏差、需谨慎。多数教学实现用首次访问。
+
+**Q:探索性起点为什么现实中不可行?**
+它要求「每个 $(s,a)$ 都有非零概率作为回合起点」——下棋可以让任意局面开局,但自动驾驶不能「从撞车状态起步」。所以工程上几乎都用 ε-软策略保证探索,而非 ES。
+
+**Q:off-policy MC 为什么不如 off-policy TD(DQN)流行?**
+因为 MC 的重要性采样比 $\rho=\prod_{k=t}^{T-1}\pi/b$ 是整条轨迹的**连乘**,方差随回合长度指数爆炸(ordinary IS 甚至方差无限)。TD 只需一步比值 $\pi(a_t\mid s_t)/b(a_t\mid s_t)$,且在 Q-learning 的 $r+\gamma\max_{a'}Q(s',a')$ 里被 max 吸收、无需显式 IS。所以「off-policy + 经验回放」在 TD 家族(DQN)里如鱼得水,在 MC 里却很受限。详见上面「off-policy」一节第 6 步的对比表。
+
+**Q:MC 和蒙特卡洛树搜索(MCTS)什么关系?**
+MCTS 是 MC 思想的**搜索版**:对当前状态反复模拟到终局、用平均回报给候选动作打分,再选得分最高的。AlphaZero 用神经网络引导 MCTS、再用 MCTS 的结果训练网络,形成自提升循环。RL 入门篇的 FAQ 里有更细的[自我博弈讲解](/tutorials/reinforcement-learning#常见问题-faq)。
+
+**Q:回合很长时 MC 会不会太慢?**
+会。这正是 TD 与 n 步回报的用武之地——不必等到底,走 n 步就自举,在「无偏但慢」的 MC 与「快但有偏」的 TD(0) 间折中。详见[时序差分篇](/tutorials/temporal-difference#常见问题-faq)。
+
+## 动手作业
+
+1. **改探索率**:把控制代码里的 `epsilon` 从 0.3 调到 0.05 和 0.6,观察学到的策略路径与收敛速度如何变化——太小会探索不足(可能找不到避坑路)、太大会贪心不下来。
+2. **首次 vs 每次**:把控制代码里的「首次访问」改成「每次访问」(去掉 `visited` 去重),对比学到的 $Q$ 与路径是否一致。
+3. **加坑**:把 `PITS` 扩成 4 个坑(再加一个 `{7}`),看策略是否还能找到通路、找到的是不是更绕的路。
+4. **退火 ε**:让 `epsilon` 随回合数从 0.5 线性退到 0.01,看最终策略是否更接近贪心最优。
+5. **IS 方差对比(进阶)**:在 off-policy 玩具里把目标策略 $\pi$ 改成「80% 向右、20% 向左」(而非确定性向右),观察 ordinary IS 的样本方差如何从「无限」降下来——因为 $\pi$ 现在不会给 $b$ 的左转选择赋 0 概率,$\rho$ 不再非 0 即 $2^L$。再比较 ordinary 与 weighted IS 的偏差-方差。
+
+## 小结
+
+| 概念 | 含义 |
+|---|---|
+| 蒙特卡洛 MC | 不需模型、不自举,用真实回合回报的均值估价值 |
+| 回报 $G_t$ | $\sum_k \gamma^k r_{t+k+1}$,到回合末的折扣回报 |
+| 首次 vs 每次访问 | 前者只计首次出现(无偏)、后者每次都计(方差更低) |
+| 探索性起点 ES | 强制每个 $(s,a)$ 起步,理论优雅但现实不可行 |
+| ε-软控制 | on-policy,靠策略本身保证探索,贪心提升单调 |
+| IS 比率 $\rho$ | $\prod_{k=t}^{T-1}\pi/b$,轨迹概率比连乘(转移概率约掉) |
+| 普通 IS | $\frac{1}{N}\sum\rho G$——无偏但方差可无限($\rho$ 连乘爆炸) |
+| 加权 IS | $\frac{\sum\rho G}{\sum\rho}$——有偏但方差有界、一致,实际首选 |
+| 增量加权 IS | $V_{n+1}=V_n+\frac{W_n}{C_n}(G_n-V_n)$,O(1) 内存流式更新 |
+| 折扣感知 IS | $\gamma<1$ 时用截断比率 $\rho_{t:k}$ 拆分部和,降方差不引偏 |
+| MC vs TD | MC 无偏高方差、等回合;TD 有偏低方差、走一步学一步 |
+
+> 🎯 一句话记住:**蒙特卡洛不预测、只统计——把「从 $s$ 出发的真实回报」平均起来就是它的价值。它免模型、无自举、要回合,是 [时序差分](/tutorials/temporal-difference)的免模型一半,也是 [REINFORCE](/tutorials/policy-gradient) 拿 $G_t$ 当梯度的根源。**
+
+## 延伸阅读
+
+- **经典论文**:Metropolis & Ulam (1949). *The Monte Carlo Method*. [JSTOR](https://www.jstor.org/stable/2280232) —— 「蒙特卡洛」命名的原始出处:统计模拟思想的起点,RL 的 MC 估值只是它的一个远方后裔
+- **经典论文**:Metelli et al. (2020). *Importance Sampling Techniques for Policy Optimization*. [arXiv:1910.12061](https://arxiv.org/abs/1910.12061) —— 把本篇的 IS 比率从「修正估值」推广到「直接做策略梯度」:IS-PG 与 σ-IS-PG 的方差分析
+
+## 参考文献
+
+1. Sutton, R. S., & Barto, A. G. (2018). *Reinforcement Learning: An Introduction* (2nd ed.). MIT Press. [在线版](http://incompleteideas.net/book/RLbook2020.pdf). — 第 5 章「Monte Carlo Methods」是 off-policy MC + importance sampling 的权威出处:IS 比率连乘(§5.4)、ordinary vs weighted IS 的偏差-方差分析(§5.5)、增量加权 IS 实现(§5.6)、折扣感知 IS(§5.7)。
+2. Singh, S. P., & Sutton, R. S. (1996). *Reinforcement learning with replacing eligibility traces*. Machine Learning, 22(1-3), 123-158. — first-visit vs every-visit MC 的收敛性与偏差分析(两者都一致收敛到 $V^\pi$,但 every-visit 有轻微偏差);**GLIE(Greedy in the Limit with Infinite Exploration)定理**的出处——满足「无限探索 + 极限贪心」两条件的 on-policy first-visit MC 控制几乎必然收敛到 $Q^*$;[Springer 链接](https://link.springer.com/article/10.1007/BF00114726)。
+3. Precup, D., Sutton, R. S., & Singh, S. (2000). *Eligibility traces for off-policy policy evaluation*. ICML. — off-policy MC + 资格迹的结合,把 IS 比率与 $\lambda$-回报统一起来,是 discounting-aware IS 的理论延伸。
+4. Metropolis, N., & Ulam, S. (1949). *The Monte Carlo method*. Journal of the American Statistical Association, 44(247), 335-341. — 「蒙特卡洛方法」命名与统计模拟思想的原始出处;RL 的 MC 估值与数值积分的 IS 同源(用概率比校正采样分布)。
+5. Voloshin, C., Le, H. M., Jiang, N., & Yue, Y. (2019/2021). *Empirical Study of Off-Policy Policy Evaluation for Reinforcement Learning*. arXiv:1911.06854. — off-policy 评估(OPE) estimator 谱系的实证对照:trajectory-level ordinary/weighted IS vs **per-decision IS(PDIS)** vs **per-decision weighted IS(PDWIS)** 的定义与方差对比、**curse of horizon** $(\sup\pi_e/\pi_b)^T$ 量化刻画(horizon 指数 × 策略分歧两因子乘积决定方差爆炸速度);[arXiv](https://arxiv.org/abs/1911.06854)。

@@ -1,0 +1,142 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("deepseek-ocr");
+
+<PaperHeader slug="deepseek-ocr" />
+
+# 📃 DeepSeek-OCR:上下文光学压缩
+
+2025 年 10 月,DeepSeek 开源了一个不到 10 亿激活参数的小模型 DeepSeek-OCR,却提出一个野心很大的概念:**Contexts Optical Compression(上下文光学压缩)**——OCR 不只是「识别文字」,而是把图像承载的全部信息(标题、公式、化学式、几何图)尽可能无损地压缩进文本。论文给出的量化结论:压缩比小于 10× 时 OCR 精度约 97%,20× 时仍有约 60%。这篇笔记拆解三件事:为什么现有视觉编码器都不适合「高压缩」、DeepEncoder 怎么用「SAM 感知 + CLIP 知识 + 卷积压缩」的组合破局、以及压缩比实验揭示了什么边界。
+
+> 📌 前置:解码器是 [DeepSeek-V3](/papers/deepseek-v3) 同源的 DeepSeekMoE;编码器的注意力设计可回看 [Transformer 笔记](/papers/attention-transformer)。
+
+## 一、动机:视觉 token 是被浪费的上下文
+
+文档图像有个奇特的属性:一张 1024×1024 的页面截图,数字文本可能有 600–1300 个 token;如果 VLM 用 256 个视觉 token 就能把它读全,那图像其实是把文本**压缩**了约 3–5 倍的载体。反过来想:如果一个大模型的对话历史太长,把旧历史渲染成图片喂回去,反而能省上下文——这是论文 Figure 13 展望的「光学遗忘」:把越老的对话渲染成越小(越模糊)的图,视觉 token 随之减少,模拟人类记忆的遗忘曲线。
+
+要验证这条路线,模型必须把「每个视觉 token 榨出多少文本」推到极限。而主流开源 VLM 的视觉编码器各有短板。论文把现有方案分成三类(论文 Figure 2):**双塔式**(Vary,外挂一个 SAM 编码器扩视觉词表,但双路预处理让部署和流水线并行都变复杂)、**切块式**(InternVL2.0,把大图切成小块并行,但原生分辨率低于 512×512,大图碎成太多 token)、**原生动态分辨率**(Qwen2-VL/NaViT,整图 patch 化,但大图激活内存爆炸、序列打包需要超长训练序列)。共同问题:**都不擅长用极少 token 表达高分辨率文档**。
+
+## 二、DeepEncoder:先感知,再压缩,后知识
+
+DeepEncoder 约 380M 参数,三段串联,分别回应「高分辨率下激活太大」这个核心矛盾:
+
+1. **SAM-base(80M,patch 16)负责感知**:前半段全是 window attention(窗口内局部注意力),高分辨率下激活内存可控——感知只关心局部纹理,不需要全局交互;
+2. **卷积压缩器(2 层,kernel 3 / stride 2 / padding 1,通道 256→1024)负责压缩**:token 数直接降 16×——1024×1024 输入产生 4096 个 patch token,压缩后只剩 256 个;
+3. **CLIP-large(300M,去掉首个 patch embedding)负责知识**:压缩后的 token 再过密集全局注意力,提取高层语义知识。
+
+分工的逻辑:感知放在压缩前(纹理信息不丢),知识放在压缩后(全局交互的序列短,激活可控)。再加上**多分辨率支持**:Tiny(512²,64 token)、Small(640²,100)、Base(1024²,256)、Large(1280²,400),以及拼图式的 Gundam 模式(n×640² 局部块 + 1024² 全局图);多档分辨率靠位置编码动态插值,联合训练。
+
+解码器是 DeepSeek-3B-MoE(激活约 570M):12 层、64 个路由专家激活 6 个 + 2 个共享专家——用 3B 的表达能力、500M 级的推理开销。整个模型(编码器 + 解码器)按激活参数计约 940M,在单张 A100-40G 上一天能处理 20 万页文档。
+
+用 numpy 把「卷积压缩 16×」与多分辨率 token 账算一遍:
+
+<CodeRunner defaultCode={String.raw`
+import numpy as np
+
+# —— 卷积压缩器:2 层 stride-2 卷积,token 数降 16 倍 ——
+def conv_downsample(tokens, C_out=1024, k=3):
+    # tokens: (N, C) 的 token 序列,按方阵排布成 (H, W, C)
+    N, C = tokens.shape
+    H = W = int(np.sqrt(N))
+    assert H * W == N, "token 数需为平方数"
+    x = tokens.reshape(H, W, C)
+    for _ in range(2):                        # 两层,各降 2 倍
+        H2, W2 = (H + 1) // 2, (W + 1) // 2   # kernel3/stride2/pad1 的输出尺寸
+        # 用平均池化近似 stride-2 卷积的空间聚合(演示 token 数变化)
+        x = x[: H2 * 2, : W2 * 2].reshape(H2, 2, W2, 2, C).mean(axis=(1, 3))
+        H, W = H2, W2
+    return x.reshape(H * W, C)
+
+x = np.random.default_rng(0).standard_normal((4096, 256))  # 1024x1024 输入 -> 4096 patch token
+z = conv_downsample(x)
+print("压缩前 token 数: %d (1024x1024 输入, SAM patch 16)" % x.shape[0])
+print("压缩后 token 数: %d (16 倍下采样, 通道 256->1024)" % z.shape[0])
+
+# —— 多分辨率模式的 token 账(论文 Table 1) ——
+modes = {
+    "Tiny 512":  64, "Small 640": 100, "Base 1024": 256, "Large 1280": 400,
+    "Gundam (n=4)": 4 * 100 + 256,   # 4 块 640 局部 + 1 张 1024 全局
+}
+print("\n各分辨率模式的视觉 token 数:")
+for k, v in modes.items():
+    print("  %-14s %4d tokens" % (k, v))
+
+# —— 压缩比:ground-truth 文本 token 数 / 视觉 token 数 ——
+print("\nFox 基准上 600~1300 文本 token 档位的压缩比:")
+for n_text in [650, 850, 1050, 1250]:
+    for n_vis, tag in [(64, "Tiny"), (100, "Small")]:
+        print("  文本 %4d token / %s %3d 视觉 token = 压缩比 %4.1fx"
+              % (n_text, tag, n_vis, n_text / n_vis))
+`} />
+
+## 三、训练:OCR 1.0 与 OCR 2.0
+
+训练分两个数据版本,对应「读文字」与「读结构」两级能力:
+
+**OCR 1.0(文字与版面)**:3000 万页 PDF(约 100 种语言,中英约 2500 万页),其中中英文各有 200 万页的精细标注——版面坐标与文本交错排布,坐标归一化到 1000 个 bin;少数民族语言靠「模型飞轮」补 60 万样本;另有 300 万页 Word、中英各 1000 万场景文字(LAION/Wukong,PaddleOCR 打标)。
+
+**OCR 2.0(图表世界)**:pyecharts/matplotlib 渲染 1000 万张图表,标签用 HTML 表格(比 OneChart 的字典格式省 token);PubChem 的 SMILES 用 RDKit 渲染 500 万化学式配对;100 万平面几何样本(慢感知路线)。数据配比:70% OCR + 20% 通用视觉 + 10% 纯文本(8192 长度)。
+
+训练本身是标准的两阶段:先单独预训练 DeepEncoder(2 epoch,batch 1280,LR 5e-5);再全模型训练——20 节点 × 8 张 A100-40G,4 路流水线并行(PP0 放冻结的 SAM+压缩器,PP1 放可训练的 CLIP,PP2/PP3 各放解码器 6 层),DP 40,全局 batch 640,LR 3e-5,吞吐约 700 亿 token/天。注意:**没有 SFT 阶段**——它不是聊天机器人,部分能力需要补全式提示词触发。
+
+## 四、压缩比实验:10× 是条分水岭
+
+论文用 Fox 基准(英文文档,共 100 页,ground truth 用自家 tokenizer 计数,只选 600–1300 文本 token 的文档)测「精度 vs 压缩比」:压缩比 = ground-truth 文本 token 数 ÷ 模型用的视觉 token 数。总体结论:压缩比 < 10× 时精度约 97%,10–12× 约 90%,逼近 20× 掉到约 60%。分档数据(论文 Table 2):
+
+| 文本 token 档 | Tiny(64 视觉 token)精度 / 压缩比 | Small(100 视觉 token)精度 / 压缩比 |
+|---|---|---|
+| 600–700 | 96.5% / 10.5× | 98.5% / 6.7× |
+| 800–900 | 83.8% / 13.2× | 96.8% / 8.5× |
+| 1000–1100 | 79.3% / 16.5× | 91.5% / 10.6× |
+| 1200–1300 | 59.1% / 19.7× | 87.1% / 12.6× |
+
+两条规律值得注意:一是**压缩比一旦越过 10×,精度开始系统性下滑**,而且下滑加速(16.5×→19.7× 之间掉 20 个点);二是同样的文档,Small 档位始终比 Tiny 档位高一个精度台阶——说明瓶颈不在「压缩概念」而在**分辨率**:512²/640² 下复杂版面与小字已经物理模糊,再强的解码器也无法恢复丢失的信息。论文也提示这组数字偏保守:输出格式无法完全对齐 Fox 的标注格式,真实精度略高。
+
+在 OmniDocBench(编辑距离,越低越好)上:Small 档 100 token 即达 0.221,优于 GOT-OCR2.0 用 256 token 的 0.287;Gundam 档 795 token 达 0.127,超过 MinerU2.0 用 6790 token 的 0.133——**约 1/9 的 token,更好的效果**;Gundam-M 档 200dpi 下 1853 token 进一步到 0.123。中文侧优势更大:Gundam-M 0.157 vs MinerU2.0 的 0.238。分类型看:幻灯片 64 token 就够(0.116);报纸必须上 Gundam/Gundam-M(4–5 千 token 的密集文本,Tiny 档编辑距离 0.94,几乎不可用)。这个「按文档类型分档」的视角比单一总分更实用:**压缩比不是全局常数,而是内容密度的函数**。
+
+论文 Figure 1(a) 的压缩比曲线与 1(b) 的 OmniDocBench 对比,和 Figure 3 的完整架构:
+
+<figure className="my-6">
+  <img src="./fig-3-architecture.png" alt="DeepSeek-OCR 架构图:输入图像先经过 SAM(window attention 感知),再经 2 层卷积压缩器把 token 数降 16 倍,然后进入去掉了首层 patch embedding 的 CLIP-large(密集全局注意力提取知识),最后由 DeepSeek-3B-MoE 解码器输出文本" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI, <em>DeepSeek-OCR: Contexts Optical Compression</em>(arXiv:2510.18234)Figure 3
+  </figcaption>
+</figure>
+
+论文 Figure 2 展示的三类现有视觉编码器及其短板:
+
+<figure className="my-6">
+  <img src="./fig-2-encoders.png" alt="主流 VLM 的三类视觉编码器:Vary 双塔式(外挂 SAM 编码器,双路预处理复杂)、InternVL2.0 切块式(大图碎成过多 token)、Qwen2-VL 原生动态分辨率(大图激活内存爆炸),各自存在缺陷" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI, <em>DeepSeek-OCR: Contexts Optical Compression</em>(arXiv:2510.18234)Figure 2
+  </figcaption>
+</figure>
+
+论文 Figure 4 的多分辨率模式(Tiny/Small/Base/Large/Gundam):
+
+<figure className="my-6">
+  <img src="./fig-4-compression.png" alt="DeepSeek-OCR 多分辨率模式示意:Tiny 512 平方 64 token、Small 640 平方 100 token、Base 1024 平方 256 token、Large 1280 平方 400 token,以及 Gundam 拼图模式(若干 640 局部块加一张 1024 全局图)" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI, <em>DeepSeek-OCR: Contexts Optical Compression</em>(arXiv:2510.18234)Figure 4
+  </figcaption>
+</figure>
+
+## 五、deep parsing:不止于文字
+
+OCR 2.0 的技能组合出「deep parsing」模式:对文档里嵌入的图片做**二次模型调用**,统一提示词下按类型输出——图表转结构化 HTML 表格、化学式转 SMILES、平面几何输出含线段/端点/类型的字典、自然图像输出密集描述。对金融研报这类图表密集的文档,能拿到结构化结果;对书籍文章,能给插图生成 caption。这把 OCR 从「文字誊抄」推向「文档全要素解析」,也是「光学压缩」概念的自证:图像里的信息不只是字。
+
+## 局限与批判
+
+- **自我定位为早期工作**:论文明说「OCR 不足以完全验证真正的上下文光学压缩」,数字-光学交错预训练、长上下文大海捞针实验都留作未来工作——压缩概念目前只在文档域兑现。
+- **20× 之后的悬崖**:精度从 10× 的 97% 掉到 20× 的 60%,说明「无损」有明显边界;且低精度档(512²/640²)下复杂版面是主要失败源,压缩比与分辨率两个变量没有完全解耦。
+- **没有 SFT、不是通用 VLM**:需要补全式提示词触发能力,不能直接当对话模型或通用视觉模型用。
+- **编码器组合的工程性**:SAM + 卷积 + CLIP 三段拼接是为「高分辨率低激活」量身定制的工程答案,消融只给了整体,没拆开验证每段的独立贡献。
+
+## 小结
+
+- **概念**:Contexts Optical Compression——把 OCR 重新定义为「把图像信息压缩进文本」,压缩比 = 文本 token ÷ 视觉 token;Fox 基准上 < 10× 精度约 97%、20× 约 60%。
+- **架构**:DeepEncoder(80M SAM-base window attention 感知 + 16× 卷积压缩 + 300M CLIP-large 全局知识,共约 380M)+ DeepSeek-3B-MoE 解码器(激活约 570M);多分辨率模式 64–400+ token。
+- **数据**:OCR 1.0(3000 万页 PDF、版面交错标注)+ OCR 2.0(1000 万图表/500 万化学式/100 万几何);20 节点 A100,PP4 + DP40,无 SFT。
+- **结果**:OmniDocBench 上以约 1/9 于 MinerU2.0 的 token 数取得更优编辑距离;deep parsing 把图表/化学式/几何统一成结构化输出;单卡 A100 日处理 20 万页。
+
+DeepSeek-OCR 的价值不在这个小模型本身,而在它给出的坐标系:**视觉 token 的信息密度是有价格的**。当 VLM 的上下文成为稀缺资源,「先光学压缩再进模型」就可能成为标准前置模块——就像 [DeepSeek-V3.2](/papers/deepseek-v3-2) 用稀疏注意力给 KV cache 定价一样,这里给的是图像侧的定价表。

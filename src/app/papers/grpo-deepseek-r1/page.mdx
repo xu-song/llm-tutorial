@@ -1,0 +1,106 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("grpo-deepseek-r1");
+
+<PaperHeader slug="grpo-deepseek-r1" />
+
+# 🧠 GRPO 与 DeepSeek-R1:训练会推理的大模型
+
+2025 年 1 月,DeepSeek 发布的 R1 让开源社区震动:一个**纯强化学习**训出来的模型,在数学与代码推理上比肩 OpenAI 的 o1。这篇阅读笔记拆解论文的两个核心贡献——**GRPO** 砍掉 PPO 的 critic,**RLVR** 用规则判分取代奖励模型——并指出论文后续被专门批判的两个训练偏置。
+
+> 📌 前置:熟悉 [PPO 裁剪](/tutorials/policy-gradient) 与 [优势函数](/tutorials/policy-gradient) 会很有帮助。GRPO 几乎是站在 PPO 肩上做减法。
+
+## 一、动机:为什么不要 critic?
+
+[PPO](/tutorials/policy-gradient) 是 actor-critic:除了策略网络 $\pi_\theta$,还要维护一个**价值网络** $V_\psi(s)$ 来算基线、估计优势 $A_t = G_t - V_\psi(s_t)$。在大模型场景,这个 critic 通常和策略**一样大**(几十亿参数),显存与算力近乎翻倍;而且给「半句话」估准确价值本身就难。
+
+GRPO 的追问是:**能不能不要 critic,还能算出一个好用的基线?**
+
+## 二、关键一招:用「一组回答」当基线
+
+对同一道题 $q$,一次采样 $G$ 个回答 $o_1,\dots,o_G$,第 $i$ 个拿到奖励 $r_i$。GRPO 把优势定义为**组内标准化**:
+
+$$
+\hat A_{i,t} \;=\; \frac{r_i - \operatorname{mean}(r_1,\dots,r_G)}{\operatorname{std}(r_1,\dots,r_G)}, \qquad \text{对回答 } o_i \text{ 的所有 token } t \text{ 取同一值。}
+$$
+
+三个要点:
+
+- **没有 critic**:基线 $\operatorname{mean}(r)$ 是纯统计量,不训练。
+- **组内相对**:一个回答好不好,看它在同题这一组里排第几——这正是 "Group Relative" 的来历。
+- **整条回答共享优势**:答对了整条链上的 token 都被抬,答错了都被压。
+
+论文原版的结构对比图——上半是 PPO:策略模型采样,奖励模型打分,价值模型(critic)经 GAE 产出优势,外加参考模型的 KL 约束;下半是 GRPO:同一 prompt 采样一组回答,奖励直接按规则算,优势由**组内分数**标准化而来,价值模型与 KL 项被整个拿掉:
+
+<figure className="my-6">
+  <img src="./fig-grpo-structure.svg" alt="PPO 与 GRPO 训练结构对比:PPO 依赖价值模型经 GAE 计算优势并加 KL 正则;GRPO 砍掉价值模型,对同一问题采样一组回答,优势由组内奖励标准化得到" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI, <em>DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning</em>(arXiv:2501.12948)Figure 3
+  </figcaption>
+</figure>
+
+拖动下面组件,亲手看组内优势怎么算,并提前撞见后文的「难度偏置」:
+
+<GRPOAdvantageViz />
+
+## 三、目标函数:还是 PPO 的裁剪形状
+
+有了优势,GRPO 的目标几乎就是 PPO 的 ratio-clipping,只是把 $A_t$ 换成上面的组内 $\hat A_{i,t}$,并加上一个 KL 正则把策略拉回参考模型 $\pi_{\text{ref}}$:
+
+$$
+\mathcal{J}_{\text{GRPO}}(\theta) = \mathbb{E}_{q,\{o_i\}}\!\left[\frac{1}{G}\sum_{i=1}^{G}\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}\!\Big(\min\!\big(\rho_{i,t}\hat A_{i,t},\;\operatorname{clip}(\rho_{i,t},1\!-\!\epsilon,1\!+\!\epsilon)\hat A_{i,t}\big) - \beta\,\mathbb{KL}(\pi_\theta\Vert\pi_{\text{ref}})\Big)\right]
+$$
+
+其中 $\rho_{i,t}=\pi_\theta(o_{i,t}\mid q,o_{i,<t})/\pi_{\text{ref}}(\cdots)$ 是重要性比。注意 KL 项直接乘在目标里(而非像 PPO 那样加在奖励上)——后文的 Dr.GRPO 会再动它。
+
+## 四、RLVR:规则即奖励
+
+RLVR(Reinforcement Learning with **Verifiable** Rewards)的关键不是新算法,而是**奖励来源**:对数学题,验算答案是否相等;对代码题,跑测试用例看通过率。奖励是**二元或分段**的确定性函数 $r(q,o)\in\{0,1\}$,不需要训练奖励模型,也不存在 RM 被钻空子(reward hacking)的问题。
+
+代价是:只适用于「答案可验证」的任务。开放式对话、创意写作没有标准答案,RLVR 无能为力——这正是 R1 之后 RLHF 仍被需要的原因。
+
+但在这类任务上,纯 RLVR 的效果是惊人的。论文最著名的两张训练曲线(R1-Zero,无任何 SFT 冷启动):(a) AIME 2024 的 pass@1 从 15.6% 一路爬到 71.0%(图上还叠了人类参赛者平均线),consensus(64 次采样投票)更是到 86.7%;(b) 平均响应长度从约 1,800 token 涨到约 8,000——**模型自发学会了「想得更久」**,没有任何人教它反思,「wait, let me reconsider」这类行为是从优化可验证奖励中涌现的:
+
+<figure className="my-6 grid gap-4 sm:grid-cols-2">
+  <img src="./fig-aime-curve.svg" alt="R1-Zero 训练过程中 AIME 2024 分数随步数上升:pass@1 从 15.6% 升至 71.0%,consensus@64 达到 86.7%,超过人类参赛者平均水平" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-length-curve.svg" alt="R1-Zero 训练过程中平均响应长度持续增长:从约 1800 token 增长到约 8000 token,模型自发学会更长的思考" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="sm:col-span-2 mt-1 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI, <em>DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning</em>(arXiv:2501.12948)Figure 1(a)与 Figure 1(b)
+  </figcaption>
+</figure>
+
+## 五、两个被批判的偏置
+
+论文走红后,后续工作指出 GRPO+RLVR 有两个系统性偏置:
+
+1. **长度偏置(length bias)**:组内标准化里,答对的长回答与答对的短回答优势相同,但长回答的反向传播成本更高——模型渐渐学会「啰嗦」。Dr.GRPO 的修法是去掉 $\operatorname{std}$ 归一化(只减均值),让长度不再被隐性惩罚。
+2. **难度偏置(difficulty bias)**:对一道**全组都答错**的题,$r_i\equiv 0\Rightarrow\operatorname{std}=0$,优势无法定义,该题梯度为零——模型永远学不会难题。DAPO 用 dynamic sampling(丢弃全对/全错题)与 token-level 策略梯度缓解。
+
+> 这两段不是论文原文,而是社区对 R1 训练范式的后续反思——读论文时务必把「原始方法」和「被批判后改进」分开看。
+
+## 六、用代码算一遍优势
+
+建立最扎实的直觉——手算一遍组内标准化:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 同一道题采样 G=8 个回答,可验证奖励为二元:答对=1,答错=0
+rewards = np.array([1, 1, 1, 0, 0, 0, 0, 0], dtype=float)  # 3 对 5 错
+
+mu = rewards.mean()
+sigma = rewards.std()
+A = (rewards - mu) / sigma  # GRPO 组内标准化优势
+
+print(f"mean = {mu}, std = {sigma:.4f}")
+print(f"advantages = {A.round(3)}")
+# 答对的 3 个拿到正优势,答错的 5 个拿到负优势
+`} />
+
+## 小结
+
+- **GRPO** = PPO 去 critic + 组内标准化基线,省一半显存。
+- **RLVR** = 用规则判分替代奖励模型,只限可验证任务。
+- 两个偏置(长度、难度)是 R1 之后才发现的,Dr.GRPO / DAPO 分别给出修法。
+
+论文真正的贡献不是某个精巧的技巧,而是**证明了纯 RL 能激发推理**——这把「推理能力是否必须靠 SFT 蒸馏」的争论一举掀翻。

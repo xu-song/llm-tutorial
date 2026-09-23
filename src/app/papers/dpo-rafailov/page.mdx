@@ -1,0 +1,110 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("dpo-rafailov");
+
+<PaperHeader slug="dpo-rafailov" />
+
+# 🎯 DPO:无需奖励模型与 RL 的偏好对齐
+
+RLHF 的标准流水线分两步:先用人类偏好数据拟合一个奖励模型 $r_\phi(x,y)$,再用 [PPO](/tutorials/policy-gradient) 优化策略去最大化这个奖励。这条链路复杂、不稳,还要在 RL 阶段在线采样。DPO(Direct Preference Optimization)的洞见是:**奖励与最优策略之间本来就有闭式关系**,把它代回去,就能跳过显式奖励模型和 RL,直接从偏好对优化策略。
+
+论文原版的全景对比图:左侧是标准 RLHF 流水线(偏好数据 → 拟合奖励模型 → RL 优化,通常还要加 KL 约束采样),右侧是 DPO——同一个偏好数据集直接进策略模型,用简单的分类损失一步到位,隐式奖励模型内嵌在策略里:
+
+<figure className="my-6">
+  <img src="./fig-teaser.png" alt="DPO 与 RLHF 流水线对比:RLHF 需先拟合奖励模型再用强化学习优化策略;DPO 直接用分类目标从偏好数据优化策略,隐式拟合奖励模型" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Rafailov et al., <em>Direct Preference Optimization: Your Language Model is Secretly a Reward Model</em>(arXiv:2305.18290)Figure 1
+  </figcaption>
+</figure>
+
+> 📌 前置:熟悉 [RLHF](/tutorials/rlhf) 与 [反向 KL](/tutorials/forward-reverse-kl) 会更好理解 DPO 为何是「隐式反向 KL」。
+
+## 一、从 KL 约束的 RL 目标出发
+
+RLHF 的 RL 阶段,本质是在奖励 $r$ 下、受 KL 约束求解最优策略:
+
+$$
+\max_{\pi_\theta}\;\mathbb{E}_{x\sim\mathcal{D},\,y\sim\pi_\theta(\cdot\mid x)}\!\big[r(x,y)\big] - \beta\,\mathbb{KL}\!\big(\pi_\theta(\cdot\mid x)\;\big\Vert\;\pi_{\text{ref}}(\cdot\mid x)\big)
+$$
+
+这个 KL 约束的 RL 有**闭式最优解**(用拉格朗日量 + 指数族技巧可解):
+
+$$
+\pi^*(y\mid x) = \frac{1}{Z(x)}\,\pi_{\text{ref}}(y\mid x)\,\exp\!\Big(\frac{1}{\beta}\,r(x,y)\Big)
+$$
+
+其中 $Z(x)=\sum_y \pi_{\text{ref}}(y\mid x)\exp(r(x,y)/\beta)$ 是配分函数(归一化项)。
+
+## 二、把奖励表示成策略的函数
+
+关键一步:上面的闭式解可以**反过来**把 $r$ 用 $\pi^*$ 表示。两边取对数并整理:
+
+$$
+r(x,y) = \beta\log\frac{\pi^*(y\mid x)}{\pi_{\text{ref}}(y\mid x)} + \beta\log Z(x)
+$$
+
+这就是论文标题「Your Language Model is Secretly a Reward Model」的来历——**最优策略本身(的对数比)就是一个奖励函数**,无需单独学 $r_\phi$。
+
+## 三、代入偏好模型,得到 DPO 损失
+
+人类偏好通常建模为 Bradley-Terry:在 $y_w\succ y_l$(win/lose)下,
+
+$$
+p(y_w\succ y_l\mid x) = \sigma\!\big(r(x,y_w)-r(x,y_l)\big)
+$$
+
+把第二步的 $r$ 表达式代入,注意 $\log Z(x)$ 在作差时**相消**:
+
+$$
+p(y_w\succ y_l\mid x) = \sigma\!\Big(\beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big)
+$$
+
+于是 DPO 的目标就是对这个偏好概率做**最大似然**(等价于一个二分类交叉熵):
+
+$$
+\mathcal{L}_{\text{DPO}}(\theta) = -\mathbb{E}_{(x,y_w,y_l)}\!\Big[\log\sigma\!\Big(\beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big)\Big]
+$$
+
+整个过程**没有显式奖励模型、没有 RL、没有在线采样**——只要一个参考模型 $\pi_{\text{ref}}$ 和偏好数据对,就能像普通 SFT 一样训练。
+
+## 四、与 PPO/RLHF 的对照
+
+| | PPO-RLHF | DPO |
+|---|---|---|
+| 奖励模型 | 显式训练 $r_\phi$ | 隐式(策略对数比) |
+| RL 阶段 | 需要(actor+critic) | 不需要 |
+| 在线采样 | RL 阶段需要 | 不需要(离线偏好对) |
+| KL 约束 | 加在奖励上 | 隐式在目标里($\beta$) |
+| 损失形状 | 策略梯度 + 裁剪 | 二分类交叉熵 |
+
+## 五、用代码看隐式奖励
+
+把策略比的对数差喂进 sigmoid,就是 DPO 给偏好对的预测概率:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 假设参考模型与当前策略对 win/lose 两个回答的对数概率(已给定)
+logp_ref_w, logp_ref_l = -2.0, -3.0      # 参考模型对两回答的 logprob
+logp_pol_w, logp_pol_l = -1.5, -3.8      # 训练后策略对两回答的 logprob
+beta = 0.1
+
+# 隐式奖励差 = beta * (logratio_w - logratio_l)
+log_ratio_w = logp_pol_w - logp_ref_w
+log_ratio_l = logp_pol_l - logp_ref_l
+implicit_reward_diff = beta * (log_ratio_w - log_ratio_l)
+
+# DPO 预测 win 被偏好的概率
+prob_win = 1 / (1 + np.exp(-implicit_reward_diff))
+print(f"implicit reward diff = {implicit_reward_diff:.4f}")
+print(f"P(win preferred) = {prob_win:.4f}")
+# 策略提升了 win、压低了 lose -> 概率应接近 1
+`} />
+
+## 小结
+
+- RLHF 的 KL 约束 RL 有闭式最优解 $\pi^*\propto\pi_{\text{ref}}\exp(r/\beta)$,反解出 $r=\beta\log(\pi^*/\pi_{\text{ref}})+\beta\log Z$。
+- 代入 Bradley-Terry 偏好模型,$\log Z$ 相消,得到一个纯交叉熵目标——**这就是 DPO**。
+- 代价:DPO 是 off-policy 的,策略离参考模型太远时 $\pi_{\text{ref}}$ 估计失准;且对偏好数据质量极敏感。后续 IPO、SimPO 等都在调整这个目标的数值性质。
+
+DPO 的优雅在于:它没有提出新算法,而是揭示了一个被 RLHF 流水线掩盖的恒等式。

@@ -1,0 +1,155 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("attention-transformer");
+
+<PaperHeader slug="attention-transformer" />
+
+# 🔁 Transformer:注意力就是你所需要的一切
+
+2017 年,Google Brain 与 Research 的八人团队发表了一篇标题嚣张的论文:*Attention Is All You Need*。他们把机器翻译主流架构里的**循环网络(RNN)与卷积(Conv)全部扔掉**,只留注意力机制,结果 WMT 2014 英德翻译 **28.4 BLEU**、英法 **41.8 BLEU**,双双刷出单模型新纪录——而训练只花 8 张 P100 共 3.5 天。这篇论文后来成了整个现代 AI 的地基:GPT、Claude、DeepSeek、GLM,全部运行在它定义的架构上。这篇笔记拆解它的三个核心件:缩放点积注意力、多头机制、位置编码,并回答一个初学者最常见的疑问:**那个 $\sqrt{d_k}$ 到底为什么非要除不可?**
+
+> 📌 前置:知道[神经网络](/tutorials/neural-network)的「层 + 非线性 + 反向传播」、以及 [softmax 与交叉熵](/tutorials/cross-entropy-kl) 就够了;本篇自包含,是全站大模型相关内容的架构地基。
+
+## 一、动机:顺序计算是瓶颈
+
+2017 年之前,序列建模被 RNN/LSTM 统治。RNN 按时间步逐个处理 token,$t$ 步的计算依赖 $t-1$ 步的隐藏状态——这个设计带来两个不可修复的问题:
+
+1. **无法并行**。一个长度为 $n$ 的序列必须串行走 $n$ 步,GPU 的大规模并行能力完全用不上,训练时间随序列长度线性恶化;
+2. **长程依赖衰减**。序列开头的信息要经过 $O(n)$ 步传递才能影响结尾,梯度在长链条中消失或爆炸,「第 1 个词与第 500 个词的关系」很难学。
+
+论文的 Table 1 精确量化了三种层的三笔账(每层、序列长 $n$、维度 $d$):
+
+| 层类型 | 每层计算量 | 顺序操作数 | 最大路径长度 |
+|---|---|---|---|
+| 自注意力 | $O(n^2\cdot d)$ | $O(1)$ | $O(1)$ |
+| 循环(RNN) | $O(n\cdot d^2)$ | $O(n)$ | $O(n)$ |
+| 卷积(Conv) | $O(k\cdot n\cdot d^2)$ | $O(1)$ | $O(\log_k n)$ |
+
+自注意力的杀手锏在第二、三列:**顺序操作数为 1**——所有位置同时算,天然吃满 GPU 并行;**任意两 token 的信息路径长度为 1**——第 1 个词与第 500 个词直接交互,一步到位,长程依赖不再衰减。代价在第一列:计算量随序列长度平方增长。这个 $O(n^2)$ 成了后来所有稀疏注意力(如 [DeepSeek-V3.2 的 DSA](/papers/deepseek-v3-2))要解决的问题——但在 2017 年,序列还短,并行性带来的收益远盖过平方开销。
+
+## 二、缩放点积注意力:一个公式,三个矩阵
+
+注意力要回答的问题:**当前 token 应该从哪些前文 token 取信息、各取多少?** 论文用三个矩阵把它参数化:每个 token 的向量 $\mathbf{x}$ 乘三组投影得到查询(Query)、键(Key)、值(Value)——Q 是「我在找什么」,K 是「我能提供什么」,V 是「我实际携带的信息」。注意力就是「用 Q 和所有 K 算匹配度,按匹配度加权取 V」:
+
+$$
+\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\Big(\frac{QK^{\top}}{\sqrt{d_k}}\Big)V
+$$
+
+直觉版本:一场「检索」。每个 token 发出查询,所有 token 挂出键;查询与键做点积衡量匹配度,softmax 把匹配度变成一组和为 1 的权重,最后按权重把值混合回来。**没有循环、没有卷积,整个「序列内部通信」只靠矩阵乘法。**
+
+论文原版结构图(左)与缩放点积注意力的计算流程(右)——注意 $QK^{\top}$ 后的 scale 与 softmax 方框:
+
+<figure className="my-6 grid gap-4 sm:grid-cols-2">
+  <img src="./fig-architecture.png" alt="Transformer 整体架构:编码器(左)与解码器(右)的堆叠结构" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-attention.png" alt="缩放点积注意力:MatMul → Scale → Mask → SoftMax → MatMul" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="sm:col-span-2 mt-1 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Vaswani et al., <em>Attention Is All You Need</em>(arXiv:1706.03762)Figure 1(左)与 Figure 2 左(右)
+  </figcaption>
+</figure>
+
+### 为什么要除以 $\sqrt{d_k}$?
+
+这是论文最常被问的一步。假设 $q$ 与 $k$ 的各分量是均值 0、方差 1 的独立随机变量,点积 $q\cdot k=\sum_{i=1}^{d_k}q_ik_i$ 的方差是 $d_k$——**点积的标准差随维度 $\sqrt{d_k}$ 增长**。$d_k=64$ 时点积动辄 ±8;若不缩放,softmax 的输入是一堆大正负数,输出会塌缩成 one-hot:**匹配的权重≈1,其余≈0,梯度几乎为零**。除以 $\sqrt{d_k}$ 恰好把点积方差拉回 1,让 softmax 工作在梯度健康的区间。论文脚注给出了这个方差论证,并直言怀疑这是高维下表现差的主因。
+
+用 numpy 完整跑一遍前向——先看一个 token 如何「注意」整句话,再看不除 $\sqrt{d_k}$ 会发生什么:
+
+<CodeRunner defaultCode={String.raw`
+import numpy as np
+
+rng = np.random.default_rng(42)
+
+def softmax(x, axis=-1):
+    x = x - x.max(axis=axis, keepdims=True)   # 数值稳定
+    e = np.exp(x)
+    return e / e.sum(axis=axis, keepdims=True)
+
+# —— 一个 token 如何"注意"整句话 ——
+d_model, d_k = 512, 64
+n = 6
+X = rng.normal(size=(n, d_model))             # 6 个 token 的向量
+Wq, Wk, Wv = (rng.normal(size=(d_model, d_k)) * 0.05 for _ in range(3))
+Q, K, V = X @ Wq, X @ Wk, X @ Wv
+
+scores = Q @ K.T / np.sqrt(d_k)               # 缩放点积
+A = softmax(scores)                           # 注意力权重 (n, n),每行和为 1
+out = A @ V                                   # 加权混合 value
+
+print("注意力矩阵形状:", A.shape, " 每行和:", A.sum(axis=1).round(6)[:3], "...")
+print("最后一个 token 对 6 个 token 的注意力:", A[-1].round(3))
+print("它的新向量 = 所有 token 的 V 按此权重加权和 —— 一步完成全局通信")
+print()
+
+# —— 不除 sqrt(d_k) 会怎样:熵塌缩 ——
+for scaled in [True, False]:
+    s = Q @ K.T / (np.sqrt(d_k) if scaled else 1.0)
+    a = softmax(s)
+    entropy = -(a * np.log(a + 1e-12)).sum(axis=1).mean()   # 均匀分布熵 = ln(6) ≈ 1.79
+    print(f"{'除 sqrt(d_k)' if scaled else '不除':10s} softmax 输入 std={s.std():5.1f}  "
+          f"注意力熵={entropy:.3f}  (ln6={np.log(6):.2f}, 越小越接近 one-hot)")
+
+print()
+print("不缩放时点积方差 = d_k =", d_k, " -> softmax 饱和 -> 梯度消失")
+`} />
+
+## 三、多头注意力:并行问不同的问题
+
+单次注意力只有一个「提问角度」。多头机制把 $d_{\text{model}}$ 切成 $h$ 份,每份独立做注意力,再拼接:
+
+$$
+\operatorname{MultiHead}(Q,K,V)=\operatorname{Concat}(\text{head}_1,\dots,\text{head}_h)\,W^{O},\qquad \text{head}_i=\operatorname{Attention}(QW_i^{Q},\,KW_i^{K},\,VW_i^{V})
+$$
+
+论文取 $h=8$、$d_k=d_v=d_{\text{model}}/h=64$:8 个头各自在 64 维子空间里学一种关系——有的头盯句法依赖,有的头盯指代消解(后续可解释性研究证实了这种自发分工)。因为总维度不变(8 × 64 = 512),多头与「全维单头」计算量几乎相同——**免费买来的表达力**。这个「多头」思想后来一路延伸:MoE 可以看作 FFN 层的多头化(多专家),注意力头数本身也成了架构调参的独立轴([GLM-4.5](/papers/glm-45) 干脆把头数加到 96 换基准分)。
+
+论文原版的多头机制图——$h$ 组线性投影并行做注意力,拼接后再过 $W^O$:
+
+<figure className="my-6">
+  <img src="./fig-multihead.png" alt="多头注意力:h 组投影并行的缩放点积注意力,输出拼接后线性变换" className="mx-auto h-auto max-w-xs rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Vaswani et al., <em>Attention Is All You Need</em>(arXiv:1706.03762)Figure 2 右
+  </figcaption>
+</figure>
+
+## 四、位置编码与残差:补回被丢掉的信息
+
+**注意力本身是排列不变的**——打乱序列顺序,注意力输出只是同步打乱,「谁在谁前面」的信息消失了。RNN 天然带顺序,Transformer 必须显式补回。论文的做法是把位置编成正弦/余弦波加到输入向量上:
+
+$$
+PE_{(pos,2i)}=\sin\!\Big(\frac{pos}{10000^{2i/d_{\text{model}}}}\Big),\qquad PE_{(pos,2i+1)}=\cos\!\Big(\frac{pos}{10000^{2i/d_{\text{model}}}}\Big)
+$$
+
+不同维度 $i$ 对应不同频率的波,波长从 $2\pi$ 到 $10000\cdot 2\pi$ 构成几何级数——像一套不同刻度的尺子,低维量细粒度位置、高维量粗粒度位置。选三角函数而非可学习的位置嵌入,是因为它能**外推到训练没见过的长度**,且 $PE_{pos+k}$ 可以表示成 $PE_{pos}$ 的线性函数,模型容易学到相对位置关系。(后来的模型基本都换成了旋转位置编码 RoPE,但「用一个函数把位置编码进注意力」的思路正是从这里来的。)
+
+每个子层(注意力、FFN)外面都套**残差连接 + LayerNorm**:
+
+$$
+\mathbf{x}'=\operatorname{LayerNorm}\big(\mathbf{x}+\operatorname{Sublayer}(\mathbf{x})\big)
+$$
+
+残差让梯度直通底层、LayerNorm 稳定各层分布——这套组合使「堆 6 层编码器 + 6 层解码器」($N=6$、$d_{\text{model}}=512$、FFN 中间维 $d_{ff}=2048$)能稳定端到端训练。FFN 本体是普通的两层全连接(中间 GELU/ReLU),占参数大头——它是后来 MoE 改造的对象([DeepSeek-V3](/papers/deepseek-v3) 把它换成 256 个专家),注意力层反而基本没动。
+
+解码器多一个约束:训练时用**因果掩码**把「看向未来」的位置设为 $-\infty$(softmax 后为 0),保证自回归性质——这就是今天所有 GPT 系模型的生成约束;解码器还多一个「编码器-解码器注意力」子层,让解码位置可以查询源句(现代 decoder-only 模型已把它去掉)。
+
+## 五、关键实验数字
+
+- **翻译**:WMT 2014 英德 28.4 BLEU(超此前最佳集成系统 2 BLEU 以上),英法 41.8 BLEU(单模型新纪录);base 模型 27.3,只花 $3.3\times10^{18}$ FLOPs——远低于当时所有竞品;
+- **训练成本**:base 模型 8 张 P100 跑 12 小时(10 万步),big 模型 3.5 天(30 万步);参数量分别约 65M 与 213M——放在 2025 年是「玩具规模」;
+- **泛化**:论文结尾用**几乎零修改**的架构做英文成分句法分析,拿到有竞争力的成绩——「架构通用性」的最早证据,直接预言了后来 BERT/GPT 的「预训练一次、微调处处」范式;
+- **训练细节**:Adam + 4000 步 warmup 学习率、标签平滑 $\epsilon_{ls}=0.1$(伤困惑度但涨 BLEU)——这些配方里的每一项后来都被反复研究。
+
+## 六、局限与八年后的回看
+
+1. **平方复杂度**:Table 1 第一列的 $O(n^2\cdot d)$ 在长上下文时代成为主要矛盾,催生了稀疏注意力、线性注意力、状态空间模型(Mamba)一整条研究线;
+2. **KV cache 膨胀**:自回归解码要缓存每个 token 的 K/V,推理显存随长度线性涨——[DeepSeek-V3 的 MLA](/papers/deepseek-v3) 把它压缩 57 倍,是对本文架构最大的后续修正之一;
+3. **位置编码的外推弱点**:绝对正弦编码外推能力有限,后续被 ALiBi、RoPE 逐步取代;RoPE 又派生出 YaRN 等长上下文扩展技术;
+4. **原文并未解决「怎么训练大模型」**:论文只有 6 层、512 维;层归一化的位置(Pre-LN vs Post-LN)、QK-Norm、初始化、优化器稳定性等大模型训练难题都是后来社区补的——但它定义的「注意力 + 残差 + FFN + 位置编码」骨架,八年未变。
+
+## 小结
+
+- **缩放点积注意力** $\operatorname{softmax}(QK^\top/\sqrt{d_k})V$:查询-键匹配、softmax 加权取值;除以 $\sqrt{d_k}$ 是因为点积方差随维度线性增长,不缩放会让 softmax 饱和、梯度消失。
+- **多头**:8 个 64 维子空间并行做注意力再拼接,总计算量不变,表达力免费翻倍。
+- **并行性是真正的贡献**:顺序操作 $O(n)$ → $O(1)$、任意两 token 路径长度 $O(1)$,GPU 才华第一次在序列建模上完全释放——这是它能吃下后来所有 scaling law 的前提。
+- **位置编码 + 残差 + LayerNorm** 补回顺序信息、撑起深度;解码器因果掩码定义了自回归生成。
+- 28.4/41.8 BLEU、12 小时训练、句法分析泛化——2017 年的论文用最小的篇幅论证了标题:**注意力,就是你所需要的一切**。
+
+读本站后续所有内容——从[大模型解码](/tutorials/llm-decoding)的策略,到 [GRPO](/papers/grpo-deepseek-r1)、[DPO](/papers/dpo-rafailov) 的对齐目标——你会发现它们全部运行在这篇论文定义的架构上。Transformer 论文值得精读的原因不是它有多复杂,而是它**用最少的部件换来了最大的通用性**:理解了 $\operatorname{softmax}(QK^\top/\sqrt{d_k})V$ 这一个公式,你就理解了今天所有大模型的心脏。

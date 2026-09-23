@@ -1,0 +1,223 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("logistic-regression");
+
+# 🚦 逻辑回归
+
+前面我们学了**线性回归**(预测连续值)、**梯度下降**(自动找参数)、**交叉熵**(衡量分类损失)。**逻辑回归**正是把这三块拼到一起,做成一个真正能用的**分类器** —— 它是工业界最常用的二分类模型,也是理解神经网络的最后一块跳板。
+
+> 名字里有「回归」,干的却是**分类**的活。别被名字骗了。
+
+## 从线性回归到分类:缺了一步
+
+线性回归输出 $z = wx + b$,取值可以是任意实数(负无穷到正无穷)。但分类要的是**概率**(0 到 1 之间)。怎么把一条直线「压」进 [0, 1]?
+
+答案是 **Sigmoid 函数**:
+
+$$
+\sigma(z) = \frac{1}{1 + e^{-z}}, \qquad z = wx + b
+$$
+
+它是一条优雅的 S 形曲线:$z \to -\infty$ 时趋近 0,$z \to +\infty$ 时趋近 1,$z=0$ 时正好 0.5。于是 $\sigma(z)$ 就可以解读为「样本属于正类的概率」。
+
+从几何上看,逻辑回归仍是**线性模型**:$wx+b=0$ 定义一条直线(高维是超平面),Sigmoid 只是把直线两侧的距离映射成 0~1 的概率。训练完成后,模型在特征空间里画出一条直线,把两类分开 —— 下图是二维特征下逻辑回归的决策函数,橙色/蓝色区域是两个类的「势力范围」:
+
+<figure className="my-6">
+  <img src="./logistic-decision-function.png" alt="二维特征空间中逻辑回归的决策函数:训练散点被一条直线分成两侧,直线一侧的预测概率偏向正类(橙色区域),另一侧偏向负类(蓝色区域),颜色深浅表示概率大小" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Johann Faouzi &amp; Olivier Colliot, <em>Classic machine learning methods</em>(arXiv:2310.11470)Figure 4
+  </figcaption>
+</figure>
+
+## 动手观察 Sigmoid
+
+下面拖动**权重 $w$**(控制曲线陡峭程度)和**偏置 $b$**(控制左右平移),再拖动**查询点 $x$**,看它被判为正类的概率如何变化。注意蓝色虚线 —— 那是概率正好等于 0.5 的**决策边界**:
+
+<SigmoidExplorer />
+
+你会发现:
+
+- **$|w|$ 越大**:曲线越陡,模型分类越「果断」(概率快速从 0 跳到 1)
+- **$w$ 为负**:曲线翻转,大的 $x$ 反而判为负类
+- **$b$ 改变**:整条曲线左右平移,决策边界 $x = -b/w$ 随之移动
+
+## 损失函数:为什么不用 MSE?
+
+既然有了概率预测,怎么衡量好坏?直觉上想用线性回归那套均方误差(MSE),但**对逻辑回归 MSE 会导致非凸的损失曲面**,梯度下降容易卡住。
+
+正确做法是用**交叉熵损失**(也叫对数损失 Log Loss)—— 这正是[交叉熵与 KL 散度](/tutorials/cross-entropy-kl)讲的交叉熵:
+
+$$
+L = -\frac{1}{n}\sum_{i=1}^{n} \Big[ y_i \log \hat{y}_i + (1 - y_i)\log(1 - \hat{y}_i) \Big]
+$$
+
+其中 $\hat{y}_i = \sigma(wx_i + b)$ 是预测概率,$y_i \in \{0, 1\}$ 是真实标签。直觉很清晰:
+
+- 真实是正类($y=1$),预测概率 $\hat{y}$ 越接近 1,损失越小
+- 真实是负类($y=0$),预测概率越接近 0,损失越小
+- 预测「自信地错了」(如 $y=1$ 但 $\hat{y}=0.01$),损失会**急剧变大**
+
+下面用代码看不同预测对应的损失:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+def log_loss(y, p):
+    p = np.clip(p, 1e-9, 1 - 1e-9)  # 防止 log(0)
+    return -(y * np.log(p) + (1 - y) * np.log(1 - p))
+
+print("真实=1, 预测=0.99 →", round(log_loss(1, 0.99), 4), " (预测对,损失极小)")
+print("真实=1, 预测=0.50 →", round(log_loss(1, 0.50), 4), " (拿不准)")
+print("真实=1, 预测=0.01 →", round(log_loss(1, 0.01), 4), " (自信地错,损失爆炸)")
+`} />
+
+## 手写一个逻辑回归
+
+把 Sigmoid + 交叉熵 + 梯度下降拼起来,核心也就十几行。下面用梯度下降训练一个分类器,根据「学习时长」预测能否通过考试:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 特征:学习时长(小时);标签:0=没过, 1=通过
+x = np.array([0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5])
+y = np.array([0,   0, 0,   0, 1,   0, 1,   1, 1,   1])
+
+w, b = 0.0, 0.0
+lr = 0.3
+for epoch in range(2000):
+    z = w * x + b
+    p = 1 / (1 + np.exp(-z))      # sigmoid
+    # 交叉熵损失对 w、b 的梯度(推导后非常简洁)
+    dw = np.mean((p - y) * x)
+    db = np.mean(p - y)
+    w -= lr * dw
+    b -= lr * db
+
+print(f"学到 w={w:.3f}, b={b:.3f}")
+boundary = -b / w
+print(f"决策边界: 学习约 {boundary:.2f} 小时是分水岭")
+for h in [1.5, 2.5, 4.0]:
+    prob = 1 / (1 + np.exp(-(w * h + b)))
+    print(f"  学 {h} 小时 → 通过概率 {prob:.1%}")
+`} />
+
+> 💡 注意梯度 `(p - y) * x` 形式上和线性回归的梯度**一模一样** —— 只是把预测值换成了 Sigmoid 输出。这不是巧合,而是交叉熵 + Sigmoid 的精妙配合。
+
+## 画出拟合的概率曲线
+
+把训练好的 Sigmoid 曲线和原始数据点画在一起,能直观看到模型学到的「概率随学习时长上升」以及 0.5 处的决策边界。**图形直接显示在下方**:
+
+<CodeRunner
+  packages={["matplotlib"]}
+  defaultCode={`
+import numpy as np
+import matplotlib.pyplot as plt
+
+x = np.array([0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5])
+y = np.array([0,   0, 0,   0, 1,   0, 1,   1, 1,   1])
+
+# 梯度下降训练(同上)
+w, b = 0.0, 0.0
+for _ in range(3000):
+    p = 1 / (1 + np.exp(-(w * x + b)))
+    w -= 0.3 * np.mean((p - y) * x)
+    b -= 0.3 * np.mean(p - y)
+
+# 画平滑的 Sigmoid 曲线 + 原始点 + 决策边界
+xs = np.linspace(0, 5.5, 200)
+ps = 1 / (1 + np.exp(-(w * xs + b)))
+boundary = -b / w
+
+plt.figure(figsize=(6, 4))
+plt.plot(xs, ps, color="#059669", lw=2, label="P(pass)")
+plt.scatter(x, y, c=y, cmap="coolwarm", edgecolors="k", zorder=3, label="data")
+plt.axhline(0.5, ls=":", color="#9ca3af")
+plt.axvline(boundary, ls="--", color="#ef4444", label=f"boundary x={boundary:.2f}")
+plt.xlabel("study hours")
+plt.ylabel("probability of passing")
+plt.title("Logistic Regression: fitted sigmoid")
+plt.legend()
+plt.show()
+`} />
+
+> 📝 图中标签用英文,因为浏览器里的 Pyodide 只自带英文字体(中文会显示成方框)。
+
+## 用 scikit-learn 实现
+
+实战中一行搞定。下面顺便引入**决策边界**和**多特征**:
+
+<CodeRunner
+  packages={["scikit-learn"]}
+  defaultCode={`
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+
+# 特征:复习时长、刷题数;标签:是否通过
+X = np.array([
+    [1, 5], [1.5, 8], [2, 10], [2, 20],
+    [3, 25], [3.5, 30], [4, 35], [4.5, 40],
+])
+y = np.array([0, 0, 0, 1, 1, 1, 1, 1])
+
+model = LogisticRegression().fit(X, y)
+print("权重:", model.coef_[0].round(3), " 偏置:", round(model.intercept_[0], 3))
+
+tests = [[2, 12], [3, 28]]
+for t, p in zip(tests, model.predict_proba(tests)):
+    print(f"  {t} → 通过概率 {p[1]:.1%}")
+`} />
+
+## 典型应用场景
+
+逻辑回归因**简单、快、可解释**,在工业界极其常用:
+
+- **金融风控**:根据收入、负债、历史记录预测「是否违约」
+- **医疗诊断**:根据指标预测「患病 / 健康」,并给出概率
+- **点击率预估(CTR)**:广告/推荐系统预测「用户会不会点」,海量特征下仍高效
+- **垃圾邮件过滤**:根据词频判断「垃圾 / 正常」
+- **多分类扩展**:用 Softmax(Sigmoid 的多类版)做手写数字等多分类
+
+> 🔗 把逻辑回归的「线性组合 + Sigmoid」堆叠很多层,加上非线性激活,就成了**神经网络**。所以理解它,等于摸到了深度学习的门。
+
+## 常见问题 FAQ
+
+**Q:逻辑回归是线性模型还是非线性模型?**
+它的**决策边界是线性的**(一条直线/超平面),只是用 Sigmoid 把线性输出映射成了概率。想要非线性边界,需要做特征工程或换模型。
+
+**Q:为什么分类不直接用线性回归 + 阈值?**
+线性回归对异常值极敏感,且输出可能远超 [0,1] 无法当概率;它的 MSE 损失在分类上也是非凸的。Sigmoid + 交叉熵解决了这两点。
+
+**Q:输出的 0.7 真的是「70% 概率」吗?**
+是模型估计的概率。但是否「校准」(calibrated)得看数据;必要时可用 Platt scaling、等渗回归等做概率校准。
+
+**Q:类别极不平衡(99% 负类)怎么办?**
+模型会偏向多数类。可设置 `class_weight='balanced'`、过采样少数类(SMOTE)、或调整决策阈值(不一定用 0.5)。
+
+**Q:需要正则化吗?**
+需要。`scikit-learn` 的 `LogisticRegression` **默认就带 L2 正则**(参数 `C` 控制强度,C 越小正则越强),防止权重过大过拟合。
+
+## 动手作业
+
+1. **改数据看曲线**:在上面画概率曲线的代码里,把某个样本的标签翻转(如把学 3 小时改成「通过」),重新训练,观察 Sigmoid 曲线和决策边界如何移动。
+2. **改学习率**:把手写代码的 `lr` 改成 `0.01` 和 `3.0`,观察收敛速度与稳定性,记录现象。
+3. **对比 MSE**:把损失从交叉熵换成 MSE 来训练,看看是否更难收敛,体会为什么分类要用交叉熵。
+4. **多分类**:查 `LogisticRegression` 的 `multi_class` 行为,在鸢尾花数据集(`sklearn.datasets.load_iris`)上做三分类。
+5. **思考题**:决策边界 $wx+b=0$ 解出的阈值,和你直觉里数据「分界处」一致吗?如果把阈值从 0.5 调成 0.3,精确率和召回率会怎么变?
+
+## 延伸阅读
+
+- **站内教程**:[线性回归](/tutorials/linear-regression) —— 逻辑回归的「前身」:同样的线性组合 $wx+b$,只是输出从连续值换成了过 Sigmoid 的概率
+- **站内教程**:[朴素贝叶斯](/tutorials/naive-bayes) —— 另一头的对照:生成式 vs 判别式,两个最经典的概率分类器
+- **经典论文**:Cox, D. R. (1958). *The Regression Analysis of Binary Sequences*. [JSTOR](https://www.jstor.org/stable/2983890) —— 逻辑回归的源头:把回归分析第一次用于二值数据,统计上奠定了这个模型
+
+## 小结
+
+| 要点 | 说明 |
+|---|---|
+| 本质 | 线性组合 $wx+b$ → Sigmoid → 概率 → 阈值分类 |
+| 损失 | **交叉熵 / 对数损失**(不是 MSE),凸函数好优化 |
+| 训练 | 梯度下降,梯度形式 $(\hat{y}-y)x$ 异常简洁 |
+| 优点 | 简单、快、概率可解释、特征权重可读 |
+| 局限 | 决策边界是线性的;不平衡数据需特别处理 |
+
+> 🎯 一句话:**逻辑回归 = 线性回归的输出过一道 Sigmoid,再用交叉熵当损失。** 它把前几篇的知识第一次串成了一个完整、实用的分类器,也是通往神经网络的桥梁。

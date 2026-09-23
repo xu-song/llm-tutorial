@@ -1,0 +1,1007 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("dynamic-programming");
+
+# 📐 动态规划:已知模型时精确求解
+
+[强化学习入门](/tutorials/reinforcement-learning)里的 Q-learning 是**靠试错**一点点摸出好策略的。但如果我们**已经完全知道环境的规则**——在状态 $s$ 做动作 $a$ 会以多大概率转移到哪、拿多少奖励——还需要试错吗?不需要:可以直接用**动态规划(Dynamic Programming, DP)** 把最优策略**精确算出来**。
+
+DP 是整个强化学习的理论地基。Q-learning、DQN 本质上都是「在**不知道**模型时,用采样去近似 DP 的精确计算」。先看懂精确版,才能真正理解那些近似版在做什么。
+
+## 前提:一个已知的 MDP
+
+动态规划要求环境的两样东西**完全已知**:
+
+- **转移概率** $P(s'\mid s,a)$:在 $s$ 做 $a$,落到各个 $s'$ 的概率;
+- **奖励函数** $r(s,a,s')$:这一步拿多少奖励。
+
+有了它们,就不必真去环境里走——每一步都能**在纸上(或内存里)把所有可能的后继状态加权求和**。这正是 DP 与 Q-learning 的分水岭:DP 需要模型、做全空间精确扫描;Q-learning 不需要模型、用采样的 $(s,a,r,s')$ 近似这个求和。
+
+## Bellman 方程:价值的自洽条件
+
+一切从**贝尔曼方程**出发。它说的是一件朴素的事:**一个状态的价值 = 立刻拿到的奖励 + 后继状态价值的折扣**。
+
+固定一个策略 $\pi$ 时,它的价值满足**贝尔曼期望方程**:
+
+$$
+V^\pi(s) = \sum_{s'} P(s'\mid s,\pi(s))\big[r + \gamma\,V^\pi(s')\big]
+$$
+
+而**最优**价值满足**贝尔曼最优方程**——把「按 π 走」换成「取最好的动作」:
+
+$$
+V^*(s) = \max_a \sum_{s'} P(s'\mid s,a)\big[r + \gamma\,V^*(s')\big]
+$$
+
+两者只差一个 $\max$:期望方程**评估**一个给定策略,最优方程**寻找**最优策略。动态规划的两大算法,正是分别围绕这两个方程展开。
+
+## 价值迭代(Value Iteration)
+
+最直接的想法:把贝尔曼最优方程当**更新规则**反复套用,让价值自己收敛到 $V^*$:
+
+$$
+V_{k+1}(s) \leftarrow \max_a \sum_{s'} P(s'\mid s,a)\big[r + \gamma\,V_k(s')\big]
+$$
+
+一轮扫过所有状态叫一次「sweep」。当两次 sweep 的最大变化小于阈值 $\theta$ 就停,再对最终的 $V^*$ **贪心**一次抽出最优策略 $\pi^*(s)=\arg\max_a Q^*(s,a)$。
+
+**拖动下面的「sweep」滑块**,亲眼看价值如何从目标 🏁 出发、**每轮向外扩散一圈**地「倒灌」回起点——第 $k$ 次 sweep 后,只有距目标 $k$ 步以内的格子才「知道」该往哪走:
+
+<ValueIterationHeatmap />
+
+下面是它的完整代码。因为转移是确定的(撞墙留原地),求和退化成单个后继——注意它只用了**几次 sweep** 就收敛:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+N, GOAL, PIT, START = 4, 15, 9, 0
+A = [(0,-1),(1,0),(0,1),(-1,0)]   # 上 右 下 左
+gamma = 0.9
+TERM = {GOAL, PIT}
+
+def nxt(s, a):                     # 已知模型:确定性转移
+    r, c = divmod(s, N); dc, dr = A[a]
+    nr, nc = r + dr, c + dc
+    return nr*N + nc if (0 <= nr < N and 0 <= nc < N) else s
+
+def reward(s):
+    return 1.0 if s == GOAL else -1.0 if s == PIT else -0.02
+
+V = np.zeros(N*N)
+for sweep in range(1000):
+    delta = 0.0
+    for s in range(N*N):
+        if s in TERM: continue
+        old = V[s]
+        # 贝尔曼最优备份:对所有动作取 max(这里转移确定,求和只剩一项)
+        V[s] = max(reward(nxt(s,a)) + (0 if nxt(s,a) in TERM else gamma*V[nxt(s,a)])
+                   for a in range(4))
+        delta = max(delta, abs(old - V[s]))
+    if delta < 1e-6:
+        break
+
+# 从 V* 贪心抽取最优策略
+pi = [int(np.argmax([reward(nxt(s,a)) + (0 if nxt(s,a) in TERM else gamma*V[nxt(s,a)])
+                     for a in range(4)])) for s in range(N*N)]
+
+s, path = START, [START]
+for _ in range(20):
+    if s in TERM: break
+    s = nxt(s, pi[s]); path.append(s)
+
+print(f"价值迭代在 {sweep} 次 sweep 后收敛")
+print("最优路径:", path, "| 到达 🏁:", path[-1]==GOAL, "| 避开 🕳️:", PIT not in path)
+print("-> 完全没试错,直接算出了和 Q-learning 一样的最优策略")
+`} />
+
+## 策略迭代(Policy Iteration)
+
+另一条路不去逼近价值,而是**直接在策略上迭代**,两步交替:
+
+1. **策略评估(policy evaluation)**:固定当前策略 $\pi$,用贝尔曼**期望**方程反复更新,算准它的 $V^\pi$;
+2. **策略改进(policy improvement)**:对刚算出的 $V^\pi$ **贪心**,得到一个不差于原策略的新策略。
+
+只要策略还在变就继续,直到**策略稳定不再改变**——此时它必然最优。下面在同一网格上跑策略迭代,它通常只需**极少几轮**就锁定最优策略:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+N, GOAL, PIT, START = 4, 15, 9, 0
+A = [(0,-1),(1,0),(0,1),(-1,0)]
+gamma = 0.9
+TERM = {GOAL, PIT}
+
+def nxt(s, a):
+    r, c = divmod(s, N); dc, dr = A[a]
+    nr, nc = r + dr, c + dc
+    return nr*N + nc if (0 <= nr < N and 0 <= nc < N) else s
+
+def reward(s):
+    return 1.0 if s == GOAL else -1.0 if s == PIT else -0.02
+
+def q(s, a, V):
+    ns = nxt(s, a)
+    return reward(ns) + (0 if ns in TERM else gamma*V[ns])
+
+pi = [0]*(N*N)                     # 初始策略:全「上」
+for rounds in range(100):
+    # 1) 策略评估:把当前策略的 V^pi 算准
+    V = np.zeros(N*N)
+    while True:
+        d = 0.0
+        for s in range(N*N):
+            if s in TERM: continue
+            old = V[s]; V[s] = q(s, pi[s], V)
+            d = max(d, abs(old - V[s]))
+        if d < 1e-9: break
+    # 2) 策略改进:对 V^pi 贪心
+    stable = True
+    for s in range(N*N):
+        if s in TERM: continue
+        best = int(np.argmax([q(s, a, V) for a in range(4)]))
+        if best != pi[s]:
+            pi[s] = best; stable = False
+    if stable:
+        break
+
+s, path = START, [START]
+for _ in range(20):
+    if s in TERM: break
+    s = nxt(s, pi[s]); path.append(s)
+
+print(f"策略迭代在 {rounds+1} 轮后策略稳定")
+print("最优路径:", path, "| 到达 🏁:", path[-1]==GOAL, "| 避开 🕳️:", PIT not in path)
+`} />
+
+## 两者对比
+
+| | 价值迭代 | 策略迭代 |
+|---|---|---|
+| 迭代对象 | 价值函数 $V$ | 策略 $\pi$ |
+| 内层备份 | $\max_a$(最优方程) | 固定 $\pi$(期望方程) |
+| 停止条件 | $V$ 收敛(变化 $<\theta$) | 策略不再改变 |
+| 单轮开销 | 便宜(一次扫描) | 较贵(内含完整评估) |
+| 迭代次数 | 可能较多 | 极少(策略数有限,必然有限步收敛) |
+
+两者都在**折扣 $\gamma<1$** 的有限 MDP 上**保证收敛到最优**(贝尔曼算子是压缩映射)。实践中价值迭代实现简单,策略迭代往往用更少轮数就锁定策略——很多现代算法(如 [Actor-Critic](/tutorials/policy-gradient))本质上就是「广义策略迭代」:评估与改进交替进行的思想。
+
+## 收敛理论:为什么 DP 一定收敛到最优
+
+上面一句话带过「贝尔曼算子是压缩映射」,这一节把这个**整个 DP 理论的心脏**完整展开——它回答一个根本问题:**凭什么反复套用贝尔曼备份,就一定逼近唯一的最优价值 $V^*$,而不会震荡或发散?** 答案是**压缩映射定理(Contraction Mapping Theorem,又称 Banach 不动点定理)**。下面把定义、证明、误差界、有限步收敛逐条讲清楚。
+
+### 贝尔曼算子:把「一次备份」当成函数
+
+把值迭代的一次全空间扫描看成**算子** $T^*$ 作用在价值函数上(Bellman 1957):
+
+$$
+(T^*V)(s) \;=\; \max_a \sum_{s'} P(s'\mid s,a)\big[r(s,a,s') + \gamma\,V(s')\big]
+$$
+
+$T^*$ 吃一个价值函数 $V$,吐出一次备份后的新价值函数。值迭代 $V_{k+1}=T^*V_k$ 就是反复套用 $T^*$。$V^*$ 是 $T^*$ 的**不动点**(fixed point):$T^*V^*=V^*$——这正是贝尔曼最优方程。要证值迭代收敛,只需证 $T^*$ 是**压缩映射**。
+
+### 关键引理:$|\max_a f(a) - \max_a g(a)| \le \max_a |f(a)-g(a)|$
+
+证明 $T^*$ 是压缩前,先需要一个关于 $\max$ 的小引理。设 $a_f=\arg\max_a f(a)$、$a_g=\arg\max_a g(a)$,则:
+
+$$
+\max_a f(a) - \max_a g(a) \;=\; f(a_f) - g(a_f) \;\le\; |f(a_f)-g(a_f)| \;\le\; \max_a |f(a)-g(a)|
+$$
+
+(中间用了 $g(a_f)\le\max_a g(a)$ 把 $f(a_f)-\max_a g(a)$ 放大成 $f(a_f)-g(a_f)$。)对称地交换 $f,g$ 得到另一半,合并即 $|\max f-\max g|\le\max|f-g|$。直觉:**取 max 不会放大两个函数的差距**——max 是「1-Lipschitz」的。
+
+### 定理:$T^*$ 是 $\gamma$-压缩
+
+用无穷范数 $\|V\|_\infty=\max_s|V(s)|$ 度量价值函数的距离。对任意 $V,W$:
+
+$$
+\|T^*V - T^*W\|_\infty \;\le\; \gamma\,\|V-W\|_\infty
+$$
+
+**证明**:对每个状态 $s$,用上面的 max 引理,
+
+$$
+|(T^*V)(s)-(T^*W)(s)| \;\le\; \max_a \Big|\sum_{s'} P(s'\mid s,a)\,\gamma\,(V(s')-W(s'))\Big|
+$$
+
+把 $\gamma$ 提出、把 $|V(s')-W(s')|$ 放大成 $\|V-W\|_\infty$,再用 $\sum_{s'}P(s'\mid s,a)=1$:
+
+$$
+\le\; \gamma\,\|V-W\|_\infty \,\underbrace{\sum_{s'} P(s'\mid s,a)}_{=1} \;=\; \gamma\,\|V-W\|_\infty
+$$
+
+对 $s$ 取 max 即得。$\square$
+
+**$\gamma<1$ 是全部关键**:每次套 $T^*$,价值函数之间的距离至少乘以 $\gamma$ 缩小。$\gamma=1$(无折扣)时 $T^*$ 不再压缩,有限 MDP 上可能不收敛——这就是为什么 DP 的收敛保证需要折扣。
+
+### Banach 不动点定理:压缩映射必有唯一不动点
+
+**定理(Banach, 1922)**:若 $T$ 是完备度量空间上的 $\gamma$-压缩,则:(i) 存在唯一不动点 $V^*$ 使 $T V^*=V^*$;(ii) 从任意初值 $V_0$ 出发,$V_k=T^kV_0$ 必收敛到 $V^*$。
+
+证明思路:相邻两次的距离 $\|V_{k+1}-V_k\|=\|T V_k-TV_{k-1}\|\le\gamma\|V_k-V_{k-1}\|$,递推得 $\|V_{k+1}-V_k\|\le\gamma^k\|V_1-V_0\|$。对部分和用三角不等式,$\{V_k\}$ 是 Cauchy 列,完备性保证收敛;极限 $V^*$ 满足 $T V^*=V^*$(压缩映射的不动点唯一:若 $V^*,W^*$ 都是不动点,$\|V^*-W^*\|=\|TV^*-TW^*\|\le\gamma\|V^*-W^*\|$,而 $\gamma<1$ 蕴含 $\|V^*-W^*\|=0$)。
+
+把 $T=T^*$ 代入:**值迭代必然收敛到唯一的最优价值 $V^*$**。这就是「为什么 DP 一定收敛」的严格答案。
+
+### 误差界:值迭代离 $V^*$ 还有多远
+
+Banach 定理只说「会收敛」,没说「多快」。两条经典误差界把收敛速度量化(见 Puterman 1994《Markov Decision Processes》、Sutton & Barto 2018 §4.4):
+
+**先验界(a priori)**——只用初值估计上界:
+
+$$
+\|V_k - V^*\|_\infty \;\le\; \frac{\gamma^k}{1-\gamma}\,\|V_1 - V_0\|_\infty
+$$
+
+**后验界(a posteriori)**——用最近两次的差估计(这才是**实践中当停止准则用的界**):
+
+$$
+\|V_k - V^*\|_\infty \;\le\; \frac{\gamma}{1-\gamma}\,\|V_k - V_{k-1}\|_\infty
+$$
+
+直觉:相邻两次的差 $\|V_k-V_{k-1}\|$ 是个**可观测量**(每次 sweep 都能算),把它乘以 $\gamma/(1-\gamma)$ 就包住真实误差。$\gamma=0.9$ 时这个放大因子是 9——所以实践中常设停止阈值 $\theta=10^{-3}$,因为停时真实误差已被压到 $\le 9\times10^{-3}$。先验界告诉我们**要达到误差 $\epsilon$ 至多需 $k\ge\lceil\log_\gamma(\epsilon(1-\gamma)/\|V_1-V_0\|)\rceil$ 次 sweep**——对 $\gamma=0.9$、$\epsilon=0.01$、$\|V_1-V_0\|\approx 1$ 大约 657 次,这与下方玩具观察到的「$0.9^k$ 几何衰减」一致。
+
+下面的玩具把后验界跑出来,亲眼看它**每一轮都包住真实误差**:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+N, GOAL, PIT = 4, 15, 9
+A = [(0,-1),(1,0),(0,1),(-1,0)]
+gamma = 0.9
+TERM = {GOAL, PIT}
+
+def nxt(s, a):
+    r, c = divmod(s, N); dc, dr = A[a]
+    nr, nc = r+dr, c+dc
+    return nr*N+nc if (0<=nr<N and 0<=nc<N) else s
+
+def reward(s):
+    return 1.0 if s==GOAL else -1.0 if s==PIT else -0.02
+
+def q(s, a, V):
+    ns = nxt(s, a)
+    return reward(ns) + (0 if ns in TERM else gamma*V[ns])
+
+# 先把真值 V* 跑到极精确(值迭代到 1e-12)
+V = np.zeros(N*N)
+while True:
+    d = 0.0
+    for s in range(N*N):
+        if s in TERM: continue
+        old = V[s]; V[s] = max(q(s,a,V) for a in range(4)); d = max(d, abs(old-V[s]))
+    if d < 1e-12: break
+Vstar = V.copy()
+
+# 重跑值迭代,每轮打印真实误差 vs 后验界
+V = np.zeros(N*N)
+print(f"gamma={gamma}, 放大因子 gamma/(1-gamma)={gamma/(1-gamma):.1f}")
+print(f"{\"k\":>3} {\"真实误差‖Vk-V*‖∞\":>20} {\"后验界\":>12} {\"包住?\":>8}")
+for k in range(1, 8):
+    newV = np.array([V[s] if s in TERM else max(q(s,a,V) for a in range(4)) for s in range(N*N)])
+    err = float(np.max(np.abs(newV - Vstar)))
+    post = gamma/(1-gamma) * float(np.max(np.abs(newV - V)))
+    hold = "✓" if post >= err else "✗"
+    print(f"{k:>3} {err:>20.6f} {post:>12.6f} {hold:>8}")
+    V = newV
+    if float(np.max(np.abs(V - Vstar))) < 1e-12 and k > 5:
+        print(f"-> 第 {k} 轮已收敛 (真实误差=0), 但后验界要再迟一轮才归零 —— 这就是为何停止阈值要留余量")
+        break
+print("\\n-> 每轮后验界都 >= 真实误差 (✓), 且二者都以 ~gamma=0.9 的速率衰减")
+`} />
+
+> 💡 **看图要点**:后验界 $\frac{\gamma}{1-\gamma}\|V_k-V_{k-1}\|$ **每一轮都包住**真实误差 $\|V_k-V^*\|$(全 ✓),这是它能当停止准则的原因。注意当真实误差在第 6 轮归零(已收敛)时,后验界仍非零——**停止界永远「保守一格」**,所以实践中阈值要留余量。真实误差与后验界都以约 $\gamma=0.9$ 的速率几何衰减,与先验界 $\gamma^k/(1-\gamma)$ 的预测一致。
+
+### 策略迭代:Howard 1960 的有限步收敛
+
+值迭代是「渐近收敛」(无穷步才精确到 $V^*$),策略迭代更强——**有限步必收敛**。这是 Howard 1960《Dynamic Programming and Markov Processes》的核心结论:
+
+**定理(策略迭代有限步收敛)**:在有限 MDP 上,策略迭代至多在 $|\mathcal{A}|^{|\mathcal{S}|}$ 轮内收敛到最优策略。
+
+证明依赖两个事实:① **策略改进单调不减**——若 $\pi'$ 是对 $V^\pi$ 的贪心策略,则 $V^{\pi'}\ge V^\pi$(每个状态都不变好则变好);② **确定性策略总数有限**——恰好 $|\mathcal{A}|^{|\mathcal{S}|}$ 个。单调不减 + 有限状态空间 $\Rightarrow$ 必然在有限步内到达「再改进也不变」的策略,此时 $\pi$ 已最优(若 $V^\pi=V^{\pi'}$ 则 $V^\pi$ 满足贝尔曼最优方程 $\Rightarrow V^\pi=V^*$)。
+
+> ⚠️ **$|\mathcal{A}|^{|\mathcal{S}|}$ 是个松上界**:4×4 网格有 $4^{16}\approx4.3\times10^9$ 个确定性策略,但实际策略迭代通常**几轮**就锁定。下面玩具在同一网格上跑,亲眼看它多少轮收敛:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+N, GOAL, PIT = 4, 15, 9
+A = [(0,-1),(1,0),(0,1),(-1,0)]
+gamma = 0.9
+TERM = {GOAL, PIT}
+
+def nxt(s, a):
+    r, c = divmod(s, N); dc, dr = A[a]
+    nr, nc = r+dr, c+dc
+    return nr*N+nc if (0<=nr<N and 0<=nc<N) else s
+
+def reward(s):
+    return 1.0 if s==GOAL else -1.0 if s==PIT else -0.02
+
+def q(s, a, V):
+    ns = nxt(s, a)
+    return reward(ns) + (0 if ns in TERM else gamma*V[ns])
+
+pi = [0]*(N*N)   # 初始策略:全「上」
+upper = 4**(N*N)
+for rounds in range(1, 100):
+    # 1) 策略评估
+    V = np.zeros(N*N)
+    while True:
+        d = 0.0
+        for s in range(N*N):
+            if s in TERM: continue
+            old = V[s]; V[s] = q(s, pi[s], V); d = max(d, abs(old-V[s]))
+        if d < 1e-10: break
+    # 2) 策略改进
+    stable = True
+    for s in range(N*N):
+        if s in TERM: continue
+        best = int(np.argmax([q(s,a,V) for a in range(4)]))
+        if best != pi[s]: pi[s] = best; stable = False
+    if stable:
+        print(f"策略迭代在第 {rounds} 轮策略稳定 -> 收敛")
+        print(f"理论上界 |A|^|S| = 4^{N*N} = {upper:,}")
+        print(f"实际轮数 {rounds} 远小于上界 —— Howard 1960 的界虽松但保证了「有限步必停」")
+        break
+`} />
+
+### 修正策略迭代:在 VI 与 PI 之间连续插值
+
+值迭代(每轮做 1 次备份就改进)和策略迭代(评估做到底再改进)是两个极端。**修正策略迭代(Modified Policy Iteration, van Nunen 1976; Puterman & Shin 1978)**取中间:每轮做 $m$ 次部分评估($m>1$)再做 1 次改进。$m=1$ 退化成值迭代,$m\to\infty$ 退化成策略迭代——$m$ 是「评估深度」旋钮,在「单次备份便宜但粗糙」与「完整评估精确但昂贵」间权衡。它仍收敛(本质是 GPI),且往往比两端都快。
+
+### VI vs PI:收敛速率的权衡
+
+前面三小节分别给了 VI 的几何收敛界、PI 的有限步收敛定理、修正 PI 的插值定位。但它们各讲各的,没正面回答一个工程上最关心的问题:**给定一个 MDP,该选 VI 还是 PI?** 这一小节把三者的收敛速率与每步开销摆在一起,看清权衡的几何。
+
+**值迭代:渐近几何收敛,速率 $\gamma$。** 前面误差界小节已证 $\|V_k-V^*\|_\infty\le\gamma^k\|V_0-V^*\|_\infty$——误差以 $\gamma$ 的速率几何衰减。要达到精度 $\varepsilon$,需
+
+$$
+k\;\ge\;\frac{\log(\varepsilon/\|V_0-V^*\|_\infty)}{\log\gamma}
+$$
+
+步。$\gamma$ 越接近 1(长程问题),收敛越慢:$\gamma=0.9$ 需约 66 步到 $10^{-3}$,$\gamma=0.99$ 需约 688 步。**每步开销** $O(|\mathcal S|^2|\mathcal A|)$(对每个 $(s,a)$ 扫一遍后继状态)。
+
+**策略迭代:有限步收敛,每步贵。** Howard 1960 保证至多 $|\mathcal A|^{|\mathcal S|}$ 轮收敛,但实际通常几轮就锁定。**每步开销** $O(|\mathcal S|^3)$(策略评估解线性方程组 $(I-\gamma P_\pi)V=R_\pi$)。PI 的收敛不是「几何衰减」而是「策略单调改进直到稳定」——每轮要么策略严格变好,要么已最优。
+
+**修正策略迭代:用有偏评估换步数。** 前面说 $m$ 是评估深度旋钮。关键洞见:修正 PI 的**策略**仍在有限步稳定(同 PI 的单调改进论证),但策略稳定时 $V$ **不一定**等于 $V^*$——$m$ 次 backup 只给了 $V^\pi$ 的近似,策略稳定意味着「贪心策略不再变」,可 $V$ 还在朝 $V^\pi$ 走的路上。这正是修正 PI 与 PI 的本质区别:**PI 每轮精确评估,策略稳定即 $V=V^*$;修正 PI 每轮部分评估,策略稳定时 $V$ 仍有偏**。$m$ 越大越接近 PI(偏差小但每步贵),$m=1$ 退化 VI(每步便宜但策略改进慢)。
+
+**权衡的几何。** 三者的收敛曲线形状根本不同:
+
+| 方法 | 收敛性质 | 每步开销 | 典型步数 | 适合 |
+|---|---|---|---|---|
+| 值迭代 | 渐近几何 $\gamma^k$ | $O(S^2A)$ | $\frac{\log\varepsilon}{\log\gamma}$ 步 | $S$ 大、$\gamma$ 不太接近 1 |
+| 策略迭代 | 有限步单调改进 | $O(S^3)$ | 几轮(理论界 $A^S$ 极松) | $S$ 中等、需要精确 $V^*$ |
+| 修正 PI | 策略有限步 + $V$ 有偏 | $O(mS^2A)$ | 几轮($V$ 末误差 $\propto\gamma^m$) | $S$ 大、PI 的 $S^3$ 扛不住 |
+
+直觉:VI 每步便宜但几何速率受 $\gamma$ 钳制,PI 每步贵但步数极少。当 $S$ 小时 PI 的 $S^3$ 可接受、几轮就收敛,选 PI;当 $S$ 大时 PI 的 $S^3$ 成为瓶颈,选 VI 或修正 PI。修正 PI 是工程折中——用 $m$ 次 backup 近似 $V^\pi$ 绕开 $S^3$ 求解,代价是 $V$ 的有偏。
+
+下面三段代码用 20 状态随机 MDP 实证:VI 的误差比值趋近 $\gamma$(几何收敛)、PI 几轮就稳定(理论界极松)、修正 PI 策略稳定但 $V$ 有偏。
+
+<CodeRunner defaultCode={`import numpy as np
+
+# 20 状态随机 MDP, 4 动作, γ=0.9
+np.random.seed(42)
+S, A, GAMMA = 20, 4, 0.9
+P = np.random.rand(S, A, S); P /= P.sum(axis=2, keepdims=True)
+R = np.random.rand(S, A) * 2 - 1   # [-1, 1]
+
+# 真值: 值迭代 5000 步
+V_star = np.zeros(S)
+for _ in range(5000):
+    V_star = (R + GAMMA * (P @ V_star)).max(axis=1)
+print(f"V* (前5) = {np.round(V_star[:5], 4)}")
+
+# 段1: 值迭代几何收敛 (误差比值应趋近 γ)
+print("\\n=== 段1: 值迭代几何收敛 (γ=0.9) ===")
+print(f"{'k':>3} {'||V_k-V*||inf':>16} {'比值':>7} {'γ^k':>9}")
+V = np.zeros(S); prev = None
+for k in range(1, 21):
+    V = (R + GAMMA * (P @ V)).max(axis=1)
+    err = np.max(np.abs(V - V_star))
+    ratio = err/prev if prev and prev > 1e-15 else 0
+    print(f"{k:>3} {err:>16.6f} {ratio:>7.4f} {GAMMA**k:>9.5f}")
+    prev = err
+print("看点: 比值从 0.889 趋近 0.900 = γ, 误差以 γ^k 几何衰减, 与上节误差界吻合。")
+`} title="段1: 值迭代几何收敛" />
+
+<CodeRunner defaultCode={`import numpy as np
+
+# 同一 20 状态随机 MDP
+np.random.seed(42)
+S, A, GAMMA = 20, 4, 0.9
+P = np.random.rand(S, A, S); P /= P.sum(axis=2, keepdims=True)
+R = np.random.rand(S, A) * 2 - 1
+V_star = np.zeros(S)
+for _ in range(5000):
+    V_star = (R + GAMMA * (P @ V_star)).max(axis=1)
+
+# 段2: 策略迭代有限步 (随机初始策略)
+print("=== 段2: 策略迭代有限步 (随机初始策略) ===")
+np.random.seed(1)
+pi = np.random.randint(0, A, S)
+for rnd in range(1, 30):
+    P_pi = P[np.arange(S), pi]; R_pi = R[np.arange(S), pi]
+    V = np.linalg.solve(np.eye(S) - GAMMA*P_pi, R_pi)   # 精确策略评估 O(S³)
+    new_pi = (R + GAMMA * (P @ V)).argmax(axis=1)
+    stable = np.array_equal(new_pi, pi)
+    err = np.max(np.abs(V - V_star))
+    print(f"  轮 {rnd}: ||V-V*||={err:.6f}, 稳定={stable}")
+    pi = new_pi
+    if stable:
+        print(f"  -> PI 第 {rnd} 轮收敛 (理论界 |A|^|S| = {A}^{S} = {A**S:.2e}, 实际远小于)")
+        break
+print("看点: PI 2-3 轮就收敛, Howard 的 |A|^|S| 上界极松; 每轮 O(S³) 但步数极少。")
+`} title="段2: 策略迭代有限步" />
+
+<CodeRunner defaultCode={`import numpy as np
+
+# 同一 20 状态随机 MDP
+np.random.seed(42)
+S, A, GAMMA = 20, 4, 0.9
+P = np.random.rand(S, A, S); P /= P.sum(axis=2, keepdims=True)
+R = np.random.rand(S, A) * 2 - 1
+V_star = np.zeros(S)
+for _ in range(5000):
+    V_star = (R + GAMMA * (P @ V_star)).max(axis=1)
+
+# 段3: 修正策略迭代 — 策略有限步稳定, 但 V 有偏
+print("=== 段3: 修正策略迭代 (m 次 backup 部分评估) ===")
+print(f"{'m':>3} {'收敛轮数':>8} {'末误差 ||V-V*||':>18} {'每轮开销':>10}")
+for m in [1, 2, 3, 5, 10]:
+    np.random.seed(1)
+    pi = np.random.randint(0, A, S); V = np.zeros(S)
+    for rnd in range(1, 50):
+        for _ in range(m):   # 部分评估: m 次 backup (用当前策略)
+            V = R[np.arange(S), pi] + GAMMA * (P[np.arange(S), pi] @ V)
+        new_pi = (R + GAMMA * (P @ V)).argmax(axis=1)
+        if np.array_equal(new_pi, pi):
+            err = np.max(np.abs(V - V_star))
+            print(f"{m:>3} {rnd:>8} {err:>18.4e} {'O(m·S²A)':>10}")
+            break
+        pi = new_pi
+print()
+print("看点: 策略都在几轮内稳定 (同 PI 单调改进), 但 m 小时 V 末误差大 (有偏评估)。")
+print("      m=1 退化 VI (每步便宜但 V 偏差大); m→∞ 趋近 PI (精确评估但每步贵)。")
+print("      修正 PI 用有偏评估换步数: 绕开 PI 的 O(S³) 求解, 代价是 V 不精确。")
+`} title="段3: 修正策略迭代的有偏评估" />
+
+> 💡 **与 TD 收敛理论的对照**:本节的 VI 几何收敛 $\|V_k-V^*\|\le\gamma^k\|V_0-V^*\|$ 与 temporal-difference 篇的 TD(0) 预测收敛([R121 小节](/tutorials/temporal-difference#td0-预测的收敛性自举凭什么不跑偏))、TD(λ) 收敛([R122 小节](/tutorials/temporal-difference#tdλ-预测的收敛性λ-改变什么不改变什么))同属**压缩算子族的几何收敛**——VI 的 $T^*$ 是 $\gamma$-压缩(确定性),TD(0) 的 $T^\pi$ 也是 $\gamma$-压缩(随机逼近),TD(λ) 的 $T^\lambda$ 压缩常数 $\le\gamma$。区别在于:DP 的 $T^*/T^\pi$ 是**确定性算子**(已知模型,直接矩阵运算),TD 的 $T^\pi/T^\lambda$ 是**随机逼近**(模型未知,靠样本估计 + Robbins-Monro 驯服噪声)。DP 收敛是「压缩 + Banach」两层结构,TD 收敛是「压缩 + 随机逼近」三层结构——多出的第三层是「样本噪声」,需要步长衰减条件 $\sum\alpha_k=\infty,\sum\alpha_k^2<\infty$。
+
+### 异步 DP:不必整齐扫全表
+
+前面所有算法都有一个隐含前提:**每一轮把状态表从头到尾扫一遍(sweep)**,而且用的是上一轮的旧值。这叫**同步 DP(synchronous DP)**,也叫 **Jacobi 迭代**——需要开两份数组(旧 $V_k$、新 $V_{k+1}$),一轮内所有 backup 都读同一份旧值。可现实里状态空间常常大到「扫一遍」本身就是奢侈:西洋双陆棋约 $10^{20}$ 个状态,连一次完整 sweep 都跑不完。**异步 DP(asynchronous DP, Bertsekas 1982 [9];Sutton & Barto §4.5 [5])**打破了「整齐扫全表」的枷锁——它以**任意次序、原地(in-place)**更新单个状态,只要保证**每个状态被更新的次数趋于无穷**,就仍收敛到 $V^*$。这不是近似,是等价的收敛保证,却给了两个自由度:**更新次序**与**更新频率**。
+
+#### Gauss-Seidel:原地更新,让新值立刻传播
+
+最小的一步改动:不开第二份数组,**原地覆写**——backup 一个状态就立刻写回,后面状态的 backup 就能读到这个刚更新的新值。这就是 **Gauss-Seidel 迭代**(前面「值迭代」小节的网格代码其实已经是原地版,只是没点名)。它与 Jacobi 的唯一区别是「读旧值还是读刚写的新值」,但收敛常常快近一倍——因为信息在**一轮之内**就能跨多个状态传播,而 Jacobi 要等下一轮。
+
+关键洞见:**Gauss-Seidel 的收敛速度强烈依赖 sweep 的方向**。若价值需要从目标「倒灌」回起点,而你恰好**逆着信息流**扫(从起点扫到目标),那新值要下一轮才用得上,退化回 Jacobi;若**顺着信息流**扫(从目标扫回起点),一轮就能把价值灌穿整条链。下面在一条 50 状态的链上实测(目标在最右端,价值向左传播):
+
+<CodeRunner defaultCode={`import numpy as np
+
+N, GAMMA, GOAL = 50, 0.95, 49
+def nxt(s, a): return min(s+1, N-1) if a == 1 else max(s-1, 0)   # a=1 右, a=0 左
+def reward(s, a): return 1.0 if nxt(s, a) == GOAL else 0.0
+def backup(V, s):
+    if s == GOAL: return 0.0
+    return max(reward(s, a) + (0 if nxt(s, a) == GOAL else GAMMA*V[nxt(s, a)]) for a in (0, 1))
+
+# 真值
+Vs = np.zeros(N)
+for _ in range(5000): Vs = np.array([backup(Vs, s) for s in range(N)])
+TOL = 1e-6
+
+# Jacobi: 两份数组, 读旧值
+V = np.zeros(N); jb = 0; js = 0
+while True:
+    Vn = np.array([backup(V, s) for s in range(N)]); jb += N; js += 1
+    if np.max(np.abs(Vn - V)) < TOL: V = Vn; break
+    V = Vn
+print(f"Jacobi (同步, 两份数组)   sweeps={js:>3}  backups={jb:>4}")
+
+# Gauss-Seidel 两个方向: 原地覆写, 读刚写的新值
+for label, order in [("L->R 逆信息流", range(N)), ("R->L 顺信息流", range(N-1, -1, -1))]:
+    V = np.zeros(N); gb = 0; gs = 0
+    while True:
+        d = 0.0
+        for s in order:
+            old = V[s]; V[s] = backup(V, s); gb += 1; d = max(d, abs(old - V[s]))
+        gs += 1
+        if d < TOL: break
+    print(f"Gauss-Seidel {label}  sweeps={gs:>3}  backups={gb:>4}")
+print("-> 原地更新本身省内存; 但顺着信息流扫(R->L)一轮就灌穿, 逆着扫退化回 Jacobi。次序是免费的加速。")
+`} title="Jacobi vs Gauss-Seidel(次序的威力)" />
+
+#### 优先扫描(prioritized sweeping):把算力花在刀刃上
+
+Gauss-Seidel 仍在「扫全表」,只是原地。更激进的想法:**根本不按次序扫,而是永远先更新「最该更新的状态」**。哪个状态最该更新?**贝尔曼误差(Bellman error)** $|(\mathcal T V)(s) - V(s)|$ 最大的那个——它离自洽最远,更新它收益最大。更新完一个状态 $s$ 后,只有能**转移到 $s$ 的前驱状态(predecessors)**的贝尔曼误差会改变,于是把这些前驱按新误差压回优先队列。这就是 **优先扫描(prioritized sweeping, Moore & Atkeson 1993 [10];Peng & Williams 1993)**,后来直接被搬进免模型 RL(Sutton & Barto §8.4,配 Dyna 用)。
+
+在稀疏 MDP 上,优先扫描的省算力效果是**数量级**的——它天然只碰「价值正在变化的波前」,绝不浪费一次 backup 在早已收敛的状态上:
+
+<CodeRunner defaultCode={`import numpy as np, heapq
+
+N, GAMMA, GOAL = 50, 0.95, 49
+def nxt(s, a): return min(s+1, N-1) if a == 1 else max(s-1, 0)
+def reward(s, a): return 1.0 if nxt(s, a) == GOAL else 0.0
+def backup(V, s):
+    if s == GOAL: return 0.0
+    return max(reward(s, a) + (0 if nxt(s, a) == GOAL else GAMMA*V[nxt(s, a)]) for a in (0, 1))
+def berr(V, s): return 0.0 if s == GOAL else abs(backup(V, s) - V[s])
+
+Vs = np.zeros(N)
+for _ in range(5000): Vs = np.array([backup(Vs, s) for s in range(N)])
+TOL = 1e-6
+
+# 前驱表: pred[s2] = 能一步转移到 s2 的状态集合
+pred = [set() for _ in range(N)]
+for s in range(N):
+    for a in (0, 1): pred[nxt(s, a)].add(s)
+
+# 优先队列以 -贝尔曼误差为键(最大误差先出)
+V = np.zeros(N); pq = []; pb = 0
+for s in range(N):
+    e = berr(V, s)
+    if e > TOL: heapq.heappush(pq, (-e, s))
+while pq:
+    negp, s = heapq.heappop(pq)
+    if -negp < TOL: break
+    V[s] = backup(V, s); pb += 1
+    for p in pred[s]:                       # 只把受影响的前驱压回队列
+        e = berr(V, p)
+        if e > TOL: heapq.heappush(pq, (-e, p))
+
+print(f"优先扫描 backups={pb}  末误差={np.max(np.abs(V - Vs)):.1e}")
+print(f"对照: Jacobi 需 {50*50} 次 backup, Gauss-Seidel 最优次序需 100 次。")
+print("-> 优先扫描 ~49 次 backup 就收敛: 价值从目标一格一格倒灌, 每次只更新波前那一个状态。")
+`} title="优先扫描:贝尔曼误差驱动的 backup" />
+
+**拖下面的滑块**,在最上方那个 4×4 网格上逐步重放优先扫描:每一步只 backup 贝尔曼误差最大的格子(高亮边框),颜色越蓝表示该格被更新的次数越多。你会看到算力**自动聚焦在靠近 🏁 的「波前」**——目标附近的格子反复更新、远处早收敛的格子几乎不碰;而同步全表扫描不管误差大小,每轮都把 14 个格子扫一遍,做了大量无用功:
+
+<AsyncDPSweepViz />
+
+#### 三种「什么时候 backup 哪个状态」的策略
+
+异步 DP 把 DP 从「同步扫全表」解放成「一个 backup 调度问题」——同一个贝尔曼备份,换个**时机与次序**就是不同算法:
+
+| 策略 | backup 次序 | 内存 | 何时最优 |
+|---|---|---|---|
+| Jacobi(同步 VI) | 全表,读旧值 | 两份数组 | 向量化/并行硬件(GPU 批量) |
+| Gauss-Seidel | 全表,原地读新值 | 一份数组 | 有好的静态次序(顺信息流) |
+| 优先扫描 | 贝尔曼误差最大者优先 | 一份 + 优先队列 + 前驱表 | 稀疏 MDP、价值局部剧变 |
+| 实时 DP(RTDP) | 只更新智能体实际访问的状态 | 一份(按需) | 状态空间巨大、只关心可达子集 |
+
+最后一行的**实时 DP(Real-Time DP, RTDP, Barto, Bradtke & Singh 1995 [11])**把异步推到极致:根本不枚举状态,而是**让智能体从起点出发实际走轨迹,只 backup 脚踩到的状态**。它是 DP 与在线 RL 的正式接榫点——一旦「只更新访问过的状态」,再把「已知模型的期望 backup」换成「采样得到的样本 backup」,你就从 DP 滑进了 Q-learning。这正是下一批教程([时序差分](/tutorials/temporal-difference)、[蒙特卡洛](/tutorials/monte-carlo))的起点:**异步 + 采样 = 免模型 RL**。
+
+> 💡 **一句话串起来**:同步 DP → 异步 DP(去掉「整齐扫全表」)→ 实时 DP(去掉「枚举状态」)→ TD/Q-learning(再去掉「已知模型」)。每一步都在拆掉一个理想化假设,DP 的骨架(贝尔曼备份)始终不变,变的只是「在哪、何时、用什么信息」做这次备份。
+
+### 线性规划:把 DP 写成优化问题
+
+值迭代与策略迭代都是「**迭代逼近**」:$V_k\to V^*$ 是渐近过程,无穷步才精确。还有一种根本不同的解法——把求 $V^*$ 直接写成一个**线性规划(Linear Programming, LP)**,交给 LP 求解器一步到位。这是 DP 的第三种经典解法(d'Epenoux 1963;Puterman 1994 §6.4 [3][6]),也是「**精确有限步算法**」——不像 VI 那样渐近收敛。
+
+#### 原始 LP:$V^*$ 是满足贝尔曼不等式的最小元
+
+贝尔曼最优方程 $V^*(s)=\max_a\bigl[r(s,a)+\gamma\sum_{s'}P(s'|s,a)V^*(s')\bigr]$ 里的 $\max$ 可以拆成一组**不等式**:对每个 $(s,a)$,
+
+$$V^*(s)\;\ge\;r(s,a)+\gamma\sum_{s'}P(s'|s,a)\,V^*(s').$$
+
+$V^*$ 恰好是「**满足全部这 $|\mathcal S|\cdot|\mathcal A|$ 条不等式的最小价值函数**」(逐状态最小)。于是求 $V^*$ 等价于原始 LP:
+
+$$\min_{V}\;\sum_{s}\mu(s)\,V(s)\quad\text{s.t.}\quad V(s)\ge r(s,a)+\gamma\sum_{s'}P(s'|s,a)\,V(s')\;\;\forall s,a.$$
+
+目标里的 $\mu$ 是任意严格正的初始状态分布(只给各状态权重,不影响最优解——因为 $V^*$ 是逐状态唯一最小的)。直觉是**上境图(epigraph)**:每条不等式给 $V(s)$ 一个下界,$V^*$ 是同时满足所有下界的「最低」价值面,LP 最小化把它压到恰好贴上贝尔曼包络。
+
+> 💡 **为何最小化就拿到 $V^*$?** 任取一个满足所有不等式的 $V$,在每个状态 $s$ 它都 $\ge$ 贝尔曼备份的最大值,故 $V\ge V^*$ 逐状态成立;反过来 $V^*$ 自己满足所有不等式(最优动作取等)。所以可行域的逐状态最小元就是 $V^*$。LP 求解器找到的就是这个顶点。
+
+#### 对偶 LP:占用测度 $x(s,a)$
+
+对原始 LP 求对偶,得到一个关于**折扣状态-动作占用测度(discounted state-action occupancy measure)** $x(s,a)\ge 0$ 的 LP:
+
+$$\max_{x\ge 0}\;\sum_{s,a}x(s,a)\,r(s,a)\quad\text{s.t.}\quad\sum_a x(s,a)-\gamma\sum_{s',a}P(s\mid s',a)\,x(s',a)=\mu(s)\;\;\forall s.$$
+
+约束是**流守恒**:$\mu(s)$ 注入的质量,等于在 $s$ 被吸收的 $\sum_a x(s,a)$ 减去从别处 $s'$ 转移进 $s$ 的折扣流 $\gamma\sum P(s|s',a)x(s',a)$。$x(s,a)$ 的物理意义是「从 $\mu$ 出发,$(s,a)$ 被访问的折扣总次数」,$\sum_a x(s,a)$ 即折扣状态占用。
+
+**强对偶定理**保证两个 LP 的最优值相等:
+
+$$\min_V\;\mu^\top V\;=\;\max_x\;\sum_{s,a}x(s,a)\,r(s,a)\;=\;\mu^\top V^*.$$
+
+#### 由对偶解恢复最优策略
+
+对偶变量 $x^*(s,a)$ 不仅给目标值,还**直接编码最优策略**:由互补松弛,凡是 $x^*(s,a)>0$ 的动作就是最优动作,策略按占用质量归一化:
+
+$$\pi^*(a\mid s)\;=\;\frac{x^*(s,a)}{\sum_{a'}x^*(s,a')}.$$
+
+也就是说,**解一次 LP 同时拿到 $V^*$(原始变量)和 $\pi^*$(由对偶变量归一化)**——这是 LP 相对 VI/PI 的独特优势:后者只给 $V^*$,$\pi^*$ 还要再 argmax 一次。
+
+#### 可运行演示:LP 对偶 vs 值迭代
+
+下面在 4 状态链上(左/右两动作,state 0 陷阱 $-1$、state 3 目标 $+1$,均自环吸收),用**顶点枚举法**纯 numpy 求解对偶 LP(小规模 LP:枚举所有基变量组合,解线性方程组,取非负最小目标),与值迭代对照:
+
+<CodeRunner language="python" title="线性规划求解 MDP:对偶占用测度 vs 值迭代" defaultCode={`import numpy as np
+from itertools import combinations
+
+# ============ 小型 MDP:4 状态链,左/右两动作 ============
+N = 4
+GAMMA = 0.9
+P = np.zeros((2, N, N))   # P[a, s, s'] = 转移概率
+R = np.zeros((2, N))      # R[a, s]
+for s in range(N):
+    P[0, s, max(0, s-1)] = 1.0     # action 0 = left
+    P[1, s, min(N-1, s+1)] = 1.0   # action 1 = right
+R[:, 0] = -1.0    # 陷阱:state 0 自环,任何动作 -1
+R[:, 3] = +1.0    # 目标:state 3 自环,任何动作 +1
+for a in range(2):
+    P[a, 0, :] = 0; P[a, 0, 0] = 1.0
+    P[a, 3, :] = 0; P[a, 3, 3] = 1.0
+mu = np.array([0.1, 0.2, 0.3, 0.4])   # 初始状态分布(目标函数权重)
+
+# ============ (1) 值迭代:参考解 V* ============
+V = np.zeros(N)
+for _ in range(10000):
+    Q = np.zeros((N, 2))
+    for a in range(2):
+        for s in range(N):
+            Q[s, a] = R[a, s] + GAMMA * P[a, s] @ V
+    Vnew = Q.max(axis=1)
+    if np.max(np.abs(Vnew - V)) < 1e-12:
+        break
+    V = Vnew
+print("=== (1) 值迭代 V* ===")
+print("V* =", np.round(V, 4))
+print("pi*(VI) =", Q.argmax(axis=1), " (0=left, 1=right)")
+
+# ============ (2) 对偶 LP:占用测度 x(s,a) ============
+#   max  sum_{s,a} x(s,a) R(a,s)
+#   s.t. sum_a x(s,a) - gamma*sum_{s',a} P(s|s',a) x(s',a) = mu(s)  (流守恒)
+#        x(s,a) >= 0
+# 纯 numpy 顶点枚举:枚举所有基(选 N 个变量),解线性方程组,取非负最小目标
+c = np.zeros(2 * N)
+for s in range(N):
+    for a in range(2):
+        c[s * 2 + a] = -R[a, s]   # linprog 最小化 => 取负求最大
+A_eq = np.zeros((N, 2 * N))
+for s in range(N):
+    for a in range(2):
+        A_eq[s, s * 2 + a] += 1.0
+    for sp in range(N):
+        for a in range(2):
+            A_eq[s, sp * 2 + a] -= GAMMA * P[a, sp, s]
+
+def lp_vertex_enum(c, A_eq, b_eq):
+    m, n = A_eq.shape
+    best, best_x = None, None
+    for basis in combinations(range(n), m):
+        B = A_eq[:, list(basis)]
+        if abs(np.linalg.det(B)) < 1e-12:
+            continue                       # 基矩阵奇异,跳过
+        xB = np.linalg.solve(B, b_eq)
+        if np.any(xB < -1e-9):
+            continue                       # 非可行(有负分量)
+        x = np.zeros(n)
+        for i, bi in enumerate(basis):
+            x[bi] = max(0.0, xB[i])
+        val = c @ x
+        if best is None or val < best - 1e-12:
+            best, best_x = val, x
+    return best_x, best
+
+xstar, obj = lp_vertex_enum(c, A_eq, mu)
+xstar = xstar.reshape(N, 2)
+print("\\n=== (2) 对偶 LP 解 x*(s,a)(占用测度) ===")
+print("x* =")
+print(np.round(xstar, 4))
+print("对偶目标 max sum x*R =", round(-obj, 4),
+      " = mu^T V* =", round(mu @ V, 4), "(强对偶)")
+
+# ============ (3) 由 x* 恢复最优策略 ============
+pi_lp = xstar.argmax(axis=1)
+print("\\n=== (3) 由 dual 恢复策略: pi*(a|s) = x*(s,a)/sum_a x*(s,a) ===")
+print("pi*(LP) =", pi_lp, " (0=left, 1=right)")
+print("pi*(VI) =", Q.argmax(axis=1))
+print("策略一致:", bool(np.all(pi_lp == Q.argmax(axis=1))))
+
+# ============ (4) 流守恒验证 ============
+flow = np.zeros(N)
+for s in range(N):
+    flow[s] = sum(xstar[s, a] for a in range(2)) - GAMMA * sum(
+        P[a, sp, s] * xstar[sp, a] for sp in range(N) for a in range(2))
+print("\\n=== (4) 流守恒 sum_a x(s,a) - gamma*sum x(s',a)P(s|s',a) =?= mu(s) ===")
+print("flow =", np.round(flow, 4), " mu =", mu)
+
+print("\\n=== 结论 ===")
+print("LP 对偶 x* 与 VI 的 V* 给出同一最优策略;")
+print("强对偶:max sum x*R = min mu^T V = mu^T V* =", round(mu @ V, 4))
+print("LP 是精确有限步算法(顶点枚举有限次),VI 是渐近收敛(无穷步逼近)。")
+`} />
+
+运行后看到:值迭代 $V^*=[-10,\,8.1,\,9,\,10]$、策略 $[0,1,1,0]$(陷阱与目标自环、中间向右);对偶 LP 解出同样的占用测度 $x^*$,归一化得同一策略;流守恒等式精确成立;$\mu^\top V^*=\sum x^* r=7.32$ 验证强对偶。
+
+#### 为何 LP 在实践中不常用:维度灾难
+
+LP 看似「一步到位精确解」,却有致命的**规模问题**:原始 LP 有 $|\mathcal S|\cdot|\mathcal A|$ 条约束、对偶 LP 有 $|\mathcal S|\cdot|\mathcal A|$ 个变量。4×4 网格才 $16\times 4=64$,但围棋有 $10^{170}$ 状态——约束数直接爆炸。这就是为什么 LP 只在**小状态空间、需要精确解**时(如小型运筹优化、库存管理、作为理论分析工具)才用得上,大问题仍退回 VI/PI 或采样近似。
+
+> 💡 **理论价值 > 实用价值**:LP 解 MDP 的真正意义在理论侧——它把「求最优策略」归约到一个**多项式时间可解的优化问题**(Papadimitriou & Tsitsiklis 1987 [7] 证明 MDP 最优策略在 P 类),给出「DP 不是 NP-hard」的复杂度保证;对偶变量 $x(s,a)$ 还把「策略」与「占用测度」联系起来,是后续 offline RL(策略约束 = 占用测度约束)、最大熵 RL(占用测度上的 KL 正则)等理论分析的基础工具。
+
+#### 三种解法对照
+
+| 解法 | 求什么 | 求解器 | 精确性 | 复杂度 | 适用规模 |
+|---|---|---|---|---|---|
+| 值迭代 | $V^*$(迭代逼近) | 反复贝尔曼备份 | 渐近($\gamma^k\to 0$) | $O(|\mathcal S|^2|\mathcal A|)$/sweep | 大状态空间 |
+| 策略迭代 | $\pi^*$(评估+改进) | 解线性方程组 + 贪心 | 有限步(Howard 1960) | 每轮解方程 $O(|\mathcal S|^3)$ | 中等 |
+| 线性规划 | $V^*$ + $\pi^*$(一次优化) | LP 求解器(单纯形/内点) | **精确有限步** | 多项式时间,但 $O(|\mathcal S||\mathcal A|)$ 维 | 小状态空间 |
+
+> ⚠️ 注意「精确有限步」不等于「快」:LP 维度爆炸后,单纯形法虽多项式时间,常数项远大于 VI 的几次备份。三种解法是**精度-规模-速度**的不同权衡,没有谁绝对胜出——这正是「广义策略迭代」框架的用武之地:实践中混合使用(如 Actor-Critic 用采样近似 GPI),把「精确但贵」与「粗糙但快」按需调配。
+
+### 广义策略迭代(GPI):统一所有 RL 算法的框架
+
+把「评估」和「改进」两步**任意交错**,只要两个过程都持续进行,就必然收敛到 $V^*/\pi^*$——这就是**广义策略迭代(Generalized Policy Iteration, GPI)**。Sutton & Barto 用它统一整个 RL:
+
+| 算法 | 评估深度 | 改进频率 |
+|---|---|---|
+| 值迭代 | 1 次备份 | 每 sweep |
+| 修正策略迭代 | $m$ 次备份 | 每 $m$ sweep |
+| 策略迭代 | 完整收敛 | 每轮 |
+| [Actor-Critic](/tutorials/policy-gradient) | TD(0) 一步 | 每步 |
+| [Q-learning](/tutorials/reinforcement-learning) | 一步采样 | 隐式每步 |
+
+GPI 的洞见是:**评估与改进是两个相互竞争的力**——评估把 $V$ 拉向当前 $\pi$ 的真值,改进把 $\pi$ 拉向当前 $V$ 的贪心策略。两者都「开」着时,系统被推向二者的交集:最优 $V^*$ 与 $\pi^*$。这解释了为什么 Q-learning(免模型、采样、一步)和值迭代(已知模型、精确、全扫描)虽看起来天差地别,**结构上却是同一套 GPI**——只是评估用采样近似、改进隐式藏在 max 里。
+
+## 函数逼近:当状态空间大到枚举不动
+
+到此为止的所有解法——值迭代、策略迭代、修正策略迭代、线性规划——都有一个**隐藏前提**:$V(s)$ 和 $Q(s,a)$ 能当作长度 $|\mathcal S|$ 或 $|\mathcal S||\mathcal A|$ 的**表格**存下来。LP 的对偶变量 $x(s,a)$、值迭代的 sweep、策略迭代的评估步,无一不是逐状态枚举。可现实问题的状态空间几乎总是天文数字:围棋 $10^{170}$ 种局面、机器人关节角度连续、Atari 像素 $256^{84\times84\times4}$。表格存不下,贝尔曼备份扫不动。
+
+出路是**函数逼近(function approximation)**:用一个参数化函数 $Q_\theta(s,a)\approx Q^*(s,a)$ 代替表格,其中 $\theta$ 的维度 $d$ 远小于 $|\mathcal S||\mathcal A|$。最简单的形式是**线性逼近** $Q_\theta(s,a)=\phi(s,a)^\top w$,其中 $\phi(s,a)\in\mathbb R^d$ 是人为设计的**特征向量**,$w\in\mathbb R^d$ 是待学权重。[DQN](/tutorials/dqn) 用神经网络代替线性特征,能力更强但理论保证变弱。下面这条线性路线,是「DP 的精确表格解」与「DQN 的神经黑箱」之间的**理论桥梁**——它保留了 DP 的可证明性,又跨过了状态爆炸。
+
+### linear MDP:让函数逼近「可证明」的关键假设
+
+直接把表格 DP 里的 $Q(s,a)$ 换成 $\phi(s,a)^\top w$ 会怎样?贝尔曼最优方程 $Q^*(s,a)=r(s,a)+\gamma\sum_{s'}P(s'|s,a)\max_{a'}Q^*(s',a')$ 右端的 $\sum_{s'}P(s'|s,a)V^*(s')$ 一般**不再是 $\phi(s,a)$ 的线性函数**——即使 $V^*$ 恰好线性,$P(s'|s,a)$ 这个转移核本身对 $\phi$ 也未必线性。于是线性 $Q$ 与贝尔曼方程不自洽,没有收敛保证(这正是 [DQN 致命三态](/tutorials/dqn)发散的根源)。
+
+Jin, Yang, Wang & Jordan (2020) [8] 给出了一个让线性逼近重新自洽的假设——**linear MDP**:
+
+> **Assumption A(linear MDP)**. 对每一步 $h\in[H]$,存在 $d$ 个未知的(符号)测度 $\boldsymbol\mu_h=(\mu_h^{(1)},\dots,\mu_h^{(d)})$ over $\mathcal S$ 和一个未知向量 $\boldsymbol\theta_h\in\mathbb R^d$,使得对任意 $(s,a)$:
+> - 转移 $P_h(\cdot\mid s,a)=\langle\phi(s,a),\,\boldsymbol\mu_h(\cdot)\rangle=\sum_{i=1}^d\phi_i(s,a)\,\mu_h^{(i)}(\cdot)$
+> - 奖励 $r_h(s,a)=\langle\phi(s,a),\,\boldsymbol\theta_h\rangle$
+
+也就是说,**转移核和奖励都线性地分解在同一个特征 $\phi(s,a)$ 上**。直观理解:每个 $\mu_h^{(i)}$ 是一张「原型转移分布」,$\phi_i(s,a)$ 是这张原型在 $(s,a)$ 处的权重,真实转移 $P(\cdot|s,a)$ 是这些原型的加权混合;奖励同理。
+
+### 结构结果:价值函数自动线性(Proposition 2.3)
+
+linear MDP 假设的威力在于一个看似平凡的推论——**任何**价值函数的贝尔曼备份都自动线性:
+
+$$
+\sum_{s'}P(s'|s,a)\,V(s')=\int V(s')\,\langle\phi(s,a),d\boldsymbol\mu_h(s')\rangle=\Big\langle\phi(s,a),\,\underbrace{\int V(s')\,d\boldsymbol\mu_h(s')}_{=:\,\boldsymbol w_V}\Big\rangle
+$$
+
+内积结构让 $V$ 从积分号里「提」了出来,剩下的是个只依赖 $V$ 与 $\boldsymbol\mu_h$ 的固定权重 $\boldsymbol w_V$。于是贝尔曼最优方程右端 $r+\gamma PV^*$ 对 $\phi$ 线性,故 $Q^*$ 本身也线性:
+
+> **Proposition 2.3**. 在 linear MDP 下,对任意策略 $\pi$,存在权重 $\boldsymbol w_h^\pi$ 使得 $Q_h^\pi(s,a)=\langle\phi(s,a),\boldsymbol w_h^\pi\rangle$。
+
+这把「价值函数属于什么函数空间」从 $|\mathcal S||\mathcal A|$ 维表格降到了 $d$ 维线性空间——**线性逼近与贝尔曼方程重新自洽**,这正是表格 DP 收敛性论证能搬过来的根基。
+
+### LSVI-UCB:线性版「值迭代 + 乐观探索」
+
+有了线性结构,价值迭代可以照搬,只需把「表格 backup」换成「最小二乘回归」——这就是 **LSVI(Least-Squares Value Iteration)**:
+
+1. 从 $V_H=\mathbf 0$ 出发,向后递推 $h=H-1,\dots,0$;
+2. 第 $h$ 步收集到数据 $\{(s_t,a_t,r_t,s'_t)\}$,用它们的最小二乘解拟合 $w_h$:
+$$
+\boldsymbol w_h=\Big(\lambda I+\sum_t\phi(s_t,a_t)\phi(s_t,a_t)^\top\Big)^{-1}\sum_t\phi(s_t,a_t)\big(r_t+V_{h+1}(s'_t)\big)
+$$
+   这正是岭回归的闭式解,$\Lambda_h:=\lambda I+\Phi^\top\Phi$ 是(正则化的)经验二阶矩;
+3. 估出 $Q_h(s,a)=\phi(s,a)^\top\boldsymbol w_h$,$V_h(s)=\max_a Q_h(s,a)$,回到第 2 步递推 $h-1$。
+
+但光有 LSVI 还不够——它需要数据,而数据靠探索收集。朴素 $\varepsilon$-greedy 在线性逼近下没有 regret 保证。**LSVI-UCB** 给 $Q$ 估加一个**置信椭球 bonus**驱动乐观探索:
+
+$$
+Q_h(s,a)=\phi(s,a)^\top\boldsymbol w_h+\beta\sqrt{\phi(s,a)^\top\Lambda_h^{-1}\phi(s,a)}
+$$
+
+第二项的几何含义是置信椭球的「半径方向」:在数据稀疏的方向 $\phi^\top\Lambda^{-1}\phi$ 大(不确定,多探索),在数据密集的方向小(已摸清,少探索)。这正是 [bandit 置信椭球](/tutorials/multi-armed-bandit)在状态空间上的推广。$\beta$ 的取值由自归一化鞅界给出(Abbasi-Yadkori et al. 2011),保证高概率覆盖真值。
+
+### regret 保证:与状态数无关
+
+在 linear MDP 假设下,LSVI-UCB 的 regret 有如下界(Jin et al. 2020 [8]):
+
+$$
+\mathrm{Regret}(K)=\tilde O\!\Big(\sqrt{d^3 H^3 T}\Big),\qquad T=KH
+$$
+
+其中 $K$ 是回合数、$H$ 是每回合步数、$T=KH$ 是总步数。**这个界只依赖特征维度 $d$ 和视野 $H$,与状态-动作空间大小 $|\mathcal S||\mathcal A|$ 无关**——这是 linear MDP 的全部意义:用 $d$ 维特征把「表格 DP 的 $O(\sqrt{|\mathcal S||\mathcal A|H^3T})$ regret」压缩成与状态数脱钩的 $O(\sqrt{d^3H^3T})$。对照表格设定($d=|\mathcal S||\mathcal A|$)两界同阶,说明线性版严格推广了表格理论。
+
+### 可运行演示:linear MDP 假设成立 vs 不成立
+
+下面这段代码用两个 toy MDP 对比 linear MDP 假设的力量:① 一个真正的 linear MDP(转移/奖励只依赖动作,$d=2$ 特征 $[1,a]$),验证 $Q^*$ 严格线性 + LSVI-UCB 收敛到最优 + UCB bonus 随数据收缩;② 一个非线性 MDP(确定性链,奖励 $r=s\cdot a$ 对特征 $[1,s,a]$ 线性但转移不线性),验证 $Q^*$ 不再线性、线性拟合有偏。
+
+<CodeRunner language="python" title="linear MDP:Q* 严格线性 + LSVI-UCB regret vs 非线性 MDP 线性拟合有偏" defaultCode={`import numpy as np
+
+# Part 1: 真正的 linear MDP —— r 与 P 都只依赖动作 a, 与状态无关
+#   phi(s,a) = [1, a]  (d=2);  r(s,a)=a;  P(.|s,a=0)=uniform{0..4}, P(.|s,a=1)=uniform{3,4}
+N, A, H, d = 5, 2, 6, 2
+def feat(s, a): return np.array([1.0, float(a)])
+def reward_lin(s, a): return float(a)
+def next_lin(s, a, rng):
+    if a == 0: return int(rng.integers(N))
+    return int(rng.choice([3, 4]))
+
+rng = np.random.default_rng(42)
+V_star = np.zeros(N)
+for h in range(H-1, -1, -1):
+    Q = np.zeros((N, A))
+    for s in range(N):
+        for a in range(A):
+            ev = V_star.mean() if a == 0 else 0.5*V_star[3] + 0.5*V_star[4]
+            Q[s, a] = reward_lin(s, a) + ev
+    V_star = Q.max(1)
+
+Phi = np.array([feat(s, a) for s in range(N) for a in range(A)])
+Qf = np.array([Q[s, a] for s in range(N) for a in range(A)])
+w_ls = np.linalg.lstsq(Phi, Qf, rcond=None)[0]
+print("=== Part 1: 真正的 linear MDP (d=2, 与 |S||A|=10 无关) ===")
+print("表格 V*           :", V_star)
+print("Q* 线性拟合 w     :", np.round(w_ls, 4), " (Q* = 5 + a)")
+print("线性拟合最大误差  :", round(float(np.abs(Qf - Phi@w_ls).max()), 12), "(≈0, 证实 Q* 严格线性)")
+
+lam, beta = 1.0, 0.3
+def run_lsvi(K, reward_fn, next_fn, d_, feat_fn):
+    data = {h: [] for h in range(H)}
+    for _ in range(K):
+        s = int(rng.integers(N))
+        for h in range(H):
+            a = int(rng.integers(A))
+            ns = next_fn(s, a, rng)
+            data[h].append((s, a, reward_fn(s, a), ns))
+            s = ns
+    Vh = np.zeros(N); W = [None]*H
+    for h in range(H-1, -1, -1):
+        Ph = np.array([feat_fn(s, a) for (s, a, r, ns) in data[h]])
+        y = np.array([r + Vh[ns] for (s, a, r, ns) in data[h]])
+        Lam = lam*np.eye(d_) + Ph.T@Ph
+        wh = np.linalg.solve(Lam, Ph.T@y)
+        Li = np.linalg.inv(Lam)
+        Vnew = np.zeros(N)
+        for s in range(N):
+            best = -1e9
+            for a in range(A):
+                phi = feat_fn(s, a)
+                q = phi@wh + beta*np.sqrt(phi@Li@phi)
+                if q > best: best = q
+            Vnew[s] = best
+        Vh = Vnew; W[h] = (wh, Li)
+    return W
+
+def eval_ret(W, reward_fn, next_fn, feat_fn, eps=200):
+    tot = 0.0
+    for _ in range(eps):
+        s = int(rng.integers(N))
+        for h in range(H):
+            wh, Li = W[h]
+            ba, bq = 0, -1e9
+            for a in range(A):
+                q = feat_fn(s, a)@wh
+                if q > bq: bq, ba = q, a
+            tot += reward_fn(s, ba); s = next_fn(s, ba, rng)
+    return tot/eps
+
+print()
+print("--- LSVI-UCB: regret 随 K 下降, UCB bonus 随 K 收缩 ---")
+for K in [10, 100, 1000]:
+    W = run_lsvi(K, reward_lin, next_lin, d, feat)
+    ret = eval_ret(W, reward_lin, next_lin, feat)
+    wh0, Li0 = W[0]
+    phi01 = feat(0, 1)
+    bonus = float(np.sqrt(phi01 @ Li0 @ phi01))
+    print(f"  K={K:5d}: 收益={ret:.3f}(最优 6.0)  bonus(s=0,a=1)={bonus:.4f}")
+
+# Part 2: 非线性 MDP —— 确定性链, 转移依赖状态, linear MDP 假设被破坏
+d2 = 3
+def feat_nl(s, a): return np.array([1.0, float(s), float(a)])
+def reward_nl(s, a): return float(s * a)
+def next_nl(s, a, rng): return min(s+1, N-1) if a == 1 else max(s-1, 0)
+
+V_nl = np.zeros(N)
+for h in range(H-1, -1, -1):
+    Q2 = np.zeros((N, A))
+    for s in range(N):
+        for a in range(A):
+            Q2[s, a] = reward_nl(s, a) + V_nl[next_nl(s, a, rng)]
+    V_nl = Q2.max(1)
+Phi_nl = np.array([feat_nl(s, a) for s in range(N) for a in range(A)])
+Qf_nl = np.array([Q2[s, a] for s in range(N) for a in range(A)])
+w_nl = np.linalg.lstsq(Phi_nl, Qf_nl, rcond=None)[0]
+print()
+print("=== Part 2: 非线性 MDP (确定性链, 转移依赖状态) ===")
+print("表格 V*           :", V_nl)
+print("线性拟合最大误差  :", round(float(np.abs(Qf_nl - Phi_nl@w_nl).max()), 4),
+      "(>0, Q* 非线性 => linear MDP 假设不成立, LSVI 有偏无保证)")
+print()
+print("结论: linear MDP 假设是把 |S||A| 降到 d 的代价 ——")
+print("      假设成立时 regret ~ O(sqrt(d^3 H^3 T)) 与状态数无关;")
+print("      假设不成立时线性逼近有偏, 须用神经网络(DQN)但失去 regret 保证。")
+`} />
+
+> 💡 **看图要点**:① Part 1 里 $Q^*$ 的线性拟合误差是 0(不是「小」,是**精确**),因为 linear MDP 假设下 Prop 2.3 把 $Q^*$ 锁死在线性空间——这是「可证明」三字的来源;② UCB bonus 从 $K{=}10$ 的 0.36 收缩到 $K{=}1000$ 的 0.04,正比于 $1/\sqrt K$——数据越多置信椭球越小,探索越精准;③ Part 2 的非线性 MDP 里,奖励 $r=s\cdot a$ 虽对 $[1,s,a]$ 线性,但确定性链的转移 $P(s'|s,a)$ 不是 $\phi$ 的线性函数,$Q^*$ 因此非线性,线性拟合误差 1.5 是**结构性偏差**非采样噪声——再多数据也消不掉。
+
+### 与 DQN 的对照:可证明的线性 vs 黑箱的神经
+
+| 维度 | 表格 DP(VI/PI/LP) | linear MDP + LSVI-UCB | DQN(神经逼近) |
+|---|---|---|---|
+| 价值函数表示 | 长度 $\lvert\mathcal S\rvert\lvert\mathcal A\rvert$ 表格 | $d$ 维线性 $Q=\phi^\top w$ | 神经网络 $Q_\theta(s,a)$ |
+| 状态空间 | 必须可枚举 | 任意(只需特征 $\phi$) | 任意(网络吃原始输入) |
+| 表达能力 | 精确但维度爆炸 | 线性族(受 linear MDP 假设约束) | 通用近似(几乎任意 $Q^*$) |
+| regret 保证 | $O(\sqrt{\lvert\mathcal S\rvert\lvert\mathcal A\rvert H^3T})$ | $\tilde O(\sqrt{d^3H^3T})$,**与 $\lvert\mathcal S\rvert\lvert\mathcal A\rvert$ 无关** | 无(致命三态可能发散) |
+| 适用场景 | 棋盘/库存等小问题 | 结构清晰、特征可设计的中等问题 | 围棋/Atari/机器人等高维复杂问题 |
+
+这条谱系把本篇的表格解法、本节的线性理论、与 [DQN](/tutorials/dqn) 的深度方法串成一条「**精确-可证明-黑箱**」的递进线:**DP 给地基,linear MDP 给可证明的桥梁,DQN 给实用但失控的上层**。linear MDP 的价值不在它本身能解围棋(特征 $\phi$ 难设计),而在它划清了「函数逼近下 RL 何时仍有理论保证」的边界——这是理解 DQN 为何会发散、以及现代 RL 理论为何走向 [linear MDP 的各种推广](/tutorials/dqn)(线性 mixture model、神经网络 NTK 近似等)的起点。
+
+## 典型案例:DP 在真实系统里的位置
+
+| 场景 | 为什么用/不用 DP |
+|---|---|
+| **棋盘/网格等已知规则的小问题** | 直接 DP 精确求解,无需学习 |
+| **库存管理、最优控制** | 状态可枚举、模型可写出 → 价值/策略迭代经典应用 |
+| **围棋、Atari、机器人** | 状态爆炸或模型未知 → 退回 Q-learning / DQN 等**采样近似** |
+| **AlphaZero** | 用学到的模型 + 搜索做「近似 DP」——[自我博弈](/tutorials/reinforcement-learning#常见问题-faq)里的 MCTS 就是一种前瞻规划 |
+
+> 💡 记住这条主线:**DP = 已知模型、精确扫描;TD/Q-learning = 未知模型、采样近似。** 贝尔曼方程是二者共同的心脏——Q-learning 更新式里的 $r+\gamma\max_{a'}Q(s',a')$,正是贝尔曼最优方程的采样版。
+
+## 常见问题 FAQ
+
+**Q:既然 DP 能精确求解,为什么还要 Q-learning?**
+DP 有两个硬前提:**模型已知**且**状态可枚举**。现实里两者常常不满足——你不知道下棋对手会怎么走(模型未知),围棋有 $10^{170}$ 种局面(状态爆炸)。这时只能用采样(Q-learning)+ 函数逼近([DQN](/tutorials/dqn))去近似 DP 做不到的精确扫描。
+
+**Q:价值迭代和策略迭代该选哪个?**
+状态空间不大时都行。价值迭代实现最简单;策略迭代每轮更贵但收敛轮数极少,状态多、评估可高效求解时更划算。二者可折中为「广义策略迭代」——评估不必跑到完全收敛就去改进。
+
+**Q:「广义策略迭代(GPI)」是什么?**
+把「评估」和「改进」两步交替进行的通用模式。价值迭代是「评估只做一步就改进」的极端,策略迭代是「评估做到底再改进」的极端,几乎所有 RL 算法(含 Actor-Critic)都落在这条谱系上。
+
+**Q:为什么 DP 一定收敛?**
+贝尔曼最优算子 $T^*$ 是 $\gamma$-压缩映射:$\|T^*V-T^*W\|_\infty\le\gamma\|V-W\|_\infty$($\gamma<1$)。由 Banach 不动点定理,$T^*$ 有唯一不动点 $V^*$,且从任意初值出发反复套用 $T^*$ 必收敛到 $V^*$。收敛速度有两条误差界:先验界 $\|V_k-V^*\|\le\frac{\gamma^k}{1-\gamma}\|V_1-V_0\|$、后验界 $\|V_k-V^*\|\le\frac{\gamma}{1-\gamma}\|V_k-V_{k-1}\|$(后者是实践中当停止准则用的界)。策略迭代更强:有限 MDP 上至多 $|\mathcal{A}|^{|\mathcal{S}|}$ 轮内必收敛(Howard 1960)。详见上面「收敛理论」一节。
+
+**Q:既然有「精确有限步」的线性规划解法,为什么还要值迭代?**
+LP 把求 $V^*$ 写成一次优化,理论上「一步到位」且多项式时间可解(Papadimitriou & Tsitsiklis 1987 证明 MDP 在 P 类)。但 LP 的约束数 = $|\mathcal S|\cdot|\mathcal A|$:4×4 网格才 64 条,围棋 $10^{170}$ 状态直接爆炸。值迭代虽是渐近收敛(无穷步逼近 $V^*$),但每 sweep 只需 $O(|\mathcal S|^2|\mathcal A|)$ 且可增量、可采样近似(Q-learning 就是采样版备份),scalability 远胜 LP。所以 LP 只在**小状态空间要精确解**时用得上,大问题必退回 VI/PI。LP 的真正价值在理论侧:复杂度保证 + 对偶占用测度 $x(s,a)$ 是 offline RL / 最大熵 RL 分析的基础工具。
+
+## 动手作业
+
+1. **改折扣**:把两段代码里的 `gamma` 从 0.9 调到 0.5,看最优路径是否变「短视」、价值迭代收敛的 sweep 数如何变化。再想想:放大因子 $\gamma/(1-\gamma)$ 从 9 变成 1,后验停止界是变松还是变紧?
+2. **移动陷阱**:把 `PIT` 换个格子,重跑价值迭代,观察最优策略如何绕开新陷阱。
+3. **对比收敛速度**:在两段代码里分别打印每轮的 `delta` / 策略变化数,直观比较价值迭代 vs 策略迭代需要多少轮。
+4. **加随机性(进阶)**:把 `nxt` 改成「80% 按意图走、20% 滑向随机方向」,并在备份里对两种后继加权求和——这才是 DP 真正威力所在(处理随机转移)。
+5. **验证误差界(进阶)**:在「收敛理论」的玩具里把 `gamma` 调到 0.99,观察放大因子 $\gamma/(1-\gamma)$ 从 9 飙到 99——后验界变得非常松,这就是为什么高折扣时值迭代收敛极慢、实践中常改用策略迭代或修正策略迭代。
+
+## 小结
+
+| 概念 | 含义 |
+|---|---|
+| 动态规划 | 已知模型时,用贝尔曼方程精确求解最优策略 |
+| 贝尔曼期望方程 | 评估固定策略的价值 $V^\pi$ |
+| 贝尔曼最优方程 | 带 $\max$,刻画最优价值 $V^*$ |
+| 价值迭代 | 反复做最优备份直到 $V$ 收敛,再贪心抽策略 |
+| 策略迭代 | 评估 ↔ 改进交替,直到策略稳定 |
+| 贝尔曼算子 $T^*$ | 一次全空间备份;是 $\gamma$-压缩映射 $\Rightarrow$ 有唯一不动点 $V^*$ |
+| Banach 不动点定理 | 压缩映射必有唯一不动点,反复套用必收敛——DP 收敛的理论根基 |
+| 误差界 | 先验 $\frac{\gamma^k}{1-\gamma}\lVert V_1-V_0\rVert$、后验 $\frac{\gamma}{1-\gamma}\lVert V_k-V_{k-1}\rVert$(停止准则) |
+| 策略迭代有限步收敛 | 单调改进 + 有限策略数 $\Rightarrow$ 至多 $\lvert\mathcal{A}\rvert^{\lvert\mathcal{S}\rvert}$ 轮(Howard 1960) |
+| 修正策略迭代 | VI 与 PI 的折中:每轮 $m$ 次部分评估(van Nunen 1976; Puterman & Shin 1978) |
+| 线性规划 | 把求 $V^*$ 写成 LP:原始 $\min\mu^\top V$ s.t. 贝尔曼不等式 / 对偶 $\max\sum x\,r$ s.t. 流守恒;精确有限步,但 $\lvert\mathcal S\rvert\lvert\mathcal A\rvert$ 维度爆炸(d'Epenoux 1963;Puterman 1994) |
+| 广义策略迭代 GPI | 评估与改进任意交错,只要都继续就收敛——统一所有 RL 算法的框架 |
+| 与 Q-learning 的关系 | Q-learning = 模型未知时用采样近似贝尔曼备份 |
+
+> 🎯 一句话记住:**动态规划是「上帝视角」的强化学习——知道全部规则,就能不试错、直接把最优策略算出来;而现实中模型未知、状态爆炸,才逼出了下一篇[蒙特卡洛方法](/tutorials/monte-carlo)(纯靠经验回报)与[时序差分学习](/tutorials/temporal-difference)(边走边学、免模型),以及 [Q-learning](/tutorials/reinforcement-learning)、[DQN](/tutorials/dqn) 这些采样近似的方法。**
+
+## 延伸阅读
+
+- **经典论文**:Bellman, R. (1957). *Dynamic Programming*. Princeton University Press. —— 贝尔曼方程与「最优化原理」的原始出处:整个 DP 领域(也是本篇一切公式的)起点;[维基百科条目](https://en.wikipedia.org/wiki/Bellman_equation)有现代讲法
+- **经典书目**:Sutton & Barto (2018). *Reinforcement Learning: An Introduction* (2nd ed.), Ch.4. [在线免费版](http://incompleteideas.net/book/RLbook2020.pdf) —— DP 四大方法(策略评估/改进/迭代/值迭代)的标准教科书讲法,GPI 框架的出处
+
+## 参考文献
+
+1. Bellman, R. (1957). *Dynamic Programming*. Princeton University Press. — 贝尔曼方程与值迭代的原始出处;Princeton UP 初版,DP 整个领域的起点。
+2. Howard, R. A. (1960). *Dynamic Programming and Markov Processes*. The M.I.T. Press. — 策略迭代算法(评估 ↔ 改进交替)与有限步收敛定理的原始出处;[Wikipedia MDP 条目](https://en.wikipedia.org/wiki/Markov_decision_process)对其两步法与有限收敛有完整记载。
+3. Puterman, M. L. (1994). *Markov Decision Processes: Discrete Stochastic Dynamic Programming*. John Wiley & Sons. — DP 收敛理论的权威专著;误差界(先验 $\gamma^k/(1-\gamma)$、后验 $\gamma/(1-\gamma)$)、修正策略迭代(Puterman & Shin 1978)的系统化出处。
+4. van Nunen, J. A. E. E. (1976). *Contracting Markov decision processes*. Mathematical Centre Tracts, Amsterdam. — 修正策略迭代的早期提出(每轮 $m$ 次部分评估),在值迭代与策略迭代间连续插值。
+5. Sutton, R. S., & Barto, A. G. (2018). *Reinforcement Learning: An Introduction* (2nd ed.). MIT Press. [在线版](http://incompleteideas.net/book/RLbook2020.pdf). — 第 4 章「Dynamic Programming」是 DP 收敛理论的经典教学出处;贝尔曼算子压缩证明、误差界、广义策略迭代(GPI)框架均见此章。
+6. d'Epenoux, F. (1963). *Sur un problème de production et de gestion de stocks*. Revue Française d'Informatique et de Recherche Opérationnelle, 14:3–16. — 把折扣 MDP 写成线性规划的最早出处(primal-dual LP 框架);转译见 [Puterman 1994](https://onlinelibrary.wiley.com/doi/book/10.1002/9780470316887) §6.4-§6.7。LP 把「求 $V^*$」归约到线性规划,给出对偶占用测度 $x(s,a)$ 与强对偶定理。
+7. Papadimitriou, C. H., & Tsitsiklis, J. N. (1987). *The complexity of Markov decision processes*. Mathematics of Operations Research, 12(3):441–450. [DOI](https://doi.org/10.1287/moor.12.3.441). — 证明有限折扣 MDP 的最优策略求解在多项式时间可解(复杂度类 P),为「DP 不是 NP-hard」提供复杂度保证;LP 求解器的多项式时间复杂度是这一结论的算法实现侧。
+8. Jin, C., Yang, Z., Wang, Z., & Jordan, M. I. (2020). *Provably Efficient Reinforcement Learning with Linear Function Approximation*. COLT 2020. [arXiv:1907.05388](https://arxiv.org/abs/1907.05388). — linear MDP 假设(Assumption A:转移与奖励都线性分解于特征 $\phi$)、Proposition 2.3(任意价值函数在 linear MDP 下自动线性)、LSVI-UCB 算法(最小二乘值迭代 + 置信椭球 bonus)与 $\tilde O(\sqrt{d^3H^3T})$ regret 界(与 $\lvert\mathcal S\rvert\lvert\mathcal A\rvert$ 无关)的原始出处;是「函数逼近下 RL 何时仍有可证明保证」的奠基性工作。
+9. Bertsekas, D. P. (1982). *Distributed dynamic programming*. IEEE Transactions on Automatic Control, 27(3):610–616. [DOI](https://doi.org/10.1109/TAC.1982.1102980). — 异步 DP 的奠基性理论:证明只要每个状态被更新无穷多次,任意次序的原地 backup 仍收敛到 $V^*$,为 Gauss-Seidel、优先扫描、实时 DP 提供统一收敛保证。
+10. Moore, A. W., & Atkeson, C. G. (1993). *Prioritized sweeping: Reinforcement learning with less data and less time*. Machine Learning, 13(1):103–130. [DOI](https://doi.org/10.1007/BF00993104). — 优先扫描的原始出处:以贝尔曼误差为优先级、沿前驱回传更新,在稀疏 MDP 上把收敛所需 backup 数降一个数量级;后被 Sutton & Barto §8.4 并入 Dyna 框架用于免模型 RL。
+11. Barto, A. G., Bradtke, S. J., & Singh, S. P. (1995). *Learning to act using real-time dynamic programming*. Artificial Intelligence, 72(1–2):81–138. [DOI](https://doi.org/10.1016/0004-3702(94)00011-O). — 实时 DP(RTDP):只 backup 智能体实际访问的状态,把异步 DP 与在线试错正式连起来,是「DP → TD/Q-learning」这条演化链的关键中间环。

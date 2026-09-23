@@ -1,0 +1,408 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("grpo-rlvr");
+
+# 🧠 GRPO 与可验证奖励:训练会推理的大模型
+
+上一篇 [RLHF](/tutorials/rlhf) 里,让大模型「听话」靠的是**奖励模型**:先从人类偏好学一个打分器 $r_\phi$,再用 [PPO](/tutorials/policy-gradient) 去最大化它的分数。但当任务是**数学题、写代码**这类有标准答案的场景,还需要学一个奖励模型吗?——答案对不对,程序跑不跑得过,**规则就能判**。
+
+2025 年初,DeepSeek-R1 用两件事把大模型的**推理能力**推到了新高度:
+
+1. **GRPO(Group Relative Policy Optimization,组相对策略优化)**——PPO 的精简变体,**砍掉了那个和策略一样大的 critic 网络**;
+2. **RLVR(Reinforcement Learning with Verifiable Rewards,可验证奖励强化学习)**——用「答案对不对」的**规则判分**取代学习型奖励模型。
+
+这一篇就把这两件事拆开讲透:GRPO 怎么在没有 critic 的情况下算优势、它和 PPO/DPO 到底差在哪、RLVR 的奖励怎么设计、KL 正则挪到哪去了,以及两个真实存在、论文专门写文章批判的**训练陷阱**(长度偏置、难度偏置)和它们的修法(Dr.GRPO、DAPO)。
+
+> 📌 前置:本篇假设你已经熟悉 [策略梯度与 PPO 裁剪](/tutorials/policy-gradient)、[优势函数](/tutorials/policy-gradient)、以及 [前向/反向 KL](/tutorials/forward-reverse-kl)。GRPO 几乎是站在 PPO 肩上做减法。
+
+## 一、先回忆 PPO 的负担:那个 critic
+
+PPO 是 **actor-critic** 算法。它同时要维护:
+
+- **策略网络(actor)** $\pi_\theta$——我们真正想要的东西;
+- **价值网络(critic)** $V_\psi(s)$——用来估计基线、算优势 $A_t = G_t - V_\psi(s_t)$(见[优势估计](/tutorials/policy-gradient));
+- (RLHF 里还有)**奖励模型** $r_\phi$。
+
+在大模型场景,critic 通常和策略**一样大**(几十亿甚至上百亿参数)。训练时它要和策略同步前向、反向、更新——**显存和算力几乎翻倍**。而且对语言生成来说,给「半句话」估一个准确的价值本身就很难。
+
+GRPO 的核心追问是:**能不能不要 critic,还能算出一个好用的基线?**
+
+## 二、GRPO 的关键一招:用「一组回答」当基线
+
+回忆[策略梯度里降方差的基线](/tutorials/policy-gradient):我们要的其实不是「价值」本身,而是一个**参照点**——让「比平均好的动作」被抬高、「比平均差的」被压低。critic 只是估这个参照点的一种方式。
+
+GRPO 换了个极简的思路:**对同一道题 $q$,一次采样 $G$ 个回答 $o_1,\dots,o_G$,直接用这一组的平均奖励当基线。**
+
+设第 $i$ 个回答拿到奖励 $r_i$,GRPO 把它的**优势**定义为组内标准化:
+
+$$
+\hat A_{i,t} \;=\; \frac{r_i - \operatorname{mean}(r_1,\dots,r_G)}{\operatorname{std}(r_1,\dots,r_G)}, \qquad \text{对回答 } o_i \text{ 的所有 token } t \text{ 都取这个值。}
+$$
+
+三个要点:
+
+- **没有 critic**:基线 $\operatorname{mean}(r)$ 就是这一组回答的平均分,一个纯统计量,不用训练。省下的正是那个和策略一样大的价值网络——DeepSeekMath 论文明确说这是为了「优化 PPO 的显存占用」。
+- **组内相对**:一个回答好不好,不看绝对分,看它**在同题的这一组里排第几**。这也是名字里 "Group Relative" 的来历。
+- **整条回答共享一个优势**:$\hat A_{i,t}$ 对回答 $o_i$ 里的每个 token 都一样(在只看最终结果的 outcome supervision 下)。答对了,整条链上的 token 都被抬;答错了,都被压。
+
+拖动下面这个组件,亲手看组内优势怎么算——并**提前撞见**后面要讲的「难度偏置」陷阱:
+
+<GRPOAdvantageViz />
+
+DeepSeek-R1 论文里的结构对比图——上半是 PPO:策略模型采样,奖励模型打分,价值模型(critic)经 GAE 产出优势,再加参考模型的 KL 约束;下半是 GRPO:同一问题采样一组回答,优势直接由**组内分数标准化**得到,价值模型被整个拿掉:
+
+<figure className="my-6">
+  <img src="./grpo-structure.svg" alt="PPO 与 GRPO 训练结构对比:PPO 依赖价值模型经 GAE 计算优势并加 KL 正则;GRPO 砍掉价值模型,对同一问题采样一组回答,优势由组内奖励标准化得到" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI, <em>DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning</em>(arXiv:2501.12948)Figure 3
+  </figcaption>
+</figure>
+
+先用代码把这个优势算一遍,建立最扎实的直觉:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 同一道题采样 G=8 个回答,可验证奖励为二元:答对=1,答错=0
+rewards = np.array([1, 1, 1, 0, 0, 0, 0, 0], dtype=float)  # 3 对 5 错
+
+mu = rewards.mean()
+sigma = rewards.std()            # 总体标准差(伯努利)
+adv = (rewards - mu) / sigma     # GRPO 组内标准化优势
+
+print(f"组均值 μ = {mu:.3f}   组标准差 σ = {sigma:.3f}")
+for i, (r, a) in enumerate(zip(rewards, adv)):
+    tag = "答对" if r == 1 else "答错"
+    print(f"  回答{i}: r={r:.0f} ({tag})  ->  优势 A={a:+.3f}")
+
+print("\\n答对的被抬高(A>0)、答错的被压低(A<0),基线就是这一组的平均分——没有 critic")
+`} />
+
+## 三、目标函数:PPO 的裁剪外壳 + 组相对优势
+
+有了优势,GRPO 剩下的外壳几乎照抄 [PPO 的裁剪目标](/tutorials/policy-gradient)。对每个 token 定义概率比 $r_{i,t}(\theta)=\dfrac{\pi_\theta(o_{i,t}\mid q,o_{i,<t})}{\pi_{\theta_\text{old}}(o_{i,t}\mid q,o_{i,<t})}$,目标是
+
+$$
+\mathcal{J}_\text{GRPO}(\theta) = \mathbb{E}\!\left[\frac{1}{G}\sum_{i=1}^{G}\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}
+\min\!\Big(r_{i,t}\hat A_{i,t},\; \operatorname{clip}(r_{i,t},1-\varepsilon,1+\varepsilon)\hat A_{i,t}\Big) \;-\; \beta\, \mathbb{D}_\text{KL}\!\left[\pi_\theta\,\|\,\pi_\text{ref}\right]\right]
+$$
+
+和 PPO 逐项对照,只有两处不同:
+
+| 部件 | PPO | GRPO |
+|---|---|---|
+| 优势 $\hat A$ | critic 估的 $G_t - V_\psi(s_t)$ | 组内标准化 $(r_i-\text{mean})/\text{std}$ |
+| KL 正则 | 混进**奖励**里 $r - \beta\log\frac{\pi}{\pi_\text{ref}}$ | 直接加在**损失**里(单独一项) |
+| 裁剪外壳 $\min(r\hat A,\text{clip}(\cdots)\hat A)$ | ✅ 相同 | ✅ 相同 |
+
+### KL 为什么从奖励里挪出来?
+
+RLHF-PPO 把反向 KL 惩罚**塞进每步奖励**($r_t \leftarrow r_t - \beta\log\frac{\pi_\theta}{\pi_\text{ref}}$),这样 KL 会经过优势估计、被 critic 一起「消化」。GRPO 觉得没必要——它**直接把 KL 散度作为损失里的一项**,让任务奖励保持干净,也**不干扰 $\hat A_{i,t}$ 的计算**。
+
+而且 GRPO 用的是 Schulman 的 **k3 无偏 KL 估计器**(它恒为正,方差比朴素估计小):
+
+$$
+\hat{\mathbb D}_\text{KL} = \frac{\pi_\text{ref}(o_{i,t})}{\pi_\theta(o_{i,t})} - \log\frac{\pi_\text{ref}(o_{i,t})}{\pi_\theta(o_{i,t})} - 1 \;\ge\; 0.
+$$
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# k3 无偏 KL 估计器:令 u = π_ref/π_θ,则 KL 的单样本估计 = u - log(u) - 1
+# 它有两个好性质:(1) 恒 ≥ 0;(2) 期望等于真实 KL,且方差比朴素估计 log(π_θ/π_ref) 小
+rng = np.random.default_rng(0)
+
+# 构造两个离散分布(参考 vs 当前策略),真实 KL 可精确算出作为对照
+p_ref = np.array([0.1, 0.2, 0.4, 0.3])
+p_th  = np.array([0.15, 0.25, 0.35, 0.25])
+true_kl = np.sum(p_th * np.log(p_th / p_ref))   # KL(π_θ || π_ref)
+
+def estimate(estimator, n=200000):
+    # 从 π_θ 采样 token,估 KL
+    idx = rng.choice(4, size=n, p=p_th)
+    ratio = p_ref[idx] / p_th[idx]              # u = π_ref/π_θ
+    if estimator == "naive":
+        return -np.log(ratio)                    # log(π_θ/π_ref),无偏但方差大、可能为负
+    else:  # k3
+        return ratio - np.log(ratio) - 1         # 恒 ≥ 0
+
+for name in ["naive", "k3"]:
+    s = estimate(name)
+    print(f"{name:5s}: 均值={s.mean():.5f}  方差={s.var():.5f}  最小值={s.min():+.4f}")
+print(f"真实 KL = {true_kl:.5f}")
+print("\\nk3 均值同样无偏,但方差更小、且从不为负——更稳的 KL 惩罚")
+`} />
+
+> ⚠️ 注意方向:这里的 $\mathbb D_\text{KL}[\pi_\theta\|\pi_\text{ref}]$ 把策略**拴在参考模型附近**,防止它为了骗奖励跑得太偏——和 [RLHF 里反向 KL 的作用](/tutorials/rlhf)一脉相承,也是[反向 KL「抓众数」](/tutorials/forward-reverse-kl)行为的又一次登场。
+
+## 四、GRPO vs PPO vs DPO:一张图厘清三条路
+
+同样是「把语言模型往好的方向调」,三种主流算法的**减法**做在不同地方:
+
+| 算法 | 需要 critic? | 需要奖励模型? | 在线采样? | 一句话 |
+|---|---|---|---|---|
+| **PPO** | ✅ 价值网络 | ✅ 学习型 RM | ✅ | actor-critic 全家桶,最通用也最重 |
+| **DPO** | ❌ | ❌(偏好对隐式当奖励) | ❌ 离线 | 把 RL 化简成一个[分类损失](/tutorials/rlhf),直接在成对偏好上优化 |
+| **GRPO** | ❌ 用组均值代替 | 可选(RLVR 用规则判分) | ✅ | 去掉 critic,组内相对优势 + PPO 裁剪外壳 |
+
+- **PPO → GRPO**:去掉 critic,用「同题一组回答的均值」当基线。省显存,代价是每步要多采 $G$ 个回答。
+- **PPO → DPO**:干脆连 RL 循环和奖励模型都去掉,把「最大化奖励 − KL」的解析最优解反推成一个直接在偏好对上跑的[监督式损失](/tutorials/rlhf)。省事,代价是离线、无法在线探索。
+- **GRPO 的定位**:当你有**能自动判分的奖励**(数学/代码)、又想保留**在线探索**时,它是当前最主流的选择。
+
+> 🧭 一个重要的边界提醒:GRPO 的成功是在 **LLM 推理 + 可验证奖励**这个特定场景里被验证的。有研究把它搬回**经典控制环境**(CartPole、HalfCheetah 等),发现除了 CartPole,GRPO 普遍**打不过 PPO**。也就是说「去掉 critic」不是普适地更好——别把它的 LLM 战绩过度外推到一切 RL 问题。
+
+## 五、RLVR:让「奖励」变成一道判断题
+
+GRPO 只是**怎么优化**;**优化什么**由奖励定义。RLVR 的主张是:在有标准答案的领域,**别再学奖励模型了,直接用规则判分**。
+
+DeepSeek-R1 就是这条路线最完整的落地——从 R1-Zero(纯 RLVR、无 SFT 冷启动)到多阶段流水线(冷启动 SFT → 推理 RL → 拒绝采样 SFT → 全场景 RL),论文 Figure 2 画出了完整管线:
+
+<figure className="my-6">
+  <img src="./r1-pipeline.svg" alt="DeepSeek-R1 的多阶段训练管线:先以 DeepSeek-V3-Base 为起点,经少量冷启动数据 SFT,再进行面向推理的 RLVR 训练,然后拒绝采样生成新 SFT 数据重训,最后做全场景 RL;R1-Zero 则直接从 base 模型纯 RL 训练" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI, <em>DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning</em>(arXiv:2501.12948)Figure 2
+  </figcaption>
+</figure>
+
+跟随 DeepSeek-R1,可验证奖励通常拆成两部分:
+
+$$
+r = r_\text{accuracy} + \lambda \cdot r_\text{format}
+$$
+
+- **准确性奖励 $r_\text{accuracy}$**:最终答案对不对。数学题——抽取 `\boxed{}` 里的答案和标准答案比对;代码题——把生成的程序丢进**单元测试/执行器**,跑过给分。
+- **格式奖励 $r_\text{format}$**:是否遵守约定格式,比如把推理过程放进 `<think></think>`、最终答案放进 `<answer></answer>`。这让模型养成「先想再答」的习惯,也方便自动抽取答案。
+
+<CodeRunner defaultCode={`
+import re
+
+# 一个玩具版 RLVR 判分器:数学题,答案应放进 <answer>...</answer>
+def verify(response, gold, lam=0.2):
+    # 格式奖励:是否有 <think>…</think> 和 <answer>…</answer>
+    has_think = bool(re.search(r"<think>.*?</think>", response, re.S))
+    m = re.search(r"<answer>\\s*(.*?)\\s*</answer>", response, re.S)
+    r_format = 1.0 if (has_think and m) else 0.0
+
+    # 准确性奖励:抽出的答案与标准答案是否相等(这里做数值归一比对)
+    r_acc = 0.0
+    if m:
+        try:
+            r_acc = 1.0 if abs(float(m.group(1)) - float(gold)) < 1e-6 else 0.0
+        except ValueError:
+            r_acc = 1.0 if m.group(1).strip() == str(gold).strip() else 0.0
+    return r_acc + lam * r_format, r_acc, r_format
+
+gold = 42
+samples = [
+    "<think>6 乘 7 等于 42</think><answer>42</answer>",   # 又对又守格式
+    "<answer>42</answer>",                                  # 答对但没 think
+    "<think>随便猜</think><answer>41</answer>",            # 守格式但答错
+    "答案大概是 42 吧",                                     # 对但完全不守格式,规则判不出
+]
+for s in samples:
+    r, ra, rf = verify(s, gold)
+    print(f"r={r:.2f}  (accuracy={ra:.0f}, format={rf:.0f})  <- {s[:40]}")
+
+print("\\n注意最后一条:答案其实是对的,但规则抽不出来 -> 假阴性(false negative)")
+`} />
+
+### 判分器本身就是风险面
+
+上面最后一个例子点出了 RLVR 最关键的工程难题:**判分器不完美,而它的缺陷会被策略钻空子。**
+
+- **规则判分器(rule-based)**:安全、不可训练、难被骗,但会产生**假阴性**——答案对了却因格式不匹配没认出来。更糟的是,**策略越强,这种漏判造成的伤害越明显**(强模型本来对得多,却被误判为错)。
+- **模型判分器(model-based)**:静态准确率更高、更能识别语义等价,但**微调后极易被 reward hacking**——策略会发现「输出某种模式就能骗到高分」的漏洞,拿到**虚高但名不副实**的奖励。文献里有真实案例:一个 1.5B 的验证器训练到约 450 步后,它给的奖励和「真值」发生背离,直接导致**训练崩溃**;生成式验证器甚至会被空串、乱码、单个符号骗过。
+
+这其实是 [RLHF 那篇讲的 Goodhart / reward hacking](/tutorials/rlhf) 在 RLVR 里的翻版:**任何代理奖励和真实目标之间的缝隙,都会被优化过程撬开。** RLVR 用规则判分把这条缝**收窄**了(数学/代码的对错相对客观),但并没有**彻底消除**——判分器的假阴性和可被 hack 的盲区,依然是要重点防守的地方。
+
+## 六、陷阱一:长度偏置——为什么错误答案越训越长
+
+GRPO 上线后,人们观察到一个诡异现象:**模型的回答越训越长,尤其是答错的那些。** Dr.GRPO 论文把病根找了出来,就藏在目标函数那个不起眼的 $\frac{1}{|o_i|}$ 里。
+
+回看目标函数:每个回答的 token 损失被**除以该回答的长度 $|o_i|$**。这一步「按长度归一化」看似公平,却引入了系统性偏差:
+
+- **答对的回答($\hat A_{i,t}>0$)**:短回答里每个 token 分到的梯度权重**更大**——于是「答对时倾向说得短」;
+- **答错的回答($\hat A_{i,t}<0$)**:长回答被 $\frac{1}{|o_i|}$ 摊薄,每个 token 受到的**惩罚更轻**——于是「答错时倾向说得长」,因为拉长就能稀释惩罚。
+
+两者叠加,模型学到一个歪招:**答不出来就使劲拖长**,反正长了罚得轻。这就是错误答案长度持续膨胀的来源。
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 演示长度偏置:同样是"答错"(优势 A<0),长回答被 1/|o| 摊薄后每 token 惩罚更轻
+A_neg = -1.0   # 一个答错回答的组内优势(负)
+
+for length in [10, 50, 200]:
+    # GRPO:总损失贡献 = (1/|o|) * Σ_t A  = (1/L)*(L*A) = A ...但每 token 的"有效惩罚"= A/L
+    per_token_penalty_grpo = abs(A_neg) / length
+    # Dr.GRPO / DAPO 的 token-level:不除以 |o|,每 token 惩罚与长度无关
+    per_token_penalty_fixed = abs(A_neg)
+    print(f"长度={length:3d}  GRPO每token惩罚={per_token_penalty_grpo:.4f}   token-level每token惩罚={per_token_penalty_fixed:.2f}")
+
+print("\\nGRPO 列:回答越长,每个 token 受到的惩罚越轻 -> 模型学会'答错就拉长'来逃避惩罚")
+print("token-level 列:惩罚与长度无关 -> 拉长不再有好处")
+`} />
+
+## 七、陷阱二:难度偏置——被标准差放大的权重
+
+第二个偏差来自优势里那个**除以组内标准差 $\operatorname{std}(r)$** 的操作(你在开头的交互组件里已经撞见过)。
+
+对二元奖励,一组回答的标准差 $\sigma=\sqrt{\mu(1-\mu)}$ 只由「答对比例 $\mu$」决定:
+
+- **题目太简单或太难**($\mu\to1$ 或 $\mu\to0$,几乎全对或全错):$\sigma$ 很小,除以它会把那少数几个回答的优势**放大到很大**——这些「区分度低」的题被过度加权;
+- **极端情况**($\mu=0$ 或 $\mu=1$,全错或全对):$\sigma=0$,整组优势归零,**没有梯度**。
+
+也就是说,GRPO 会**系统性地偏袒那些区分度低的题目**,这和「按 batch 统一归一化」不同,是 GRPO 特有的失真。
+
+**Dr.GRPO 的修法极简:把这两项归一化都删掉。** 优势退化为纯均值中心化
+
+$$
+\hat A_i = r_i - \operatorname{mean}(r),
+$$
+
+同时去掉 $\frac{1}{|o_i|}$。作者论证这样得到的是**无偏**优化,能防止错误答案的长度膨胀、显著提升 token 效率,而推理性能不降。回到开头的交互组件,把开关切到 **Dr.GRPO: r−μ**,再拖 $k$——你会看到 $k=1$ 时那个夸张的放大效应消失了。
+
+## 八、后续改进:DAPO、GSPO 与这条演进线
+
+GRPO 的两个陷阱催生了一批改进工作。它们的共同主题是:**在 GRPO 的骨架上,把归一化/裁剪/采样的细节重新设计得更稳。**
+
+### DAPO:四个补丁 + 扔掉 KL
+
+DAPO(Decoupled Clip and Dynamic Sampling Policy Optimization,字节 & 清华)在 GRPO 上加了四项技术,并**彻底移除 KL 项**:
+
+1. **Clip-Higher**:把 PPO 裁剪的**上界解耦**、单独调高,给低概率 token 更多上升空间,缓解**熵坍缩**(策略过早失去多样性);
+2. **Dynamic Sampling(动态采样)**:**丢掉那些全对或全错的题**(整组 $\sigma=0$、优势全零、没梯度的题),保证每个 batch 都有有效梯度——这正好治了第七节那个 $\mu\in\{0,1\}$ 的退化情形;
+3. **Token-Level Policy Gradient Loss**:把 GRPO 的「按回答平均」换成**按 token 平均**,直接掐断第六节的长度偏置;
+4. **Overlong Reward Shaping**:对被长度截断的超长回答做**软惩罚**,而不是一刀切判错。
+
+**为什么敢扔掉 KL?** DAPO 的论据是:长链推理(long-CoT)的训练会让模型分布**远远偏离**初始模型,此时「拴在参考模型附近」的约束反而是累赘。凭这套组合,DAPO 用 Qwen2.5-32B 在 AIME 2024 上拿到 **50 分**(avg@32),超过 DeepSeek-R1-Zero-Qwen-32B 的 47 分,且只用了**一半的训练步数**。
+
+> 📝 一个常被误传的点:DAPO 的 Dynamic Sampling **确实有用**——有对照实验支持它提升性能,不要以为「关掉它更好」。同理,「learned critic 对长程任务不可或缺」这类强断言在经典 RL 里也**站不住脚**——去 critic 不是原罪,关键看场景。
+
+### GSPO / LUSPO:把优化搬到「序列」层面
+
+GRPO/DAPO 的概率比、裁剪都是**逐 token**的。GSPO(Group Sequence Policy Optimization)改成**基于整条序列的似然**做重要性比、裁剪与优化。这条序列级的路线同样会遇到**长度偏置**,最新的 LUSPO 用一个极简改动修正:给每条序列的裁剪损失项**乘上它自己的长度 $|y_i|$**,让损失对长度无偏,消除响应长度坍缩。
+
+一句话串起这条线:
+
+$$
+\underbrace{\text{PPO}}_{\text{带 critic}}\;\to\;\underbrace{\text{GRPO}}_{\text{去 critic,组相对}}\;\to\;\underbrace{\text{Dr.GRPO}}_{\text{去两处归一化}}\;/\;\underbrace{\text{DAPO}}_{\text{四补丁+去 KL}}\;\to\;\underbrace{\text{GSPO/LUSPO}}_{\text{序列级}}
+$$
+
+> ⏳ 提醒:这是个**快速演进**的领域(2024.02 DeepSeekMath 到 2026 年初 LUSPO)。GRPO 的基础事实很稳,但「哪个改进最好」仍在激烈竞争、缺乏统一的公平基准——把这些新变体当作**活跃前沿**看待,而非定论。
+
+## 九、调参直觉:组大小与 KL 系数
+
+两个最常问的超参,研究给了较一致的经验:
+
+- **组大小 $G$(每题采样几个回答)**:$G$ 越大,组内均值/标准差估得越准,**训练更稳、准确率更高**——但边际收益递减,常见的甜点区大约在 $G\approx 8\text{–}16$(DeepSeek 甚至用到每题 64 个)。
+- **KL 系数 $\beta$**:效果是**非单调**的。太小→方差被放大、训练不稳;太大→过度正则、压制探索。经验上一个中等值(约 $0.0075\text{–}0.01$)通常最好。当然,DAPO 那一派干脆把它设为 0。
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 直觉演示:组大小 G 越大,组均值基线的估计方差越小 -> 优势估计越稳
+rng = np.random.default_rng(0)
+p_correct = 0.4  # 某题真实答对率
+
+print("组大小 G 对'组均值基线'估计稳定性的影响(重复 5000 次采样看均值的标准差):")
+for G in [2, 4, 8, 16, 32]:
+    means = [rng.binomial(1, p_correct, size=G).mean() for _ in range(5000)]
+    print(f"  G={G:2d}:  基线均值≈{np.mean(means):.3f}   基线的标准差={np.std(means):.4f}")
+print("\\nG 越大,基线抖动越小 -> 优势更可靠、训练更稳(但每步采样成本也线性上升)")
+`} />
+
+## 十、动手:一个能收敛的 GRPO 玩具循环
+
+最后把所有零件拼起来:一个**极简但完整**的 GRPO 训练循环。任务是「猜一个目标数字」,策略是一个 softmax 分布,奖励可验证(猜中=1)。你会看到策略在**没有 critic**、只靠组内相对优势的情况下逐渐把概率质量集中到正确答案上。
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(0)
+
+N = 10                 # 动作空间:数字 0..9
+target = 7             # 可验证的"正确答案"
+theta = np.zeros(N)    # 策略 logits(待学习)
+G = 8                  # 组大小
+lr = 0.5
+eps = 0.2              # PPO 裁剪范围
+
+def softmax(z):
+    z = z - z.max()
+    e = np.exp(z)
+    return e / e.sum()
+
+def reward(a):         # RLVR 式可验证奖励:猜中给 1,否则 0
+    return 1.0 if a == target else 0.0
+
+for step in range(60):
+    p_old = softmax(theta)
+    # 1) 采样一组回答
+    acts = rng.choice(N, size=G, p=p_old)
+    rews = np.array([reward(a) for a in acts])
+    # 2) 组内相对优势(Dr.GRPO 式:只中心化,避开难度偏置)
+    adv = rews - rews.mean()
+    if np.allclose(adv, 0):        # 全对/全错 -> 无梯度,跳过(DAPO 的 dynamic sampling 精神)
+        continue
+    # 3) 用 PPO 裁剪目标做一步梯度上升
+    grad = np.zeros(N)
+    p = softmax(theta)
+    for a, A in zip(acts, adv):
+        ratio = p[a] / p_old[a]
+        # 裁剪:优势为正且 ratio 超过 1+eps 时不再给梯度
+        if A > 0 and ratio > 1 + eps: continue
+        if A < 0 and ratio < 1 - eps: continue
+        # ∇ log π(a) = e_a - p
+        g = -p.copy(); g[a] += 1.0
+        grad += A * ratio * g
+    theta += lr * grad / G
+    if step % 15 == 0:
+        print(f"step {step:2d}: P(正确答案={target}) = {softmax(theta)[target]:.3f}  组内答对率={rews.mean():.2f}")
+
+print(f"\\n最终 P(答案={target}) = {softmax(theta)[target]:.3f}")
+print("没有 critic,仅靠'同一道题一组回答的相对好坏',策略就把概率集中到了正确答案上——这就是 GRPO")
+`} />
+
+## 十一、动手实验建议
+
+1. **触发长度偏置**:在第六节的代码里把 `length` 列表改大(如 `[10, 100, 1000]`),看 GRPO 每 token 惩罚如何随长度趋近 0——这就是「答错拉长逃惩罚」的量化来源。
+2. **难度偏置的临界点**:回到顶部交互组件,固定 GRPO 模式,把 $k$ 从 4 逐格拖到 1,记录「答对优势」数值——它在 $k=1$ 处被 $\sigma$ 放大到多大?切到 Dr.GRPO 再走一遍对比。
+3. **KL 方向与稳定性**:在第九节的收敛循环里加一个反向 KL 惩罚项 $-\beta(\log\pi-\log\pi_\text{ref})$(令 $\pi_\text{ref}$ 为初始均匀分布),扫 $\beta\in\{0,0.05,0.5,5\}$,观察太大 $\beta$ 如何把策略死死拴在均匀分布、学不动。
+4. **判分器假阴性的代价**:在第五节 `verify` 里,故意让规则漏判一部分正确答案(比如要求答案必须是整数字符串),再放进第十节的循环当奖励,看假阴性如何拖慢甚至带偏收敛——体会「判分器即风险面」。
+5. **组大小消融**:在第十节把 `G` 设成 2 和 32 各跑几次,比较收敛速度与稳定性,验证第九节的甜点区直觉。
+
+## 小结
+
+| 概念 | 一句话 | 关键点 |
+|---|---|---|
+| **GRPO** | 去掉 PPO 的 critic,用同题一组回答的均值当基线 | $\hat A_i=(r_i-\text{mean})/\text{std}$,整条回答共享;省下和策略等大的价值网络 |
+| **KL 正则** | 从奖励里挪到损失里单独一项 | 用 k3 无偏估计器 $u-\log u-1\ge0$;方向仍是把策略拴在 $\pi_\text{ref}$ 附近 |
+| **RLVR** | 用规则判分取代学习型奖励模型 | $r=r_\text{accuracy}+\lambda r_\text{format}$;数学比答案、代码跑测试 |
+| **判分器风险** | 判分器不完美,缺陷会被策略钻 | 规则→假阴性(策略越强越糟);模型→可被 hack、甚至训练崩溃 |
+| **长度偏置** | 除以 $|o_i|$ 让答错回答越训越长 | 长回答摊薄惩罚 → DAPO 用 token-level loss 修 |
+| **难度偏置** | 除以组内 $\sigma$ 过度加权太易/太难的题 | $\sigma$ 小→放大,$\sigma=0$→无梯度 → Dr.GRPO 删掉两处归一化 |
+| **DAPO** | GRPO + 四补丁,并扔掉 KL | Clip-Higher / Dynamic Sampling / Token-level / Overlong Shaping;AIME 50 分、半步数 |
+| **GSPO / LUSPO** | 把优化搬到序列层面 | 序列级重要性比;LUSPO 乘 $|y_i|$ 修长度偏置 |
+| **DeepSeek-R1** | GRPO + RLVR 训出会推理的大模型 | 纯 RL 即可涌现长链推理,无需人工推理轨迹 |
+| **适用边界** | 去 critic 不是普适更优 | 经典控制里 GRPO 除 CartPole 外普遍不敌 PPO |
+
+> 🎯 一句话记住:**GRPO = 「一组回答互相当基线」省掉 critic;RLVR = 「答案对不对」当奖励省掉奖励模型。** 两者相乘,就是 DeepSeek-R1 让大模型学会一步步推理的引擎——而长度偏置、难度偏置、判分器被钻,是这条路上必须绕开的三块石头。
+
+## 延伸阅读
+
+- **站内论文笔记**:[GRPO 与 DeepSeek-R1](/papers/grpo-deepseek-r1) —— 本篇的论文区姊妹篇:同一条主线,笔记侧重论文叙事(动机、Figure 解读、两个偏置的社区反思)
+- **站内论文笔记**:[Kimi K1.5](/papers/kimi-k15) —— 把 RLVR 思路用到多模态的代表作:可验证奖励 + long2short 课程,推理能力跨模态迁移
+- **站内论文笔记**:[Kimi K3](/papers/kimi-k3) —— GRPO 家族的最新工业实践:长 horizon agentic RL 里如何绕开长度/难度偏置
+
+## 参考文献
+
+1. Shao, Wang, Zhu, Xu, Song, Bi, Zhang, Zhang, Li, Wu, Guo (2024). *DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models*. [arXiv:2402.03300](https://arxiv.org/abs/2402.03300). —— GRPO 原始论文:提出 Group Relative Policy Optimization,砍掉 PPO 的 value/critic 网络,用同一 prompt 采样 $G$ 个回答的组内均值/标准差标准化作优势 $\hat A_{i,t}=(r_i-\text{mean})/\text{std}$;把 KL 从奖励挪到损失、用 k3 无偏估计器 $u-\log u-1\ge0$;明确以「优化 PPO 显存」为动机。
+2. DeepSeek-AI (2025). *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. [arXiv:2501.12948](https://arxiv.org/abs/2501.12948). —— 用 GRPO + RLVR 训练推理:核心发现「纯 RL(可验证奖励)即可激发推理能力,无需人工标注推理轨迹」;R1-Zero 直接在基座上做 RLVR,长链推理与自我反思自发涌现。
+3. Liu, Chen, Zhu, Zhang, He, Li, Lin, Du, Zhang, Zhang, Wang, Xiao, Yan, Ye, Yang, Wang, Lin, Lin, Sachan, Yang (2025). *Understanding R1-Zero-Like Training: A Critical Perspective (Dr. GRPO)*. [arXiv:2503.20783](https://arxiv.org/abs/2503.20783). —— 诊断 GRPO 两处系统偏差:响应级**长度偏置**(除以 $|o_i|$ 使答错的长回答受罚更轻、长度膨胀)与问题级**难度偏置**(除以组内 std 过度加权低区分度题);修法是直接删掉这两项归一化,得到「无偏」优化并提升 token 效率。代码 github.com/sail-sg/understand-r1-zero。
+4. Yu, Zhang, Zhu, Yuan, Wang, Zuo, Xu, Song, Li, Zhu, Liu, Chen, Ma, Zhang, Gao, others (2025). *DAPO: An Open-Source LLM Reinforcement Learning System at Scale*. [arXiv:2503.14476](https://arxiv.org/abs/2503.14476). —— 在 GRPO 上加四项技术(Clip-Higher 缓解熵坍缩、Dynamic Sampling 丢弃全对/全错样本、Token-Level Policy Gradient Loss 修长度偏置、Overlong Reward Shaping 软惩罚超长)并移除 KL;Qwen2.5-32B 在 AIME 2024 达 50 分(avg@32),超 R1-Zero-Qwen-32B(47)且仅用 50% 训练步数。
+5. Zheng, Zhang, Zhang, Ye, Luo, Lin, others (2025). *Group Sequence Policy Optimization (GSPO)*. [arXiv:2507.18071](https://arxiv.org/abs/2507.18071). —— 把重要性比、裁剪、优化从 token 级改到**序列级**(基于整条序列似然),提升长序列 RL 训练的稳定性。
+6. *Length-Unbiased Sequence Policy Optimization (LUSPO)* (2026). [arXiv:2602.05261](https://arxiv.org/abs/2602.05261). —— 指出 GSPO 路线的长度偏置,并用极简改动修正:给每条序列的裁剪损失项乘上其长度 $|y_i|$,使损失对响应长度无偏,消除长度坍缩。已集成进 HuggingFace TRL(`loss_type='luspo'`)。
+7. Huang, others / HKUST-NLP (2025). *From Accuracy to Robustness: A Study of Rule- and Model-based Verifiers in RLVR*. [arXiv:2505.22203](https://arxiv.org/abs/2505.22203). —— 系统研究判分器风险:规则判分器因格式等价漏判产生**假阴性**,且策略越强伤害越明显;模型判分器静态更准但微调后**极易被 reward hacking**、导致奖励虚高甚至训练崩溃(1.5B 验证器约 450 步后与真值背离)。
+8. Wang, others (2025). *APO: Enhancing Reasoning Ability of MLLMs via Asymmetric Policy Optimization*. [arXiv:2506.21655](https://arxiv.org/abs/2506.21655). —— 给出 PPO/DPO/GRPO 的清晰对比(PPO=actor-critic;DPO=免奖励模型直接优化偏好;GRPO=去 value 网络、组相对优势),并确认 RLVR 奖励拆分 $r=r_\text{accuracy}+\lambda r_\text{format}$。
+9. *Learning Without Critics? Revisiting GRPO in Classical RL Environments* (2025). [arXiv:2511.03527](https://arxiv.org/abs/2511.03527). —— 把 GRPO 搬回经典控制环境的实证:除 CartPole 外,GRPO 在所测环境普遍**不敌 PPO**——提示 critic-free 优势估计并非普适更优,LLM/RLVR 的成功不应过度外推。
+10. *A Comparative Study of PPO, GRPO and DAPO for LLM Reasoning* (2025). [arXiv:2512.07611](https://arxiv.org/abs/2512.07611). —— 参数化研究:增大组大小使 GRPO/DAPO 训练更稳、准确率更高(边际递减);KL 系数影响**非单调**,中等值最佳;并确认 DAPO 的 Dynamic Sampling 确有增益。

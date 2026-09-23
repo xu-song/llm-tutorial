@@ -1,0 +1,126 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("ppo-schulman");
+
+<PaperHeader slug="ppo-schulman" />
+
+# ✂️ PPO:信赖域的工程化妥协
+
+2017 年,OpenAI 的 Schulman 团队发表了可能是**史上被使用最广的强化学习算法**:PPO(Proximal Policy Optimization)。它要解决的问题很朴素——策略梯度法一步走太大就把策略练崩——而它前辈 [TRPO](/tutorials/policy-gradient) 的解法(二阶近似 + 共轭梯度 + 线搜索)理论漂亮但实现沉重。PPO 的回答是**把信赖域硬约束换成对概率比的一阶裁剪**:十几行代码、一组鲁棒的默认超参(裁剪幅度 $\varepsilon=0.2$ 几乎通吃所有任务),训练却同样稳。七年后的今天,RLHF 的 RL 阶段、以及 GRPO 一系的可验证奖励训练,底层仍然是这个裁剪目标。这篇笔记拆解:ratio 裁剪的公式与直觉、PPO-Clip 与 KL 惩罚两变体的取舍,以及它如何被后续算法逐步改写。
+
+> 📌 前置:本站[策略梯度](/tutorials/policy-gradient)教程完整覆盖了 TRPO→PPO 的推导链(信赖域、GAE、裁剪偏差界);本篇从论文视角提炼要点,并与 [GRPO](/papers/grpo-deepseek-r1)、[DPO](/papers/dpo-rafailov) 连成演进链。
+
+## 一、动机:TRPO 太重,朴素策略梯度太脆
+
+策略梯度(PG)家族的共同软肋:**更新步长没有安全边界**。学习率稍大,新策略就可能急剧偏离采样策略——采样数据全部作废,性能断崖式下跌。TRPO(2015)的解法在分布空间画「信任圈」:约束新策略与旧策略的平均 KL 散度 $\bar D_{\mathrm{KL}}\le\delta$,并证明圈内更新有单调提升下界。但为解这个带约束的更新,它要算 **Fisher 信息矩阵-向量积(二阶)、共轭梯度迭代、回溯线搜索**——实现复杂、每步开销大、超参($\delta$、阻尼、CG 迭代数)全都敏感。
+
+PPO 的判断是:**信赖域的思想是对的,实现可以砍到一阶**。既然要约束的只是「策略别走太远」,那就直接约束新旧策略的**概率比**——一个每个样本上都能便宜算出来的一阶量,然后用普通的 minibatch SGD/Adam 优化。
+
+## 二、Ratio 裁剪:目标函数里的保险丝
+
+定义概率比(importance ratio):
+
+$$
+r_t(\theta)=\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)}
+$$
+
+$r_t=1$ 表示新旧策略对这个动作的看法没变;$r_t$ 偏离 1 越远,策略挪得越远。PPO-Clip 的替代目标:
+
+$$
+L^{\text{CLIP}}(\theta)=\hat{\mathbb{E}}_t\Big[\min\!\big(r_t(\theta)\,\hat A_t,\;\operatorname{clip}(r_t(\theta),\,1-\varepsilon,\,1+\varepsilon)\,\hat A_t\big)\Big]
+$$
+
+它做了三件事,每件都值得咀嚼:
+
+**裁剪即信赖域**。$\operatorname{clip}$ 把 $r_t$ 强行按在 $[1-\varepsilon,\,1+\varepsilon]$ 内($\varepsilon=0.2$ 是论文默认),等价于说「单样本上,策略对任何动作的概率变化不超过 ±20%」——这就是 TRPO 的 KL 信赖域在样本级的粗翻译,却只需要一个 `np.clip`。
+
+**$\min$ 保证只挡「过头」,不挡「回头」**。以 $\hat A_t>0$(好动作)为例:$r_t$ 想被推高,但超过 $1+\varepsilon$ 后 min 取裁剪支、梯度归零——**好动作的过度加码被截停**;而 $r_t$ 从高处回落到区间内时,两项都未裁剪,梯度照常把它拉回来。若反过来 $\hat A_t<0$(坏动作),被截停的是 $r_t<1-\varepsilon$ 的方向——坏动作被压到够低后不再继续踩。**方向性截断**让 PPO 优于天真的对称裁剪:既防崩,又不丢失纠正信号。
+
+**换来的代价是有偏**。被裁剪的样本梯度为零,替代目标不再是真实策略梯度的无偏估计。论文的实验(以及后续大量分析)表明:在 $\varepsilon=0.2$ 下这点偏差远小于「不裁剪导致崩溃」的方差代价——[策略梯度教程](/tutorials/policy-gradient)给出了这个偏差界的正式形式,并指出它与 GAE 偏差是流水线上前后相接的两层。
+
+实际训练中还叠两个件:价值损失 $L^{VF}(\theta)=\hat{\mathbb{E}}_t\big[(V_\theta(s_t)-\hat R_t)^2\big]$ 与熵奖励 $S$(防过早收敛),合成总目标:
+
+$$
+L^{\text{CLIP+VF+S}}(\theta)=\hat{\mathbb{E}}_t\Big[L^{\text{CLIP}}_t-c_1 L^{VF}_t+c_2 S[\pi_\theta](s_t)\Big]
+$$
+
+优势 $\hat A_t$ 用 [GAE](/tutorials/policy-gradient)($\lambda=0.95$、$\gamma=0.99$)估计——GAE 与 PPO 同一团队、早一年发表,两者从诞生起就是标配。
+
+用 numpy 把这个损失曲面画出来——扫一遍 $r$ 与 $A$ 的组合,亲眼看 $\min$ 如何制造不对称的「悬崖」:
+
+<CodeRunner defaultCode={String.raw`
+import numpy as np
+
+eps = 0.2   # PPO 默认裁剪幅度
+
+def clip(x, lo, hi):
+    return np.minimum(np.maximum(x, lo), hi)
+
+def l_clip(r, A, eps=0.2):
+    """PPO-Clip 目标: min(r*A, clip(r,1-eps,1+eps)*A)"""
+    return np.minimum(r * A, clip(r, 1 - eps, 1 + eps) * A)
+
+# —— 损失曲面:r 从 0 到 2,A 取正负两个方向 ——
+r = np.linspace(0.0, 2.0, 21)
+print("eps =", eps)
+print(f"{'r':>6} | {'L(r, A=+1)':>12} {'L(r, A=-1)':>12} | 梯度方向说明")
+print("-" * 62)
+for ri in r[::2]:
+    lp, lm = l_clip(ri, 1.0), l_clip(ri, -1.0)
+    note = ""
+    if ri > 1 + eps: note = "A>0: 好动作加码被截停(梯度=0)"
+    if ri < 1 - eps: note = "A<0: 坏动作下压被截停(梯度=0)"
+    print(f"{ri:6.2f} | {lp:12.3f} {lm:12.3f} | {note}")
+
+print()
+# —— 关键对照:为什么是 min(r*A, clip*r*A) 而不是对称裁剪 clip(r*A) ——
+r_test = np.array([0.5, 0.7, 1.3, 1.6])
+A_test = -1.0   # 坏动作:r 偏低是"压得对"
+print("A = -1(坏动作)时:")
+for ri in r_test:
+    ppo = l_clip(ri, A_test)
+    naive = clip(ri * A_test, -(1 + eps), 1 + eps)   # 天真对称裁剪
+    grad_alive = abs(ri - ppo / A_test) > 1e-9 or (0.8 < ri < 1.2)
+    print(f"  r={ri:.1f}: PPO={ppo:+.3f}  对称裁剪={naive:+.3f}"
+          + ("  <- PPO 保留把 r 拉回 1 的梯度" if ri < 1 - eps or ri > 1 + eps else ""))
+print()
+print("被裁剪区间外的样本梯度为 0 —— 有偏,但换来的是不会一步迈崩")
+`} />
+
+## 三、另一个变体:KL 惩罚,及为什么输了
+
+论文同场发布了 **PPO-Penalty**:不裁剪,把「偏离旧策略」写成软惩罚:
+
+$$
+L^{\text{KLPEN}}(\theta)=\hat{\mathbb{E}}_t\Big[r_t(\theta)\hat A_t-\beta\,\operatorname{KL}[\pi_{\theta_{\text{old}}},\,\pi_\theta]\Big]
+$$
+
+$\beta$ 自适应调节:估计 KL $\hat d$ 超过 $1.5\,d_{\text{tgt}}$ 则 $\beta\leftarrow1.5\beta$(约束没管住,拽紧),低于 $d_{\text{tgt}}/1.5$ 则 $\beta\leftarrow\beta/1.5$(约束太松,放松)。
+
+7 个 MuJoCo 环境 × 3 个种子的平均归一化得分(随机策略=0、最优=1)给出了清晰的裁决:**不裁剪不惩罚 −0.39**(直接崩);**裁剪 $\varepsilon=0.1/0.2/0.3$ 得 0.76/0.82/0.70**;自适应 KL(d_targ=0.003/0.01/0.03)0.68/0.74/0.71;固定 KL 全部落后。**$\varepsilon=0.2$ 的裁剪全面胜出**。裁剪的优势:少一个要调的 $\beta$/d_targ,样本级生效比分布级 KL 更局部稳定。
+
+PPO 因此有一套几乎不变的默认配方:$\varepsilon=0.2$、GAE $\lambda=0.95$、$\gamma=0.99$、Adam、每批数据 3-10 个 epoch 的 minibatch 复用(MuJoCo 表:horizon 2048、10 epochs、minibatch 64;Atari 表:3 epochs)。**「多 epoch 复用同一批数据」正是裁剪买来的样本效率**:朴素 PG 每条数据只能用一次(on-policy),PPO 靠 ratio 把旧数据的重要性加权修正到当前策略,裁剪保证复用不发散。
+
+## 四、实验结果与影响
+
+- **连续控制**:7 个 MuJoCo 环境(HalfCheetah、Hopper、Walker2d 等)上,PPO-clip 胜过 TRPO、朴素 PG、交叉熵方法(CEM)「几乎所有环境」;
+- **Atari**:49 个游戏、4 千万帧,训练平均奖励 PPO 赢 30 场 vs ACER 18 场、A2C 1 场;单游戏如 BattleZone 17366.7 vs A2C 的 3080.0、BankHeist 1280.6 全面领先——对比表里 ACER 依靠 Air Raid 一个离群游戏拉高均值,PPO 在中位数上更稳;
+- **生态**:PPO 发布当月就成为 OpenAI 默认 RL 算法,Spinning Up、Stable-Baselines3 等教程库以它为教学标准;2019 年 **InstructGPT/ChatGPT 的 RLHF 采取 PPO 做策略优化**,把它从「游戏算法」变成「大模型对齐的地基」——论文本身只字未提语言模型,这是它作者也没预料到的第二人生。
+
+## 五、局限与演进链
+
+1. **无收敛性证明**:TRPO 至少有单调提升下界;PPO 裁剪有偏、无形式化保证,稳定性是「工程上极其鲁棒」而非「理论上可证」。这交换正是标题所说「工程化妥协」;
+2. **仍然要 critic**:总目标里 $L^{VF}$ 要求训练一个与策略相当规模的价值网络——在 LLM 场景这意味着显存近乎翻倍、给「半句话」估值本身困难。这正是 [GRPO](/papers/grpo-deepseek-r1) 的出发点:**砍掉 critic,用同题一组采样的组内标准化当基线**——它保留了 PPO 的 ratio 裁剪形状,只替换优势来源;
+3. **on-policy 约束**:多 epoch 复用是「轻度 off-policy」,大规模 RL 下 ratio 仍会发散,DeepSeek-V3.2 为此补了离轨序列掩码等四条修正;[Kimi K1.5](/papers/kimi-k15) 则整个换掉裁剪,改用 log-ratio 的 L2 正则(镜像下降视角);
+4. **RLHF 时代的挑战者**:PPO 流水线(奖励模型 + 在线采样 + critic)复杂昂贵,[DPO](/papers/dpo-rafailov) 用闭式解跳过整个 RL 阶段——但 DPO 是离线的、对数据分布敏感,在线 PPO/GRPO 在可验证奖励任务上仍是主力。
+
+这条演进链读下来,你会看到 PPO 的裁剪思想被反复继承:GRPO 保留 $L^{\text{CLIP}}$ 的形状、只换 $\hat A$;Dr.GRPO/DAPO 修它的归一化偏置;K1.5 换正则形式;V3.2 给它补工程前提。**每一代都在改 PPO,每一代都没能完全离开它。**
+
+## 小结
+
+- **PPO-Clip** $=\min\big(r\hat A,\operatorname{clip}(r,1-\varepsilon,1+\varepsilon)\hat A\big)$:把 TRPO 的 KL 信赖域翻译成概率比的一阶裁剪;$\min$ 的非对称性保证只挡「过头」、保留「回头」的梯度。
+- **代价与收益**:有偏(越界样本梯度为零)换来「不崩 + 可多 epoch 复用数据 + 全一阶实现」;MuJoCo 消融里 $\varepsilon=0.2$ 拿到 0.82 平均分,优于所有 KL 惩罚变体。
+- **配方**:$\varepsilon=0.2$、GAE $\lambda=0.95$、价值损失 + 熵奖励、Adam、3-10 epoch minibatch——一组几乎跨任务通用的默认值,这是它成为「默认 RL 算法」的真正原因。
+- **演进链**:TRPO(理论)→ PPO(工程)→ RLHF 的主力 → GRPO(去 critic)→ Dr.GRPO/DAPO(修偏置)→ 镜像下降系(换正则)——读 PPO 是读这条链的起点。
+
+PPO 论文只有 12 页、没有一个定理证明正确性,却比同年所有带证明的算法加起来都更常用。它的教训值得每个做系统的人记着:**理论告诉你该约束什么,工程决定你用什么约束它——后者的选择往往比前者更影响世界。**

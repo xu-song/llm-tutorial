@@ -1,0 +1,174 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("cross-entropy-kl");
+
+# 📐 交叉熵与 KL 散度
+
+上一篇[熵与信息](/tutorials/information-theory)度量的是**单个分布**的不确定性。这一篇引入第二个分布——**模型的预测** $Q$,看用它去描述**真实世界** $P$ 要付多大代价。这正是分类损失函数的来源。
+
+## 交叉熵:用「错误的信念」编码真相的代价
+
+假设:
+
+- $P$ 是数据的**真实分布**(真实标签)
+- $Q$ 是模型的**预测分布**
+
+**交叉熵** 衡量「用模型的信念 $Q$ 去描述真实世界 $P$」平均需要多少 bit:
+
+$$
+H(P, Q) = -\sum_{i} P(x_i) \log_2 Q(x_i)
+$$
+
+模型预测得越准($Q$ 越接近 $P$),交叉熵越小。这正是分类任务里**交叉熵损失**的本质:**最小化交叉熵 = 让预测分布逼近真实分布**。
+
+下面是一个 3 分类的例子:真实类别是「类 0」。**拖动滑块**调整模型预测的概率,观察交叉熵损失如何变化——把「类 0」的概率拉高,损失就会下降:
+
+<CrossEntropyExplorer />
+
+## KL 散度:两个分布差多少
+
+**KL 散度(相对熵)** 衡量分布 $Q$ 相对真实分布 $P$ 的「差距」:
+
+$$
+D_{KL}(P \parallel Q) = \sum_{i} P(x_i) \log_2 \frac{P(x_i)}{Q(x_i)} = H(P, Q) - H(P)
+$$
+
+也就是说:
+
+$$
+\underbrace{H(P,Q)}_{\text{交叉熵}} = \underbrace{H(P)}_{\text{真实分布固有的熵}} + \underbrace{D_{KL}(P \parallel Q)}_{\text{预测偏差}}
+$$
+
+由于训练时真实分布 $P$ 固定($H(P)$ 是常数),**最小化交叉熵就等价于最小化 KL 散度**。KL 散度始终 $\geq 0$,当且仅当 $P=Q$ 时为 0。
+
+下图取固定分布 $Q=(1/3,\,2/3)$,画出不同阶数 $\alpha$ 的 **Rényi 散度**随 $P=(p,\,1-p)$ 变化的曲线族——所有曲线都在 $P=Q$(即 $p=1/3$)处触底为 0,且 $\alpha$ 越大、对远离 $Q$ 的分布惩罚越陡。**KL 散度正是 $\alpha\to 1$ 时的 Rényi 极限**,曲线脾气居于中间:既不像 $\alpha=\infty$(最大散度)那样只盯着最坏情况,也不像小 $\alpha$ 那样对差异不敏感:
+
+<figure className="my-6">
+  <img src="./renyi-divergence-vs-p.png" alt="四种不同阶数 α 的 Rényi 散度随分布参数 p 变化的曲线族:所有曲线在 p=1/3(即 P=Q 处)取最小值 0,α 越大曲线越陡" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:van Erven & Harremoës, <em>Rényi Divergence and Kullback-Leibler Divergence</em>(arXiv:1206.2459)Figure 2
+  </figcaption>
+</figure>
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+def kl_divergence(p, q):
+    p, q = np.array(p), np.array(q)
+    mask = p > 0
+    return np.sum(p[mask] * np.log2(p[mask] / q[mask]))
+
+P = [0.7, 0.2, 0.1]          # 真实分布
+Q_good = [0.6, 0.25, 0.15]   # 较好的预测
+Q_bad  = [0.1, 0.2, 0.7]     # 较差的预测
+
+print("D_KL(P || 较好预测) =", round(kl_divergence(P, Q_good), 4))
+print("D_KL(P || 较差预测) =", round(kl_divergence(P, Q_bad), 4))
+print("D_KL(P || P)        =", round(kl_divergence(P, P), 4), "  (完全相同 → 0)")
+`} />
+
+## 对数似然与最大似然:交叉熵的另一副面孔
+
+前面我们从「编码代价」的角度得到交叉熵。换个入口——**统计学的最大似然**——会走到同一个终点。
+
+给定一批数据 $\{x_i\}_{i=1}^N$ 和参数为 $\theta$ 的模型,**似然**是「在这组参数下,数据恰好出现的概率」:
+
+$$
+L(\theta) = \prod_{i=1}^N p_\theta(x_i)
+$$
+
+连乘的数值会迅速下溢,且不好求导,所以取对数把乘积变求和,得到**对数似然**:
+
+$$
+\log L(\theta) = \sum_{i=1}^N \log p_\theta(x_i)
+$$
+
+**最大似然估计(MLE)** 就是找让数据最可能出现的 $\theta$。习惯上取负号、除以 $N$,转成一个「越小越好」的损失——**负对数似然(NLL)**:
+
+$$
+\text{NLL}(\theta) = -\frac{1}{N}\sum_{i=1}^N \log p_\theta(x_i)
+$$
+
+关键在于:这个 NLL **正是经验分布与模型分布的交叉熵**。把数据看成真实分布 $P$ 的采样,$-\frac1N\sum\log p_\theta(x_i)$ 就是 $H(P, Q_\theta)$ 的蒙特卡洛估计。于是四件事被串成一条主线:
+
+$$
+\underbrace{\max_\theta \log L(\theta)}_{\text{最大似然}}
+\;\Longleftrightarrow\;
+\underbrace{\min_\theta \text{NLL}(\theta)}_{\text{最小化 NLL}}
+\;\Longleftrightarrow\;
+\underbrace{\min_\theta H(P, Q_\theta)}_{\text{最小化交叉熵}}
+\;\Longleftrightarrow\;
+\underbrace{\min_\theta D_{KL}(P\parallel Q_\theta)}_{\text{最小化 KL}}
+$$
+
+最后一步用的还是上面那个恒等式 $H(P,Q)=H(P)+D_{KL}(P\|Q)$:$H(P)$ 是常数,优化谁都一样。**这就是为什么「训练模型」几乎总能等价地说成「最大化似然」或「最小化交叉熵」。**
+
+以最简单的二分类为例:标签 $y\in\{0,1\}$、预测正类概率 $p$,单样本 NLL 就是**二元交叉熵**:
+
+$$
+\ell = -\big[\,y\log p + (1-y)\log(1-p)\,\big]
+$$
+
+**拖动下面的 $p$、切换真实标签 $y$**,看损失怎么随预测变化——把预测拉向与真相相反的方向且越自信,损失越往上冲:
+
+<NLLCurveExplorer />
+
+下面用代码验证「一个 batch 的平均 NLL」就是逻辑回归的 BCE 损失:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+def nll(y, p):
+    """单样本负对数似然 = 二元交叉熵(以 e 为底,单位 nat)"""
+    eps = 1e-12
+    return -(y * np.log(p + eps) + (1 - y) * np.log(1 - p + eps))
+
+# 正类 (y=1):预测概率越大,损失越小
+print("y=1, p=0.9  loss =", round(nll(1, 0.9), 4), " (自信且对,损失小)")
+print("y=1, p=0.1  loss =", round(nll(1, 0.1), 4), " (自信且错,损失大)")
+
+# 一个 batch 的平均 NLL == BCE loss
+y = np.array([1, 0, 1, 1, 0])
+p = np.array([0.8, 0.1, 0.9, 0.7, 0.2])
+print("\\nbatch 平均 NLL (= mean BCE) =", round(nll(y, p).mean(), 4))
+`} />
+
+> 💡 一句话:**似然回答「参数有多解释得通数据」,NLL 把它翻成损失,而 NLL 就是交叉熵。** 从香农的编码代价,到统计学的最大似然,殊途同归。
+
+## 进阶:KL 的方向很重要
+
+上面一直说「最小化 KL」,但没提朝哪个方向。KL **不对称**:$D_{KL}(P\parallel Q)\neq D_{KL}(Q\parallel P)$,**朝不同方向优化会学出完全不同的模型**——前向「铺得广」覆盖所有峰,反向「抓得准」择一收窄。这是 VAE、RLHF、知识蒸馏的分水岭,单独用一篇讲透:[前向 KL vs 反向 KL](/tutorials/forward-reverse-kl)。
+
+## 常见问题 FAQ
+
+**Q:交叉熵和 KL 散度,训练时到底优化哪个?**
+两者等价。因为 $H(P,Q)=H(P)+D_{KL}(P\|Q)$,而真实分布的熵 $H(P)$ 是常数,**最小化交叉熵 = 最小化 KL 散度**。代码里实现交叉熵更简单,所以损失函数通常写成交叉熵。
+
+**Q:KL 散度对称吗?可以当「距离」用吗?**
+不对称!$D_{KL}(P\|Q) \neq D_{KL}(Q\|P)$,且不满足三角不等式,所以严格说它不是距离,而是「散度」。需要对称度量时可用 JS 散度(Jensen-Shannon)。前向、反向两个方向的行为差异见[专篇](/tutorials/forward-reverse-kl)。
+
+**Q:为什么分类损失用交叉熵而不是准确率?**
+准确率是阶梯函数,几乎处处梯度为 0,无法用梯度下降优化。交叉熵处处可导、且对「自信地错」惩罚很重,提供了平滑且有意义的梯度信号。
+
+## 动手作业
+
+1. **不对称性**:用代码计算 $D_{KL}(P\|Q)$ 和 $D_{KL}(Q\|P)$,取一组 $P \neq Q$,亲眼确认两者不相等。
+2. **交叉熵 = 熵 + KL**:取一组 $P, Q$,分别算出 $H(P,Q)$、$H(P)$、$D_{KL}(P\|Q)$,验证 $H(P,Q)=H(P)+D_{KL}(P\|Q)$。
+3. **自信地预测错**:把交叉熵里正确类的预测概率逐步调向 0,观察损失如何趋于无穷大——思考这对训练是好处(强梯度)还是风险(数值爆炸)。
+4. **对数似然**:取一批伯努利样本与预测概率,验证「平均 NLL」等于「负的平均对数似然」,并等于二元交叉熵。
+
+## 延伸阅读
+
+- **站内教程**:[前向 KL vs 反向 KL](/tutorials/forward-reverse-kl)—— KL 不对称,朝哪个方向优化会学出不同的模型;[交叉熵 = KL = NLL](/tutorials/ce-kl-nll-equivalence)—— one-hot 标签下三者合一的推导;[信息论基础](/tutorials/information-theory)—— 熵与互信息的地基;[实战损失](/tutorials/ml-losses)—— 交叉熵在真实模型里的用法
+- **奠基文献**:Kullback & Leibler (1951). *On Information and Sufficiency*. Annals of Math. Statist. 22(1):79-86. —— KL 散度的原始出处(早于 arXiv,可通过 [Project Euclid](https://projecteuclid.org/journals/annals-of-mathematical-statistics/volume-22/issue-1/On-Information-and-Sufficiency/10.1214/aoms/1177729694.full) 免费获取);Gibbs 不等式($D_{KL}\ge 0$)的证明见任何信息论教材
+- **综述**:van Erven & Harremoës (2014). *Rényi Divergence and Kullback-Leibler Divergence*. [arXiv:1206.2459](https://arxiv.org/abs/1206.2459) —— 把 KL 放进 Rényi 散度族里系统对比:本文配图即出自此文,讲清了不同 $\alpha$ 的行为差异与 KL($\alpha\to1$)的特殊地位
+
+## 小结
+
+| 概念 | 公式 | 含义 |
+|---|---|---|
+| 交叉熵 $H(P,Q)$ | $-\sum P\log_2 Q$ | 用 Q 描述 P 的代价(=分类损失) |
+| KL 散度 | $H(P,Q)-H(P)$ | 两个分布的差距,$\geq 0$ |
+| NLL | $-\frac1N\sum\log p_\theta(x_i)$ | 负对数似然 = 交叉熵的样本估计 |
+
+> 🎯 一句话记住:**最小化交叉熵 = 最小化 KL 散度 = 让模型的预测分布逼近真实分布。** 下一篇趁热打铁,证明在 one-hot 标签下[交叉熵、KL、NLL 其实是同一个数](/tutorials/ce-kl-nll-equivalence)。

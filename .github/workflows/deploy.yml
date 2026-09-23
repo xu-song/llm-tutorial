@@ -1,0 +1,61 @@
+# 构建 Next.js 静态站点并部署到 GitHub Pages。
+# 官方参考:https://nextjs.org/docs/app/guides/static-exports
+#          https://docs.github.com/actions/deployment-security-hardening
+#
+# 前置(一次性,仓库网页端设置):
+#   Settings → Pages → Build and deployment → Source 选 "GitHub Actions"
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同分支旧部署未完成时,新部署取代之(不排队)
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 项目站点部署在子路径 /<repo>:构建时注入 basePath 与正式站点 URL。
+      # 仓库名即站点路径;若改名或改用 user-site(根路径部署),改这里即可。
+      - name: Build static site
+        run: npm run build
+        env:
+          NEXT_PUBLIC_BASE_PATH: /llm-tutorial
+          NEXT_PUBLIC_SITE_URL: https://xu-song.github.io/llm-tutorial
+          NODE_OPTIONS: --max-old-space-size=8192
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

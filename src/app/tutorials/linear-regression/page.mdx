@@ -1,0 +1,146 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("linear-regression");
+
+# 线性回归入门
+
+线性回归是机器学习中最基础的模型之一。它假设目标值 $y$ 与特征 $x$ 之间存在线性关系:
+
+$$
+\hat{y} = w x + b
+$$
+
+其中 $w$ 是权重(斜率),$b$ 是偏置(截距)。我们的目标是找到一组 $w, b$,让预测值 $\hat{y}$ 尽可能接近真实值 $y$。
+
+## 损失函数
+
+我们用**均方误差**(MSE)衡量预测的好坏:
+
+$$
+L(w, b) = \frac{1}{n} \sum_{i=1}^{n} \left( y_i - (w x_i + b) \right)^2
+$$
+
+损失越小,模型拟合得越好。**先动手感受一下** —— 拖动下面的滑块调整 $w$ 和 $b$,观察拟合直线、红色误差线段和 MSE 的实时变化:
+
+<LinePlayground />
+
+<figure className="my-6">
+  <img src="./anscombe-quartet.png" alt="安斯库姆四重奏:四个数据集的散点图,每组都画出同一条最小二乘回归线,但散点形态截然不同——线性、曲线、受一个离群点牵引的线性、几乎全在一竖线上" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Chen, Huroyan, Soni & Rosenkrantz, <em>Same Stats, Different Graphs</em>(arXiv:1911.01527)Figure 1
+  </figcaption>
+</figure>
+
+上图的**安斯库姆四重奏(Anscombe's Quartet)**是统计学的经典警告:四组数据的均值、方差、相关系数、回归线**完全相同**,但散点形态天差地别——第 2 组根本不是线性关系,第 3、4 组各被一个离群点绑架了整条回归线。它提醒我们:**只看 MSE 和 $R^2$ 不够,一定要把图画出来**。
+
+下面我们用 `numpy` 算一组数据的 MSE —— 你可以直接修改代码再运行:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 一组样本
+x = np.array([1, 2, 3, 4, 5])
+y = np.array([2.1, 3.9, 6.2, 7.8, 10.1])
+
+# 试着调整 w 和 b,看损失怎么变化
+w, b = 2.0, 0.0
+y_pred = w * x + b
+
+mse = np.mean((y - y_pred) ** 2)
+print("预测值:", y_pred)
+print("均方误差 MSE =", round(mse, 4))
+`} />
+
+## 用 scikit-learn 自动拟合
+
+手动调参很费劲。实际中我们用算法自动求解最优的 $w, b$。下面用 `scikit-learn` 一行拟合:
+
+<CodeRunner
+  packages={["scikit-learn"]}
+  defaultCode={`
+import numpy as np
+from sklearn.linear_model import LinearRegression
+
+x = np.array([1, 2, 3, 4, 5]).reshape(-1, 1)
+y = np.array([2.1, 3.9, 6.2, 7.8, 10.1])
+
+model = LinearRegression().fit(x, y)
+print("学到的权重 w =", round(model.coef_[0], 4))
+print("学到的偏置 b =", round(model.intercept_, 4))
+print("预测 x=6 时 y =", round(model.predict([[6]])[0], 4))
+`} />
+
+可以看到,算法找到的 $w \approx 2$、$b \approx 0$,正好对应我们造数据时用的规律。
+
+## 多特征:从一条线到一个平面
+
+现实中目标值往往由**多个特征**共同决定。比如房价同时取决于面积、卧室数、楼层。此时模型变成:
+
+$$
+\hat{y} = w_1 x_1 + w_2 x_2 + \cdots + w_n x_n + b
+$$
+
+代码几乎不用改 —— `scikit-learn` 自动处理多列特征:
+
+<CodeRunner
+  packages={["scikit-learn"]}
+  defaultCode={`
+import numpy as np
+from sklearn.linear_model import LinearRegression
+
+# 特征:面积(㎡)、卧室数;目标:房价(万元)
+X = np.array([
+    [50, 1], [70, 2], [90, 2], [110, 3], [130, 3], [150, 4],
+])
+y = np.array([150, 210, 265, 330, 380, 445])
+
+model = LinearRegression().fit(X, y)
+print("面积每 +1㎡,房价 +", round(model.coef_[0], 2), "万")
+print("卧室每 +1 间,房价 +", round(model.coef_[1], 2), "万")
+print("预测 [100㎡, 3 卧] =", round(model.predict([[100, 3]])[0], 1), "万")
+`} />
+
+## 典型应用场景
+
+线性回归虽简单,却是工业界最常用的「第一基线模型」:
+
+- **房价 / 二手车定价**:用面积、车龄、里程等特征预测价格
+- **销量预测**:用广告投放、季节、价格预测下一周销量
+- **风险评分**:金融领域用收入、负债等估算违约概率(配合逻辑回归)
+- **医学研究**:分析某指标与年龄、体重等的线性关系并给出可解释系数
+
+> 💡 它最大的优势是**可解释**:每个权重 $w_i$ 就是「该特征每增加一个单位,预测值变化多少」,业务方一看就懂。
+
+## 常见问题 FAQ
+
+**Q:数据明显不是直线关系,还能用线性回归吗?**
+能。可以做**特征工程**,比如加入 $x^2$、$\log x$ 等项变成「多项式回归」,模型对参数仍是线性的,照样能拟合曲线。
+
+**Q:为什么损失用平方误差,不用绝对值误差?**
+平方误差处处可导、便于求解,且对应高斯噪声下的最大似然估计。绝对值误差(MAE)对异常值更鲁棒,但在 0 点不可导,优化稍麻烦。
+
+**Q:特征数量比样本还多会怎样?**
+容易**过拟合**,甚至有无穷多组解。这时需要**正则化**(岭回归 Ridge / Lasso),给大权重加惩罚 —— 详见[过拟合与正则化](/tutorials/overfitting-regularization)。
+
+**Q:一定要做特征标准化吗?**
+用解析解(最小二乘)时不强制;但若用梯度下降求解,或要比较各特征权重大小、或加了正则化,**强烈建议**先标准化。
+
+## 动手作业
+
+1. **降损失挑战**:修改第一个代码块里的 `w` 和 `b`,手动让 MSE 降到 **0.1 以下**,再对比 scikit-learn 的结果 —— 你能比算法做得更好吗?
+2. **加噪声**:给 `y` 每个值随机加上 $\pm 0.5$ 的噪声(用 `np.random.uniform`),重新拟合,观察 $w, b$ 偏离了多少。
+3. **多项式拟合**:造一组 $y = x^2$ 的数据,先直接线性拟合看效果,再把 `x**2` 作为新特征加进 `X`,对比拟合优度。
+4. **思考题**:如果某个特征和目标完全无关(纯噪声),拟合后它的权重 $w$ 会接近 0 吗?动手验证并解释。
+
+## 延伸阅读
+
+- **站内教程**:[梯度下降](/tutorials/gradient-descent)—— 大规模数据下求解线性回归的主力算法;[逻辑回归](/tutorials/logistic-regression)—— 把线性模型升级为「输出概率」的分类器;[过拟合与正则化](/tutorials/overfitting-regularization)—— 岭回归/Lasso 从何而来
+- **奠基论文**:Hoerl & Kennard (1970). *Ridge Regression: Biased Estimation for Nonorthogonal Problems*. [Technometrics, DOI:10.1080/00401706.1970.10488634](https://doi.org/10.1080/00401706.1970.10488634) —— 岭回归原始论文:特征共线时 $\mathbf{X}^\top\mathbf{X}$ 病态、最小二乘方差爆炸,加 $\lambda\|\mathbf{w}\|^2$ 惩罚换稳定
+- **历史文献**:Legendre (1805)《最小二乘法》与 Gauss (1809)《天体运动论》—— 最小二乘法与正态误差理论的历史起点(早于 arXiv 两百年,书目即可,不必链接)
+
+## 小结
+
+- 线性回归假设目标与特征呈线性关系,用 **MSE** 衡量拟合好坏
+- 单特征是一条直线,多特征是一个超平面,代码写法一致
+- 权重**可解释**,是工业界首选的基线模型
+- 非线性关系可通过特征工程处理,高维场景需配合**正则化**防止过拟合

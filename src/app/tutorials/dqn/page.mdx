@@ -1,0 +1,2506 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("dqn");
+
+# 👾 DQN:用神经网络逼近 Q 表
+
+[强化学习入门](/tutorials/reinforcement-learning)里的 Q-learning 维护一张 $Q(s,a)$ 表,每个「状态×动作」一格。这在 4×4 网格里绰绰有余,但真实问题的状态空间大得离谱:一帧 Atari 画面有 $256^{84\times84}$ 种可能,围棋有 $10^{170}$ 种局面——**表根本存不下,也永远填不满**。
+
+**DQN(Deep Q-Network)** 的解法直截了当:**别存表了,用一个神经网络去逼近它**。这就是 2015 年 DeepMind 让 AI 仅凭像素输入就玩通 49 款 Atari 游戏、把深度强化学习推上舞台的方法。
+
+## 从查表到函数逼近
+
+把 Q 表换成一个参数化函数 $Q(s,a;\theta)$:输入状态 $s$,输出每个动作的 Q 值。
+
+$$
+\underbrace{Q(s,a)\ \text{查表}}_{\text{离散、存得下才行}} \;\longrightarrow\; \underbrace{Q(s,a;\theta)\ \text{神经网络}}_{\text{相似状态自动泛化}}
+$$
+
+好处不只是「省空间」:表格里每格是孤立的,而网络能**泛化**——见过的状态学到的东西会自动迁移到没见过的相似状态。代价是:更新一格会牵动参数、影响所有状态的预测,训练因此变得不稳。DQN 的两大法宝就是来治这个「不稳」的。
+
+Q-learning 原本是把新估计**直接写进表格**;现在改成**回归**:让网络输出去逼近 **TD 目标** $y$。损失是二者的均方误差(实践常用更抗噪的 Huber 损失):
+
+$$
+L(\theta) = \Big(\underbrace{r + \gamma\max_{a'}Q(s',a';\theta^-)}_{\text{TD 目标 }y} - Q(s,a;\theta)\Big)^2
+$$
+
+注意目标里用的是 $\theta^-$ 而不是 $\theta$——这就是下面要讲的**目标网络**。
+
+这套「函数逼近 + 经验回放 + 目标网络」的组合最初在 2013 年的 DQN 论文里亮相:直接从 Atari 2600 游戏的**原始像素**输入学习,一套网络、一套超参数横扫 49 个游戏,其中一半超过了人类水平。论文 Figure 1 展示了它学会玩的几个游戏画面——输入不是手工特征,就是 84×84 的灰度像素:
+
+<figure className="my-6">
+  <img src="./dqn-atari-screens.png" alt="DQN 2013 论文 Figure 1:五个 Atari 游戏的屏幕截图,从左到右为 Beam Rider、Breakout、Pong、Seaquest、Space Invaders,DQN 直接从这些游戏的原始像素输入学习玩这些游戏" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Mnih et al., <em>Playing Atari with Deep Reinforcement Learning</em>(arXiv:1312.5602)Figure 1
+  </figcaption>
+</figure>
+
+更有说服力的是价值函数本身。论文 Figure 3 画出了 Seaquest 游戏一条轨迹上,训练后 DQN 的 $Q$ 值(各动作画成不同颜色的平滑曲线)与实际折扣回报(粗点线)的对比——**两者几乎重合**:左边接近水面的位置拿到高分预测,右边潜水员被救起时价值明显抬升。这说明网络学到的不只是「这局怎么打」,而是**对状态好坏的真实估计**:
+
+<figure className="my-6">
+  <img src="./dqn-value-function.png" alt="DQN 2013 论文 Figure 3:Seaquest 游戏一条轨迹上,训练后的 DQN 输出的 Q 值(不同颜色曲线对应不同动作)与实际折扣回报(粗点线)高度吻合,左半段高分位置对应水面附近,救起潜水员时价值抬升" className="mx-auto h-auto max-w-xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Mnih et al., <em>Playing Atari with Deep Reinforcement Learning</em>(arXiv:1312.5602)Figure 3
+  </figcaption>
+</figure>
+
+## 法宝一:经验回放(Experience Replay)
+
+智能体一步步走出来的转移 $(s,a,r,s')$ **高度相关**(连续几步几乎在同一片区域),拿它们按顺序训练,网络会被局部数据带偏、频繁遗忘。
+
+经验回放开一个**缓冲区**存下大量历史转移,每次训练从中**随机抽一个小批量**:
+
+- **打破相关性**:随机采样把时间上挨着的样本拆散,梯度更稳,不再震荡发散;
+- **提高样本效率**:一条经验能被反复抽用多次,而非用一次就扔。
+
+## 法宝二:目标网络(Target Network)
+
+TD 目标 $y=r+\gamma\max_{a'}Q(s',a';\theta)$ 里也含 $Q$。若预测和目标用**同一套** $\theta$,每更新一步、目标也跟着动——**像追自己的影子,越追越乱**(moving target 问题)。
+
+DQN 因此复制一份**滞后冻结**的参数 $\theta^-$ 专门算目标,每隔 $C$ 步才把 $\theta$ 同步过去。目标在一段时间内**钉住不动**,回归就有了稳定的靶子。
+
+> 📚 函数逼近 + 自举(bootstrapping)+ 离策略(off-policy)三者同时出现时理论上可能发散,人称**致命三元组(deadly triad)**。经验回放与目标网络是让 DQN 在实践中稳定收敛的两块补丁。**注意**:致命三元组在**离线 RL**([下一篇进阶](/tutorials/offline-rl))里会**总爆发**——因为离线设定不能再采新数据去纠正 Q 在 OOD 动作上的外推高估,误差沿贝尔曼链复合放大,这正是离线 RL 要用 CQL/IQL 等保守手法兜住的根本原因。
+
+## 致命三态:为什么 Q-learning + 函数逼近会发散
+
+上面那个 📚 标注轻描淡写了一句「理论上可能发散」,但**为什么**这三件套凑齐就发散?这一节把根因讲透——它不是 DQN 的实现 bug,而是**函数逼近 + 自举 + 离策略**三者乘在一起的结构性缺陷,有 1995 年 Baird 的反例为证 [4]。
+
+### 三件套各自是什么
+
+先把三个角色认清楚:
+
+- **函数逼近(function approximation)**:用参数化函数 $Q(s,a;\theta)$(神经网络、线性模型)代替查表。代价是**状态之间共享参数**——更新 $s$ 的 Q 值会牵动所有与 $s$ 共享参数的状态的预测。表格法每格独立,没这个问题。
+- **自举(bootstrapping)**:TD 目标里含「下一状态的当前估计」$Q(s',\cdot;\theta)$,即**用一个猜测更新另一个猜测**。若估计偏高,目标也偏高,更新后估计更高——**正反馈环**。蒙特卡洛用整条真实回报 $G_t$,不自举,没这个问题。
+- **离策略(off-policy)**:用行为策略 $b$ 采的数据,去估目标策略 $\pi$ 的价值。两者分布不一致时,$b$ 采样到的转移与 $\pi$ 想学的方向**系统性错位**。on-policy($b=\pi$)没这个问题。
+
+**单独哪一个都不致命**:表格 Q-learning 是离策略 + 自举,但表格每格独立、不自洽的格不会污染别的格,查表贝尔曼算子是 $\gamma$-收缩,收敛有保证;on-policy 的 Actor-Critic 是函数逼近 + 自举,但行为=目标,反馈环方向稳定;蒙特卡洛是函数逼近 + 离策略,但不自举,目标无偏。**偏偏 DQN 三者全占**:神经网络(函数逼近)、TD 目标含 $Q$(自举)、Q-learning 的 $\max$(离策略)。
+
+### 为什么三者合起来会发散
+
+直觉:函数逼近让「状态共享参数」,**自举**让「一个状态的误差流回它自己」,**离策略**让「流回来的方向与采样分布错位」。三者叠加,误差不再被 $\gamma$-收缩压住,而是在参数空间里**自激放大**。形式地说,查表贝尔曼算子 $T$ 是 $\gamma$-收缩($\|TQ_1-TQ_2\|_\infty\le\gamma\|Q_1-Q_2\|_\infty$),收敛有 Banach 不动点定理兜底;但**投影到函数空间后**,$\Pi T$ 不再是收缩($\Pi$ 是向函数族的投影算子,$\Pi T$ 的收缩常数可能 $>1$),迭代 $\theta\leftarrow\theta+\alpha\,\Pi T$ 就可能发散 [4]。这正是 Baird 1995 反例展示的:一个 7 状态 MDP,半梯度离策略 TD(0) 的 $\|w\|$ 单调增长到无穷 [4]。
+
+### 形式化发散条件:$\Pi T$ 的谱半径判据
+
+上一段说「$\Pi T$ 的收缩常数可能 $>1$」——「可能」二字背后有精确判据:**投影贝尔曼算子 $\Pi T$ 的谱半径(最大特征值绝对值)决定收敛与发散**。这一节把判据讲清楚,把「直觉上自激放大」升级为「谱半径 $>1$ 即发散」的定理。
+
+**算子的构造。** 线性价值估计 $\hat v(s)=\mathbf x(s)^\top\mathbf w$,特征矩阵 $X\in\mathbb R^{|S|\times d}$(每行一个状态的特征)。给定采样分布 $\mu$(行为策略的平稳分布),加权投影算子
+
+$$
+\Pi_\mu = X(X^\top D_\mu X)^{-1}X^\top D_\mu,\qquad D_\mu=\mathrm{diag}(\mu)
+$$
+
+把任意价值向量投影到特征空间 $X$ 的列空间($\Pi_\mu$ 是正交投影,幂等 $\Pi^2=\Pi$)。贝尔曼期望算子 $T^\pi V = r^\pi+\gamma P^\pi V$ 是仿射的,其线性部分是 $\gamma P^\pi$。半梯度离策略 TD(0) 的期望更新算子(误差动力学)是
+
+$$
+\mathbf e_{k+1} \;=\; \underbrace{\Pi_\mu\,\mathrm{diag}(\boldsymbol\rho)\,(\gamma P^\pi)}_{\displaystyle \equiv\;\Pi T_\rho}\,\mathbf e_k
+$$
+
+其中 $\rho(s)=\pi(a|s)/b(a|s)$ 是逐状态的重要性采样比(目标策略与行为策略在该状态所选动作上的概率比),$\mathbf e_k=V_k-V_\pi$ 是当前误差。常数奖励 $r^\pi$ 不影响误差动力学,只看线性部分 $\Pi_\mu\,\mathrm{diag}(\rho)\,\gamma P^\pi$ 的谱。
+
+**谱半径判据。** 迭代 $\mathbf e_{k+1}=\Pi T_\rho\,\mathbf e_k$ 收敛到 $\mathbf 0$ 当且仅当 $\Pi T_\rho$ 的谱半径 $\rho(\Pi T_\rho)=\max_i|\lambda_i|<1$。四种情况对照:
+
+| 设定 | 算子 | 谱半径 | 收敛性 | 出处 |
+|---|---|---|---|---|
+| 查表(无函数逼近) | $T^\pi=\gamma P^\pi$ | $\le\gamma<1$ | 恒 $\gamma$-收缩,Banach 收敛 | Bellman 1957 |
+| on-policy + 线性($\rho\equiv1,\mu=\mu_\pi$) | $\Pi_\pi T^\pi$ | $\le\gamma<1$ | $\gamma$-收缩,有界误差 | Tsitsiklis & Van Roy 1997 [31] |
+| off-policy 半梯度($\rho\not\equiv1$) | $\Pi_\mu\,\mathrm{diag}(\rho)\,\gamma P^\pi$ | **可 $>1$** | 不收缩,误差指数增长 | Baird 1995 [4] |
+| gradient-TD(下降 MSPBE) | 真梯度 SGD | $<1$ | 随机逼近收敛 | Sutton et al. 2009 [10] |
+
+关键对照:**on-policy 时 $\rho\equiv1$ 且 $\mu=\mu_\pi$(采样分布 = 目标策略平稳分布),Tsitsiklis & Van Roy 1997 证明 $\Pi_\pi T^\pi$ 仍是 $\gamma$-收缩**——拆掉「离策略」一角,收缩性恢复。**off-policy 时 $\rho\not\equiv1$ 把误差反馈按 $\rho$ 等比放大**,$\Pi_\mu\,\mathrm{diag}(\rho)\,\gamma P^\pi$ 的谱半径可越过 1,Baird 1995 七状态反例里谱半径 $=8.91\gg1$ [4]。这就是「三者合起来发散」的精确判据:**不是直觉上的自激,是 $\Pi T$ 的谱半径越过了 1**。
+下面三段代码用谱半径把判据跑实:① on-policy 2 状态链 $\Pi T$ 谱半径 $=\gamma$(收缩);② Baird 七状态反例 off-policy 谱半径 $=8.91>1$(发散);③ 谱半径随 $\rho$ 单调增长,看 off-policy 程度如何放大误差反馈。
+
+<CodeRunner defaultCode={`import numpy as np
+np.set_printoptions(precision=4, suppress=True)
+
+# === 段1: on-policy 2 状态链 — ΠT 谱半径 = γ (Tsitsiklis-Van Roy 1997) ===
+print("=== 段1: on-policy 2 状态链 — ΠT 谱半径 ≤ γ (收敛保证) ===\\n")
+S, gamma = 2, 0.9
+X = np.array([[1.0, 0.0], [1.0, 1.0]])   # 线性特征: V(s) = X @ w
+P_pi = np.array([[0.0, 1.0],              # s0 -> s1, s1 吸收自循环
+                 [0.0, 1.0]])
+mu = np.array([0.5, 0.5])                  # on-policy: μ = 目标策略分布
+D = np.diag(mu)
+# 投影算子 Π = X (X^T D X)^{-1} X^T D
+Pi = X @ np.linalg.inv(X.T @ D @ X) @ X.T @ D
+# on-policy ρ=1, 误差动力学 = Π (γ P_π)
+M_on = Pi @ (gamma * P_pi)
+eigs_on = np.linalg.eigvals(M_on)
+sr_on = np.max(np.abs(eigs_on))
+print(f"  特征 X =\\n{X}")
+print(f"  P_π =\\n{P_pi},  γ = {gamma}")
+print(f"  on-policy ΠT 特征值 = {eigs_on}")
+print(f"  谱半径 = {sr_on:.4f} = γ = {gamma} ✓ (γ-收缩, 收敛保证)")
+print(f"\\n  Tsitsiklis & Van Roy 1997 [31]: on-policy + 线性 FA → ΠT 是 γ-收缩,")
+print(f"  误差 ‖V_k - V_π‖ ≤ γ^k ‖V_0 - V_π‖ 几何衰减, 有界误差。")
+`} title="段1: on-policy ΠT 谱半径 = γ" />
+
+<CodeRunner defaultCode={`import numpy as np
+np.set_printoptions(precision=4, suppress=True)
+
+# === 段2: Baird 1995 七状态反例 — off-policy 半梯度 ΠT 谱半径 > 1 ===
+print("=== 段2: Baird 1995 七状态反例 — off-policy 半梯度 ΠT 谱半径 > 1 ===\\n")
+d, S = 8, 7
+# S&B §11.3 标准特征表示: s<6 → [2, e_s, 1]; s=6 → [1, 0..0, 2]
+X = np.zeros((S, d))
+for s in range(6):
+    X[s, 0] = 2.0; X[s, 1+s] = 1.0; X[s, 7] = 1.0
+X[6, 0] = 1.0; X[6, 7] = 2.0
+print(f"特征矩阵 X (7x8, S&B §11.3 标准表示):")
+print(X); print()
+gamma = 0.99
+P_pi = np.zeros((S, S))
+for s in range(6): P_pi[s, 6] = 1.0   # 目标策略: 永远走 dashed → 吸收态 6
+P_pi[6, 6] = 1.0
+mu_b = np.array([1/7]*7)               # 行为策略平稳分布 (对称)
+D_b = np.diag(mu_b)
+Pi_b = X @ np.linalg.inv(X.T @ D_b @ X) @ X.T @ D_b
+rho = 7.0                              # 目标 dashed 概率 1 / 行为 dashed 概率 1/7
+# off-policy 误差动力学 = Π_b diag(ρ) (γ P_π)
+M_off = Pi_b @ np.diag([rho]*7) @ (gamma * P_pi)
+eigs_off = np.linalg.eigvals(M_off)
+sr_off = np.max(np.abs(eigs_off))
+print(f"行为策略 μ_b = 对称 1/7,  目标永远 dashed → ρ = {rho:.0f}")
+print(f"Π_b diag(ρ) (γ P_π) 特征值 (实部降序):")
+for i, ev in enumerate(sorted(np.real(eigs_off), reverse=True)):
+    print(f"  λ_{i} = {ev:.4f}")
+print(f"\\n谱半径 = {sr_off:.4f} > 1 → ΠT 不是收缩 → 半梯度 TD(0) 误差指数增长, 发散 ✗")
+print(f"(对比: 查表贝尔曼算子 T 的谱半径 = γ = {gamma} < 1, 恒收敛)")
+`} title="段2: Baird 反例 off-policy 谱半径 > 1" />
+
+<CodeRunner defaultCode={`import numpy as np
+np.set_printoptions(precision=4, suppress=True)
+
+# === 段3: 谱半径随 ρ (off-policy 程度) 单调增长 ===
+print("=== 段3: 谱半径随 ρ (off-policy 程度) 单调增长 ===\\n")
+# 复用段2 的 Baird 设定
+d, S = 8, 7
+X = np.zeros((S, d))
+for s in range(6):
+    X[s, 0] = 2.0; X[s, 1+s] = 1.0; X[s, 7] = 1.0
+X[6, 0] = 1.0; X[6, 7] = 2.0
+gamma = 0.99
+P_pi = np.zeros((S, S))
+for s in range(6): P_pi[s, 6] = 1.0
+P_pi[6, 6] = 1.0
+mu_b = np.array([1/7]*7); D_b = np.diag(mu_b)
+Pi_b = X @ np.linalg.inv(X.T @ D_b @ X) @ X.T @ D_b
+
+print(f"{'ρ':>6} {'谱半径 ρ(ΠT)':>14} {'> 1 (发散)?':>14}")
+for rho_val in [1.0, 1.2, 1.5, 2.0, 3.0, 5.0, 7.0, 10.0]:
+    M = Pi_b @ np.diag([rho_val]*7) @ (gamma * P_pi)
+    sr = np.max(np.abs(np.linalg.eigvals(M)))
+    flag = '是 ✗' if sr > 1 else '否 ✓'
+    print(f"{rho_val:>6.1f} {sr:>14.4f} {flag:>14}")
+print(f"\\nγ = {gamma}")
+print(f"\\n看点: 谱半径随 ρ 线性增长 (Π_b diag(ρ) 的谱依赖 ρ)。")
+print(f"      注: 此 Baird MDP 的 μ_b (行为对称分布) ≠ μ_π (目标平稳分布),")
+print(f"      故 ρ=1 时谱半径已 > 1 (1.27) — 这正是 μ_b≠μ_π 的离策略性。")
+print(f"      ρ>1 把误差反馈按 ρ 等比放大, 谱半径越过 1 即发散。")
+print(f"\\n=== 判据总结 ===")
+print(f"  • 查表 T:              谱半径 = γ < 1, 恒 γ-收缩 (Banach) — 无三元组问题")
+print(f"  • on-policy + 线性 FA: ΠT 谱半径 ≤ γ [31] — 拆「离策略」一角, 收缩恢复")
+print(f"  • off-policy 半梯度:   ΠT 谱半径可 > 1 [4] — 三元组全占, 发散")
+print(f"  • gradient-TD (TDC):   下降 MSPBE, 谱半径 < 1 [10] — 拆「半梯度」一角")
+`} title="段3: 谱半径随 ρ 增长 + 判据总结" />
+
+### 亲手看发散:2 状态反例
+
+下面这个最小反例直接跑出致命三态的发散——$\|w\|$ 一路涨到几千还不停。关掉三件套里任意一个(改 on-policy、或去掉自举、或查表),发散就消失。
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(0)
+
+# 致命三态最小反例(2 状态线性逼近版,Tsitsiklis-Van Roy 同构思想)
+# 状态 A=0, B=1。线性 V(s) = w . x(s)。
+#   x(A) = (1, 0),  x(B) = (1, 1)   <- 第一个特征被两状态共享 -> 耦合
+# 行为策略 b: A->B(r=0); B->B(r=1, 自循环带奖励)
+# 目标策略 pi: B 处直接终止(目标价值 V*(B)=0)
+# 半梯度离策略 TD(0): 用行为采样的 r + 自举的 V(ns) 当目标
+xA = np.array([1.0, 0.0])
+xB = np.array([1.0, 1.0])
+def V(s, w): return w @ (xA if s == 0 else xB)
+
+w = np.array([1.0, 1.0])
+alpha, gamma = 0.05, 1.0
+
+norms = []
+for step in range(3000):
+    s = int(rng.integers(2))
+    if s == 0:        # A: 行为去 B
+        ns, r = 1, 0.0
+    else:             # B: 行为自循环且 +1
+        ns, r = 1, 1.0
+    delta = r + gamma * V(ns, w) - V(s, w)   # 含自举 V(ns)
+    grad = xA if s == 0 else xB
+    w = w + alpha * delta * grad
+    norms.append(np.linalg.norm(w))
+
+print("半梯度离策略 TD(0) 在 2 状态反例上:")
+for k in [0, 100, 500, 1000, 2000, 2999]:
+    print(f"  step {k:4d}: ||w|| = {norms[k]:.1f}")
+print()
+# 文本发散图:把前 3000 步的 ||w|| 压成一条 sparkline,直观看见无界增长
+peaks = [norms[i] for i in range(0, 3000, 60)]   # 50 个采样点
+mx = max(peaks)
+bars = [int(v / mx * 40) for v in peaks]
+print("||w|| 随训练步数的增长(每个 # ≈ 一段):")
+for b in bars:
+    print("#" * max(1, b))
+print()
+print("-> 权重范数从 ~1.5 涨到 ~3000 还在涨,无界发散。")
+print("   这就是致命三态:函数逼近(共享特征耦合)+ 自举(delta 含 V(ns))")
+print("   + 离策略(行为给的 r=1 喂给目标价值估计)。三者缺一不发散。")
+`} />
+
+### DQN 怎么摁住发散
+
+既然三件套组合注定可能发散,而 DQN 恰好**三者全占**(神经网络=函数逼近、TD 目标=自举、Q-learning=离策略),它为什么还能训出来?答案是 DQN 用一系列**工程补丁**把发散的反馈环**削弱到实践可控**,而非从数学上消除:
+
+- **目标网络**:把自举环「$Q$ 直接追自己的影子」打断——目标用滞后的 $\theta^-$,反馈环有了 $C$ 步延迟,不再即时正反馈。这是针对**自举**的减速。
+- **经验回放**:把高度相关的连续转移打散成 i.i.d. 小批量,削弱梯度方向的系统性偏移,也间接让「采样分布」更接近一个稳定混合。这是针对**离策略数据分布**的稳定化。
+- **ε-greedy 让 behavior ≈ target**:行为策略 ε-greedy 在 ε 小时接近贪心目标策略,离策略的「错位」被压到最小——极端情况 ε=0 退化成 on-policy,三件套少一件,最稳。
+- **学习率与梯度裁剪**:Huber 损失 + 小 $\alpha$ + 裁剪,把每步更新幅度限住,即便反馈环有放大趋势也被钳在「实践不爆」的范围。
+
+> ⚠️ 这些是**实践补丁,非理论保证**:DQN 在 Atari 上能训,是因为任务结构 + 调参让反馈环增益 $<1$;换到更刁钻的 MDP(尤其**离线 RL** 那种不能再采新数据纠偏的设定),同样的 DQN 更新式**会**发散。理论上真正消除致命三态的做法是 **gradient-TD**(GTD / TDC,Sutton et al. 2009 [4]):把半梯度改成「真梯度下降一个目标的投影贝尔曼误差」,牺牲一些样本效率换收敛保证;或干脆回到 **on-policy**(SARSA / Actor-Critic),用「行为=目标」直接卸掉三件套的一角。
+
+记住这张对照就够:致命三态是 DQN **理论上为何不稳**的根因,经验回放 + 目标网络是**工程上把它摁住**的两块补丁——摁得住 Atari,摁不住离线 RL,所以才需要 [离线 RL](/tutorials/offline-rl) 的 CQL/IQL 等更保守的手法。
+
+## gradient-TD:用「真梯度」治致命三态
+
+上面讲 DQN 靠「补丁」把发散摁住。但补丁是**工程层**的——它削弱反馈环,没从数学上消除发散。若要**理论保证收敛**,得换一个更新式,这就是 **gradient-TD**(Sutton, Maei et al. 2009 [4])。它治本的思路是:半梯度之所以发散,是因为它根本**不是在下降一个明确的目标函数**——gradient-TD 改成下降一个真实目标,收敛性就由随机逼近理论兜底。
+
+### 半梯度为何发散:它没在下降任何目标
+
+再看半梯度离策略 TD(0) 的更新(把 $\hat v(s')=\mathbf x(s')^\top\mathbf w$ 当常数求导):
+
+$$
+\mathbf w_{t+1}=\mathbf w_t+\alpha\,\rho_t\,\delta_t\,\nabla_{\mathbf w}\hat v(s_t),\qquad \delta_t=r+\gamma\hat v(s')-\hat v(s_t)
+$$
+
+注意 $\delta_t$ 里也含 $\mathbf w$(通过 $\hat v(s')$ 和 $\hat v(s_t)$),但更新只取了 $\nabla\hat v(s_t)$ 这一项的梯度——把 $\hat v(s')$ 当成与 $\mathbf w$ 无关的常数。这就是「**半梯度**」:只对显式的 $\mathbf w$ 求导,不穿过自举目标。这在对策略评估(固定策略)的 on-policy 设定下没事,因为投影贝尔曼算子 $\Pi T$ 仍是 $\gamma$-收缩;但**离策略下 $\Pi T$ 的收缩常数可能 $>1$**,迭代 $\mathbf w\leftarrow\mathbf w+\alpha\Pi T\mathbf w$ 就指数级放大——Baird 1995 七状态反例里 $\|\mathbf w\|$ 单调增长到无穷 [4]。
+
+根本病根:半梯度更新**不是任何目标函数的梯度下降**。随机逼近理论要求「更新 = 某目标 $J(\mathbf w)$ 的负梯度 $-\nabla J$」才能保证收敛到 $J$ 的驻点;半梯度指向的方向既不是 MSBE 也不是 MSPBE 的梯度,只是「长得像」梯度的启发式更新,所以没有收敛保证。
+
+### MSPBE:一个能保证收敛的目标
+
+要找「真梯度」得先定一个目标。**均方贝尔曼误差** $\mathrm{MSBE}=\mathbb E[(\delta_t)^2]$ 是最自然的选择,但它有个麻烦:函数逼近下 $\delta_t$ 里的 $\hat v(s')$ 也依赖 $\mathbf w$,对它求梯度会得到「穿过自举」的复杂表达式,且 MSBE 的最小值未必对应真实价值(投影畸变)。Sutton et al. 2009 转而用**均方投影贝尔曼误差** [4]:
+
+$$
+\mathrm{MSPBE}(\mathbf w)=\mathbb E[\delta_t\,\mathbf x_t]^\top\,\mathbb E[\mathbf x_t\mathbf x_t^\top]^{-1}\,\mathbb E[\delta_t\,\mathbf x_t]
+$$
+
+直觉:$\delta_t\mathbf x_t$ 是「带特征加权的 TD 误差」,它的期望 $\mathbb E[\delta\mathbf x]$ 衡量「贝尔曼误差在函数空间里还有多少没消除」;再用 $\mathbb E[\mathbf x\mathbf x^\top]^{-1}$(特征协方差逆)把它投影回参数空间,就得到「投影后的贝尔曼误差」。MSPBE 的最小值恰好在 $\Pi T\mathbf w=\mathbf w$(投影不动点)处取 0——这正是我们想要 $\hat v$ 收敛到的那一点。**关键:MSPBE 是 $\mathbf w$ 的真实函数,对它做 SGD 就有收敛保证。**
+
+### GTD / GTD2 / TDC:三种下降 MSPBE 的算法
+
+直接对 MSPBE 求梯度需要 $\mathbb E[\mathbf x\mathbf x^\top]^{-1}$ 与 $\mathbb E[\delta\mathbf x]$,两者都要从样本估。Sutton et al. 2009 给出三种**只用样本、无需矩阵求逆**的 SGD 算法 [10],核心是引入一个**辅助向量 $\mathbf v$** 在线估 $\mathbb E[\delta\mathbf x]$,用 $\mathbf v$ 替掉期望项:
+
+- **GTD(gradient-TD)**:最直接的形式,$\mathbf w\leftarrow\mathbf w+\alpha\,\rho_t\,\delta_t\,\mathbf x_t$ 看着像半梯度,但 $\mathbf v\leftarrow\mathbf v+\beta\,\rho_t(\delta_t-\mathbf x_t^\top\mathbf v)\mathbf x_t$ 估出 $\mathbb E[\delta\mathbf x]$,再把 $\mathbf v$ 用进 $\mathbf w$ 的更新里对齐 MSPBE 梯度。
+- **GTD2**:把 MSPBE 改写成二次型 $\tfrac12\|\Pi(\delta\mathbf x)\|^2$ 后 SGD,更新用 $\mathbf x_t^\top\mathbf v$(已估的 $\delta$)替 $\delta_t$,方差更小、更稳。
+- **TDC(temporal difference with gradient correction)**:最常用——在半梯度更新 $\rho_t\delta_t\mathbf x_t$ 上**加一项梯度校正** $-\gamma\rho_t(\mathbf x_t^\top\mathbf v)\mathbf x(s')$,把更新方向从「半梯度」扭到「MSPBE 真梯度」:
+
+$$
+\mathbf w_{t+1}=\mathbf w_t+\alpha\,\rho_t\Big[\delta_t\,\mathbf x_t-\gamma\,(\mathbf x_t^\top\mathbf v)\,\mathbf x(s')\Big],\qquad \mathbf v_{t+1}=\mathbf v_t+\beta\,\rho_t\big(\delta_t-\mathbf x_t^\top\mathbf v\big)\,\mathbf x_t
+$$
+
+$\mathbf v$ 是辅助量,学得快($\beta\gg\alpha$)以拟稳态估 $\mathbb E[\delta\mathbf x]$;$\mathbf w$ 学得慢,等效于在 $\mathbf v$ 提供的「真梯度方向」上 SGD MSPBE。这种「**双时间尺度**」($\beta\gg\alpha$)是收敛证明的钥匙 [10]:$\mathbf v$ 在 $\mathbf w$ 看来近似已收敛,把 $\mathbf w$ 的更新化作对一个固定目标的 SGD。
+
+### Baird 反例:半梯度发散,TDC 有界
+
+下面在 Baird 1995 七状态反例上对比半梯度离策略 TD(0) 与 TDC。设定:7 状态、reward 全 0、$\gamma=0.99$、行为策略以 6/7 概率走「solid」动作(均匀去 0..5)、1/7 走「dashed」(去吸收态 6)、目标策略永远走 dashed,故重要性采样比 $\rho$ 在 dashed 转移上 $=7$、solid 上 $=0$。特征 $\mathbf x(s)$ 用 S&B 的标准 Baird 表示(每个非吸收态一个分量 $=2$ + 常数 $=1$、吸收态 $=1$ + 常数 $=2$)。半梯度和 TDC 用**同一**学习率与种子跑 2 万步,看 $\|\mathbf w\|$ 的轨迹:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# Baird 7-state counterexample (Sutton & Barto Fig 11.1).
+# 7 states, features per S&B canonical form.
+X = np.zeros((7, 8))
+for i in range(6):
+    X[i, i] = 2.0      # solid action feature
+    X[i, 7] = 1.0      # constant
+X[6, 6] = 1.0          # dashed/absorbing state 6
+X[6, 7] = 2.0          # constant
+gamma = 0.99
+
+def trajectory(steps, seed):
+    rng = np.random.default_rng(seed)
+    for _ in range(steps):
+        s = rng.integers(7)
+        if rng.random() < 1/7:        # behavior: dashed -> state 6
+            yield s, 6, 7.0           # rho = pi/b = 1 / (1/7) = 7
+        else:                          # behavior: solid -> uniform 0..5
+            yield s, rng.integers(6), 0.0   # target never picks solid -> rho 0
+
+def run_semi(steps=20000, alpha=0.01, seed=0):
+    w = np.ones(8)
+    norms = []
+    for s, sn, rho in trajectory(steps, seed):
+        delta = gamma * (X[sn] @ w) - (X[s] @ w)
+        w = w + alpha * rho * delta * X[s]
+        norms.append(np.linalg.norm(w))
+    return np.array(norms)
+
+def run_tdc(steps=20000, aw=0.01, av=0.05, seed=0):
+    w = np.ones(8); v = np.zeros(8)
+    norms = []
+    for s, sn, rho in trajectory(steps, seed):
+        xs = X[s]; xsp = X[sn]
+        delta = gamma * (xsp @ w) - (xs @ w)
+        # TDC: gradient correction term -gamma * (xs @ v) * xsp
+        w = w + aw * rho * (delta * xs - gamma * xsp * (xs @ v))
+        v = v + av * rho * (delta - xs @ v) * xs
+        norms.append(np.linalg.norm(w))
+    return np.array(norms)
+
+semi = run_semi(); tdc = run_tdc()
+print("半梯度离策略 TD(0):")
+for k in (1, 5000, 10000, 20000):
+    print(f"  ||w|| @ {k:6d} 步: {semi[k-1]:.3e}")
+print("-> ||w|| 单调增长到无穷 (发散)")
+print()
+print("TDC (gradient-TD, 双时间尺度 beta>>alpha):")
+for k in (1, 5000, 10000, 20000):
+    print(f"  ||w|| @ {k:6d} 步: {tdc[k-1]:.3f}")
+print("-> ||w|| 有界 (收敛保证)")
+print()
+print("同一反例、同一学习率,半梯度发散而 TDC 有界 ——")
+print("差距全在'更新方向是不是某个目标(MSPBE)的真梯度'。")
+`} />
+
+跑出来的数字会因种子略抖,但定性稳健:半梯度 $\|\mathbf w\|$ 在 2 万步内从 2.83 涨到 $10^{20}$ 量级(指数发散);TDC 始终在 2.82 附近有界。**两者的唯一差别就是 TDC 那项梯度校正 $-\gamma\rho(\mathbf x^\top\mathbf v)\mathbf x'$**——它把半梯度的「启发式方向」扭到 MSPBE 的真梯度方向,随机逼近理论于是能给出收敛保证 [4]。
+
+### 代价与现状:为什么 DQN 不用 gradient-TD
+
+gradient-TD 有理论保证,代价是:① **多维护一个 $\mathbf v$**(与 $\mathbf w$ 同维,内存翻倍);② **双时间尺度调参**($\beta\gg\alpha$ 但不能太大,否则 $\mathbf v$ 抖动)比单一 $\alpha$ 麻烦;③ **样本效率通常更低**——它在下降 MSPBE 而非 MSBE,投影畸变让收敛点未必是真实价值的最小 MSBE 估计,实践中常比半梯度慢。所以**主流深度 RL(DQN/PPO/SAC)都不用 gradient-TD**,而靠目标网络 + 经验回放等补丁把发散摁在实践可控范围。gradient-TD 的真正用武之地是**离线 RL**——那里不能再采新数据纠偏,半梯度的发散风险最高,CQL/IQL 等保守方法的精神与 gradient-TD 同源(都在数学上约束更新方向,而非工程补丁)。它是「理论正确但工程不香」的方法,理解它等于理解了「为什么 DQN 的补丁只是补丁、而非正解」。
+
+## 亲手实现:极简 DQN
+
+下面用**线性**函数逼近(把神经网络简化成一层 $Q(s,\cdot)=W\,\phi(s)$,`numpy` 即可跑,无需 PyTorch)在熟悉的 4×4 网格上跑一个**带经验回放 + 目标网络**的完整 DQN。它学到的策略应当和表格版 Q-learning 一样——到达 🏁、绕开 🕳️:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+N, GOAL, PIT, START = 4, 15, 9, 0
+A = [(0,-1),(1,0),(0,1),(-1,0)]   # 上 右 下 左
+
+def step(s, a):
+    r, c = divmod(s, N); dc, dr = A[a]
+    nr, nc = r + dr, c + dc
+    return nr*N + nc if (0 <= nr < N and 0 <= nc < N) else s
+
+def reward(s):
+    return 1.0 if s == GOAL else -1.0 if s == PIT else -0.02
+
+def phi(s):                        # 状态特征:one-hot(线性逼近的输入)
+    v = np.zeros(N*N); v[s] = 1.0; return v
+
+rng = np.random.default_rng(0)
+W  = np.zeros((4, N*N))            # 在线网络权重 θ
+Wt = W.copy()                      # 目标网络权重 θ⁻(滞后冻结)
+buf = []                           # 经验回放缓冲区
+cap, alpha, gamma, batch = 500, 0.1, 0.9, 32
+
+def Q(w, s): return w @ phi(s)     # Q(s,·) = W·φ(s)
+
+for ep in range(300):
+    s = START; eps = max(0.05, 0.5 - ep/500)
+    for _ in range(60):
+        if s in (GOAL, PIT): break
+        a = rng.integers(4) if rng.random() < eps else int(Q(W, s).argmax())
+        ns = step(s, a); r = reward(ns); done = ns in (GOAL, PIT)
+        buf.append((s, a, r, ns, done))            # 存进缓冲区
+        if len(buf) > cap: buf.pop(0)
+        if len(buf) >= batch:                       # 随机抽小批量训练
+            for j in rng.choice(len(buf), batch, replace=False):
+                bs, ba, br, bns, bd = buf[j]
+                y = br + (0 if bd else gamma * Q(Wt, bns).max())   # 目标用 θ⁻
+                W[ba] += alpha * (y - Q(W, bs)[ba]) * phi(bs)      # 回归一步
+        s = ns
+    if ep % 20 == 0: Wt = W.copy()                  # 每 20 回合同步一次目标网络
+
+s, path = START, [0]
+for _ in range(20):
+    if s in (GOAL, PIT): break
+    s = step(s, int(Q(W, s).argmax())); path.append(s)
+
+print("DQN 学到的路径:", path)
+print("到达目标 🏁 :", path[-1] == GOAL, " | 绕开陷阱 🕳️ :", PIT not in path)
+print("-> 换成神经网络逼近,依然学出了最优策略")
+`} />
+
+> 💡 上面是**线性**逼近(便于在浏览器里跑)。真正的 DQN 把 `W @ phi(s)` 换成多层神经网络、把 Atari 像素当输入,骨架完全一样:回放缓冲 + 目标网络 + TD 回归。想直观看网格里价值与策略如何成形,可回顾[强化学习入门](/tutorials/reinforcement-learning)的交互式网格世界。
+
+## 高估是怎么来的:过估计偏差
+
+原始 DQN 的 TD 目标里有一项 $\max_{a'}Q(s',a';\theta^-)$。直觉上「取最大」似乎无害,但它藏着一个**统计陷阱**:只要 $Q$ 的估计带噪声,取 $\max$ 就会**系统性偏高**。
+
+把这件事拆开看。设某状态下所有动作真值都是 $Q^*(a)=0$,而我们的估计 $\hat Q(a)=Q^*(a)+\eta_a$ 带零均值噪声 $\eta_a\sim\mathcal N(0,\sigma^2)$。那么:
+
+$$
+\mathbb E\!\left[\max_a \hat Q(a)\right] \;=\; \mathbb E\!\left[\max_a \eta_a\right] \;>\; 0
+$$
+
+为什么大于零?**最大值永远只往正方向偏**——哪个动作的噪声恰好为正,它就被选中;噪声为负的动作永远当不上最大。动作数 $k$ 越多、噪声 $\sigma$ 越大,「碰巧有个动作噪声很大」的概率越高,偏差就越严重。下表是用蒙特卡洛算出来的(4000 次平均):
+
+| 动作数 $k$ | 噪声 $\sigma$ | $\mathbb E[\max_a \hat Q(a)]$ |
+|---|---|---|
+| 2  | 1.0 | ≈ 0.56 |
+| 10 | 1.0 | ≈ 1.55 |
+| 10 | 2.0 | ≈ 3.10 |
+
+这就是 **Q-learning 的过估计偏差(overestimation bias)**:即便估计本身无偏,`max` 算子也会把价值往上推。更糟的是它是**自举的**——这一步高估的 $Q$ 会被当作目标写回,再被下一步的 $\max$ 继续放大,误差沿贝尔曼链**复合累积**。函数逼近下噪声更大(网络对未见状态会猜),所以高估在 DQN 里比表格 Q-learning 严重得多。
+
+### 过估计偏差的解析界:$\sigma\sqrt{2\ln k}$
+
+上面用蒙特卡洛算出 $\mathbb E[\max_a\hat Q(a)]$ 的数值,但这个偏差有没有**解析公式**?有——它来自**极值理论(extreme value theory)**。
+
+$k$ 个 i.i.d. 标准正态 $Z_a\sim\mathcal N(0,1)$ 的最大值 $M_k=\max_a Z_a$,其期望渐近为:
+
+$$
+\mathbb E[M_k]\;\approx\;\sqrt{2\ln k}\qquad(k\to\infty)
+$$
+
+**推导骨架**(尾概率反解):$M_k>z$ 当且仅当「至少一个 $Z_a>z$」,故 $\Pr(M_k>z)=1-\Phi(z)^k\approx k\cdot(1-\Phi(z))$(小尾概率 union bound)。标准正态尾 $1-\Phi(z)\approx\frac{1}{z\sqrt{2\pi}}e^{-z^2/2}$,令 $k\cdot(1-\Phi(z))\sim 1$ 即 $e^{-z^2/2}\sim\frac{z\sqrt{2\pi}}{k}$,取对数解得 $z\sim\sqrt{2\ln k}$(主导项,$\ln\ln k$ 修正项次阶)。直觉:**$k$ 个样本里最大值落在哪个分位点?** 尾概率要小到 $\sim 1/k$ 才「恰好有一个样本超过」,而正态尾是指数衰减 $e^{-z^2/2}$,反解出 $z\sim\sqrt{2\ln k}$。
+
+代回带噪估计 $\hat Q(a)=Q^*(a)+\eta_a$,$\eta_a\sim\mathcal N(0,\sigma^2)$,设 $Q^*(a)=0$(最简情形):
+
+$$
+\mathbb E\!\left[\max_a\hat Q(a)\right]\;=\;\sigma\,\mathbb E[M_k]\;\approx\;\sigma\sqrt{2\ln k}.
+$$
+
+两个可读的结论:① **偏差与噪声 $\sigma$ 线性**——函数逼近下 $\sigma$ 大(网络对未见状态猜得狠),偏差直接按比例放大;② **偏差与 $\sqrt{\ln k}$ 慢增**——动作数 $k$ 翻倍只让偏差增加 $\sqrt{\ln 2k}-\sqrt{\ln k}\to 0$(增量趋于零),但 $k$ 从 2 到 100 偏差仍翻倍(0.56→2.51)。$\sqrt{\ln k}$ 比 $\sqrt{k}$ 慢得多,但比常数快——这就是动作空间越大、过估计越严重的量化根因。
+
+> ⚠️ **$\sqrt{2\ln k}$ 是渐近上界,小 $k$ 偏松**。精确值 $\mathbb E[M_k]=\int z\cdot k\phi(z)\Phi(z)^{k-1}dz$ 无闭式,$\sqrt{2\ln k}$ 是 $k\to\infty$ 的主导项。下面 CodeRunner 用蒙特卡洛对照:小 $k$(如 2)时 $\sqrt{2\ln k}\approx 1.18$ 高估实际 $0.56$ 近一倍,大 $k$(如 500)时 $3.53$ 已很接近实际 $3.04$(比值 0.86)。所以解析界适合**理解标度**(为何 $\sigma$ 线性、为何 $\ln k$ 慢增),精确数值仍需蒙特卡洛。
+
+下面用 CodeRunner 把解析界与蒙特卡洛对照,并验证 **Double DQN 选评解耦消除偏差** 的机制——用独立 $Q_1$ 选动作、$Q_2$ 评该动作,$\mathbb E[Q_2(a^*)]=\mathbb E[Q_2]=Q^*$(选评独立时期望无偏):
+
+<CodeRunner defaultCode={`# 过估计偏差解析界 sigma*sqrt(2 ln k) vs 蒙特卡洛 + Double DQN 选评解耦
+import numpy as np
+rng = np.random.default_rng(42)
+# 段1: E[max Q_hat] 蒙特卡洛 vs 解析界 sigma*sqrt(2 ln k)
+print("=== 段1: E[max_a Q_hat(a)] MC vs 解析 sigma*sqrt(2 ln k) ===")
+print(f"{'k':>4} {'sigma':>6} {'MC E[max]':>12} {'解析界':>10} {'比值':>8}")
+for k in [2, 5, 10, 50, 100, 500]:
+    samples = rng.normal(0, 1.0, size=(40000, k))
+    mc = samples.max(axis=1).mean()
+    analytic = np.sqrt(2 * np.log(k))
+    print(f"{k:>4} {1.0:>6.1f} {mc:>12.4f} {analytic:>10.4f} {mc/analytic:>8.3f}")
+print("  -> 大 k 比值趋近 1 (sqrt(2 ln k) 是渐近界, 小 k 松大 k 紧)")
+# 段2: 偏差随 sigma 线性 (固定 k=10)
+print("\\n=== 段2: 偏差随 sigma 线性 (k=10) ===")
+print(f"{'sigma':>6} {'MC E[max]':>12} {'sigma*sqrt(2ln10)':>18} {'比值':>8}")
+for sigma in [0.5, 1.0, 2.0, 4.0]:
+    samples = rng.normal(0, sigma, size=(40000, 10))
+    mc = samples.max(axis=1).mean()
+    analytic = sigma * np.sqrt(2 * np.log(10))
+    print(f"{sigma:>6.1f} {mc:>12.4f} {analytic:>18.4f} {mc/analytic:>8.3f}")
+print("  -> 偏差与 sigma 线性: 函数逼近 sigma 大 => 偏差大")
+# 段3: Double DQN 选评解耦消除偏差
+print("\\n=== 段3: Double DQN 选评解耦 (k=10, sigma=1.0, 40000 样本) ===")
+s1 = rng.normal(0, 1.0, size=(40000, 10))  # 在线网络 Q1
+s2 = rng.normal(0, 1.0, size=(40000, 10))  # 目标网络 Q2
+std_dqn = s1.max(axis=1).mean()            # 标准 DQN: max of Q_hat
+amax = np.argmax(s1, axis=1)               # Double DQN: argmax Q1
+double_dqn = s2[np.arange(40000), amax].mean()  # 评用 Q2
+print(f"  标准 DQN   E[max Q_hat]       = {std_dqn:.4f}  (偏差 {std_dqn:.4f}, 近 sqrt(2ln10)={np.sqrt(2*np.log(10)):.4f})")
+print(f"  Double DQN E[Q2(argmax Q1)]   = {double_dqn:.4f}  (偏差 {abs(double_dqn):.4f}, 近零)")
+print("  -> 选评独立: E[Q2(a*)] = E[Q2] = Q* (a* 与 Q2 独立) => 偏差消失")
+print("  -> 代价: 方差略增 (Q2(a*) 是单个采样非 max), 但偏差消除收益更大")
+`} title="过估计偏差解析界 + Double DQN 选评解耦" />
+
+> 下面这个交互图把这件事画出来:拖动噪声 $\sigma$,看标准 DQN 的偏差如何随动作数 $k$ 单调上升,而 Double DQN 始终贴在零附近。
+
+<DQNBiasViz />
+
+## Double DQN:解耦「选」与「评」
+
+既然偏差源于「用同一组 $Q$ 既选动作又评动作」,解法就是**把两件事拆开**。**Double DQN** 用在线网络选、用目标网络评:
+
+$$
+\underbrace{a^* = \arg\max_{a'} Q(s',a';\theta)}_{\text{在线网络选动作}},\qquad
+\underbrace{y = r + \gamma\, Q(s',a^*;\theta^-)}_{\text{目标网络评该动作}}
+$$
+
+为什么这样能消除偏差?选动作的噪声来自 $\theta$,评动作的噪声来自 $\theta^-$,两者**独立**。即便 $\theta$ 把某个动作因噪声选了出来,$\theta^-$ 对它的评估**期望仍是真值**,不再系统性偏高——上面交互图里的绿线印证了这一点($\mathbb E\approx 0$)。
+
+> 📝 与表格版 **Double Q-learning** 同源:那里是维护两套独立的 Q 表,交替选/评;这里复用 DQN 已有的「在线 + 目标」两套参数,几乎是零成本就能拿到的改进。实测在 Atari 多款游戏上显著降高估、提性能,是 DQN 最常用的改进之一。
+
+## Dueling DQN:把价值与优势拆开
+
+很多状态下,**选哪个动作其实无关紧要**——比如赛车在直道上,「左一点」还是「右一点」差别不大,关键是「这条路值多少」。原始 DQN 网络对每个状态-动作对直接输出一个 $Q(s,a)$,无法表达「这堆动作差不多好、关键是状态本身」这种结构。
+
+**Dueling DQN** 把网络末层拆成两股:
+
+$$
+Q(s,a;\theta,\alpha,\beta) \;=\; \underbrace{V(s;\theta,\beta)}_{\text{状态价值支}} \;+\; \underbrace{A(s,a;\theta,\alpha)}_{\text{优势支}}
+$$
+
+- $V(s)$ 表示「待在这个状态本身有多好」,与动作无关;
+- $A(s,a)$ 表示「在状态 $s$ 下,选动作 $a$ 相比平均水平好多少」($A(s,a)=Q(s,a)-V(s)$)。
+
+直接相加 $Q=V+A$ 有个**不可辨识性(identifiability)**问题:$V$ 和 $A$ 可以随意平移——给 $V$ 加 $c$、给 $A$ 减 $c$,$Q$ 不变,网络无从决定该把多少「额度」分给 $V$。论文用减均值稳住:
+
+$$
+Q(s,a) \;=\; V(s) \;+\; \left(A(s,a) - \frac{1}{|\mathcal A|}\sum_{a'} A(s,a')\right)
+$$
+
+减均值让优势支的中心被迫落在零上,$V$ 就被唯一确定为「各动作平均价值」。这样一来,当某状态下多数动作差不多时,优势支接近一张零平面、梯度主要流向 $V$,**学习信号更干净地表达「这是状态的价值」**,而非被一堆近似的 $Q$ 稀释。
+
+Dueling 与算法无关——它只换网络结构,可与 Double、PER 等任意叠加。在「动作数多、且大量动作等价」的任务上(如 Atari 里许多操作是冗余的)收益最明显。
+
+### Dueling 为何降方差:V 支每步都收信号
+
+上面讲了 Dueling「把 $V$ 和 $A$ 拆开」**是什么**,但没说清**为什么这样能学得更快**。直觉解释「学习信号更干净」只是表象,真正的机制是**采样效率**——$V$ 支每一步都接收信号,而原始 DQN 隐含的 $V=\frac{1}{|\mathcal A|}\sum_a Q(s,a)$ 里每个 $Q(s,a)$ 只在**采到该动作时**才更新。
+
+**原始 DQN 的 $V$ 估计(事后平均):** 假设某状态 $s$ 被访问 $n_s$ 次,均匀策略下每个动作平均被采 $n_s/|\mathcal A|$ 次,于是 $Q(s,a)$ 各自基于 $n_s/|\mathcal A|$ 个样本,事后平均得到的 $V$ 估计方差正比于
+
+$$
+\mathrm{Var}[\hat V_{\text{DQN}}(s)] \;\propto\; \frac{1}{|\mathcal A|}\sum_{a}\frac{\sigma^2}{n_s/|\mathcal A|} \;=\; \frac{|\mathcal A|\,\sigma^2}{n_s}.
+$$
+
+**Dueling 的 $V$ 估计:** 减均值让 $V$ 支每一步都接收当前转移的 TD 信号(经优势支减均值后,任何动作的 TD 误差都会回流到 $V$),所以 $V$ 基于**全部 $n_s$ 个样本**,方差正比于 $\sigma^2/n_s$。两者之比:
+
+$$
+\frac{\mathrm{Var}[\hat V_{\text{DQN}}]}{\mathrm{Var}[\hat V_{\text{Dueling}}]} \;\approx\; |\mathcal A|,
+\qquad
+\frac{\mathrm{StdErr}[\hat V_{\text{DQN}}]}{\mathrm{StdErr}[\hat V_{\text{Dueling}}]} \;\approx\; \sqrt{|\mathcal A|}.
+$$
+
+即 $V$ 支的有效样本数是 DQN 的 $|\mathcal A|$ 倍,标准误缩小到 $1/\sqrt{|\mathcal A|}$。这正是「动作数多时收益大」的量化根源——Atari 单帧动作数 $|\mathcal A|=18$,$\sqrt{|\mathcal A|}\approx 4.24$ 倍的 $V$ 估值精度提升。
+
+> ⚠️ 这是**渐近上界**(假设各动作采样均匀、优势支与 $V$ 支解耦)。实际中优势支的更新与 $V$ 耦合、采样不均匀,增益通常小于 $\sqrt{|\mathcal A|}$,但**随 $|\mathcal A|$ 单调上升**的定性结论成立。下面对比表里「比值」列实测介于 1.06–2.38,远小于理论上限,正因如此。
+
+下面的可运行示例把这件事量化:固定总转移数,扫描动作数 $|\mathcal A|$,对比 DQN(事后平均)与 Dueling(显式 $V$ 支)对 $V^\star$ 的估计误差。
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# === Dueling 为何降方差: V 支每步收信号 vs DQN Q(s,a) 稀疏采样 ===
+# 关键差异:
+#   DQN:    每步只更新采到的 Q(s,a); V 隐含 = mean_a Q, 但每个 Q(s,a) 样本数 = steps/|A|
+#   Dueling: V 支每步都更新 (收当前动作的 TD 信号经减均值聚合), V 样本数 = steps
+#   => V 支有效样本数 DQN 的 |A| 倍, 方差除以 |A|, 标准误除以 sqrt(|A|)
+
+N_STATES = 50
+STEPS = 500          # 固定总转移数
+NOISE = 1.0          # TD 信号噪声 std
+
+print("=== 动作数 |A| 扫描: Dueling V 估值精度增益随 |A| 增大 ===")
+print(f"{'|A|':>5} {'DQN V 误差':>14} {'Dueling V 误差':>16} {'比值':>8} {'理论 sqrt(|A|)':>14}")
+ratios = []
+for n_actions in [2, 5, 10, 20, 50]:
+    errs_dqn, errs_duel = [], []
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        V_star = rng.normal(0, 1.0, N_STATES)
+        A_star = rng.normal(0, 0.2, (N_STATES, n_actions))
+        A_star -= A_star.mean(axis=1, keepdims=True)
+        Q_star = V_star[:, None] + A_star
+
+        # --- DQN: 每步只更新采到的 Q(s,a), 事后平均得 V ---
+        rng = np.random.default_rng(seed * 2)
+        Q = np.zeros((N_STATES, n_actions)); cnt = np.zeros((N_STATES, n_actions))
+        for _ in range(STEPS):
+            s = rng.integers(N_STATES); a = rng.integers(n_actions)
+            tgt = Q_star[s, a] + rng.normal(0, NOISE)
+            cnt[s, a] += 1; Q[s, a] += (tgt - Q[s, a]) / cnt[s, a]
+        errs_dqn.append(np.abs(Q.mean(axis=1) - V_star).mean())
+
+        # --- Dueling: V 支每步都更新 (减均值聚合所有动作信号) ---
+        rng = np.random.default_rng(seed * 2)
+        V = np.zeros(N_STATES); A = np.zeros((N_STATES, n_actions))
+        cv = np.zeros(N_STATES); ca = np.zeros((N_STATES, n_actions))
+        for _ in range(STEPS):
+            s = rng.integers(N_STATES); a = rng.integers(n_actions)
+            tgt = Q_star[s, a] + rng.normal(0, NOISE)
+            cv[s] += 1; V[s] += (tgt - V[s]) / cv[s]
+            ca[s, a] += 1; A[s, a] += (tgt - V[s] - A[s, a]) / ca[s, a]
+        errs_duel.append(np.abs(V - V_star).mean())
+
+    ed = np.mean(errs_dqn); eu = np.mean(errs_duel)
+    ratios.append(ed/eu)
+    print(f"{n_actions:>5} {ed:>14.4f} {eu:>16.4f} {ed/eu:>8.3f} {np.sqrt(n_actions):>14.3f}")
+
+print()
+print(f"结论: 比值随 |A| 单调上升 (实测 {min(ratios):.2f}-{max(ratios):.2f}), 定性追踪 sqrt(|A|) (理论上限).")
+print("      |A| 越大, DQN 的 Q(s,a) 采样越稀疏, 事后平均的 V 越不准;")
+print("      Dueling 的 V 支每步收信号 => 有效样本数 = DQN 的 |A| 倍.")
+print(f"      实测比值小于 sqrt(|A|) (1.41-7.07) 因优势支耦合 + 采样不均匀.")
+`} title="Dueling V 支降方差: 动作数扫描" />
+
+> 💡 **跨篇呼应**:这一节解释了 Dueling **降 $V$ 支方差**的机制,而上一节《过估计偏差的解析界》讲的是 **Double DQN 消 $\max$ 偏差**。两者是 DQN 估值稳定性的「两件套」——Dueling 让 $V$ 估得准(方差小),Double 让 $\max$ 不偏(无系统偏差)。实践中 Dueling + Double 常组合使用([Wang et al., 2016](https://arxiv.org/abs/1511.06581) 的实验里二者叠加收益最大)。
+
+## 优先经验回放(PER):让「值得学」的多被采
+
+经验回放默认**均匀**采样,但并非每条经验都同样有营养:已经学得很准的转移,TD 误差小,反复抽它纯属浪费;而 TD 误差大的转移,往往藏着「还没学会」的东西。**优先经验回放(Prioritized Experience Replay, PER)** 按 TD 误差 $|\delta|$ 给每条转移定优先级,让「学得最多」的被更常采到。
+
+- **优先级**:$p_i = |\delta_i| + \varepsilon$(加小常数防止零误差转移永远不采);
+- **采样概率**:$P(i) = \dfrac{p_i^{\alpha}}{\sum_j p_j^{\alpha}}$, $\alpha\in[0,1]$ 控制「多优先」程度($\alpha=0$ 退化为均匀,$\alpha=1$ 完全按 $p$);
+- **重要性采样纠偏**:非均匀采样改变了数据的分布期望,会引入偏差,需用权重修正:
+
+$$
+w_i \;=\; \left(\frac{1}{N\,P(i)}\right)^{\beta}
+$$
+
+  其中 $N$ 是缓冲区大小,$\beta\in[0,1]$。$\beta=0$ 不纠偏(偏差大但方差小),$\beta=1$ 完全纠偏(无偏但方差大)。实践中 $\beta$ 从接近 0 **退火到 1**——训练后期数据分布趋稳,逐步还原无偏估计。
+
+### $\beta$ 退火的偏差-方差权衡:为何不直接 $\beta=1$
+
+上面一句话带过「$\beta=0$ 偏差大/$\beta=1$ 方差大/退火到 1」,但没说清**为何不直接用 $\beta=1$ 拿无偏估计**。无偏听起来总是好事,PER 却偏要退火——根因不在「batch 均值方差大」,而在 **IS 权重 $w_i$ 幅度爆炸导致有效样本大小骤降**,在训练初期 Q 估计尚不稳时会放大梯度噪声、引发震荡。
+
+**$w_i$ 幅度随 $\beta$ 爆炸**:由 $w_i=(1/(NP(i)))^\beta$,$\beta=0$ 时 $w_i\equiv1$(全 1,无纠偏);$\beta=1$ 时 $w_i=1/(NP(i))$。低优先级转移 $P(i)$ 小,$w_i$ 反而大——极端情况下 $\max w_i$ 可达几十倍于均值。用**有效样本大小**(effective sample size, ESS)量化这种不均:
+
+$$
+\mathrm{ESS} \;=\; \frac{(\sum_i w_i)^2}{\sum_i w_i^2}.
+$$
+
+ESS 衡量「$N$ 个加权样本等效于多少个独立同分布样本」:$w_i$ 全相等时 $\mathrm{ESS}=N$(满效率);$w_i$ 越不均,ESS 越小。$\beta$ 从 0 升到 1,$w$ 幅度爆炸,ESS 单调下降——这就是「$\beta=1$ 方差大」的真正含义:**不是 batch 均值 std 大,而是统计效率被 $w$ 不均匀侵蚀,等价于用了更少的样本**。
+
+**偏差-ESS 权衡**:$\beta$ 升高,偏差降($\beta=1$ 无偏),但 ESS 也降。两个目标冲突——
+
+| $\beta$ | 偏差 | $w$ 幅度 | ESS | 适合阶段 |
+|---|---|---|---|---|
+| $\approx 0$ | 大(非均匀采样偏向高 $\|\delta\|$ 样本) | 全 1 | $=N$(满) | 训练初期:Q 不稳,要高 ESS 稳梯度 |
+| $\to 1$ | 零(无偏) | 爆炸 | $\ll N$ | 训练后期:Q 趋稳,可牺牲 ESS 换无偏 |
+
+**为何退火而非直接 $\beta=1$**:训练初期 Q 估计噪声大,大 $w$ 会把这个噪声放大(个别高 $w$ 样本主导梯度,等效 batch size 骤降),训练易震荡;此时宁可带偏差也要高 ESS 把损失降下来。后期 Q 趋稳、TD 误差分布收敛,$w$ 幅度不再剧烈波动,才逐步升 $\beta$ 还原无偏,保证最终收敛到正确解。Schaul 2015 [21] 用线性 schedule $\beta_t=\beta_0+(1-\beta_0)\cdot t/T$($\beta_0\approx0.4$,$T$ 总步数)实现这一过渡。
+
+> ⚠️ 注意「$\beta=1$ 方差大」是**统计效率**(ESS)意义的,不是 batch 均值 std 意义的。实际 batch 够大时,中心极限定理让 batch 均值 std 随 $\beta$ 升高反而略降(偏差降主导);但 ESS 始终随 $\beta$ 单调降。PER 退火优化的目标是「训练全程稳定 + 最终无偏」,不是单步 batch 均值方差。
+
+下面的可运行示例把 $w$ 幅度、ESS、batch 偏差三者随 $\beta$ 的变化数值化。
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# === PER beta 退火: w 幅度爆炸 + ESS 下降 + 偏差降低 的权衡 ===
+# Schaul 2015 [21]: w_i = (1/(N P(i)))^beta, P(i) = p_i^alpha / sum
+# beta=0: w=1 有偏高 ESS / beta=1: w=1/(NP) 无偏低 ESS
+
+np.random.seed(42)
+N = 1000
+delta_true = np.random.normal(0.5, 1.0, N)
+grad_true = np.mean(delta_true)
+
+alpha = 0.6  # Schaul 默认
+eps = 1e-6
+p = np.abs(delta_true) + eps
+P = p**alpha / np.sum(p**alpha)
+
+# --- 段1: w 幅度 + ESS 随 beta 变化 (全库) ---
+print("=== 段1: IS 权重 w 幅度与有效样本大小 ESS 随 beta 变化 ===")
+print(f"  alpha = {alpha}, N = {N}, 真实梯度 = {grad_true:.4f}")
+print(f"  {'beta':>6} {'max(w)':>10} {'std(w)':>10} {'ESS':>10} {'ESS/N':>8}")
+for beta in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]:
+    w = (1.0 / (N * P))**beta
+    ess = np.sum(w)**2 / np.sum(w**2)
+    print(f"  {beta:>6.1f} {np.max(w):>10.3f} {np.std(w):>10.4f} {ess:>10.1f} {ess/N:>8.3f}")
+print("  -> beta=0: w 全 1, ESS=N (满效率但有偏)")
+print("  -> beta=1: w 幅度爆炸 (max 38.5), ESS 骤降 (310/1000=31%)")
+print("  -> ESS 下降 = 统计效率被 w 不均匀侵蚀, 个别大 w 样本主导梯度")
+
+# --- 段2: batch 估计偏差 vs MSE vs 批次 ESS ---
+print("\\n=== 段2: batch 估计偏差 vs MSE vs 批次 ESS (batch=32, 10000 次试验) ===")
+print(f"  {'beta':>6} {'E[grad_hat]':>14} {'偏差':>10} {'MSE=b^2+v':>12} {'批次ESS':>10}")
+rng = np.random.default_rng(0)
+batch_size = 32
+for beta in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]:
+    estimates = []
+    ess_list = []
+    for _ in range(10000):
+        idx = rng.choice(N, size=batch_size, p=P)
+        w = (1.0 / (N * P[idx]))**beta
+        grad_hat = np.mean(w * delta_true[idx])
+        estimates.append(grad_hat)
+        ess_b = np.sum(w)**2 / np.sum(w**2)
+        ess_list.append(ess_b)
+    estimates = np.array(estimates)
+    bias = np.mean(estimates) - grad_true
+    mse = bias**2 + np.std(estimates)**2
+    print(f"  {beta:>6.1f} {np.mean(estimates):>14.6f} {bias:>+10.4f} {mse:>12.6f} {np.mean(ess_list):>10.2f}")
+print("  -> 偏差随 beta 单调降 (0.287->0.001), beta=1 无偏")
+print("  -> MSE 随 beta 单调降 (0.124->0.017), 但批次 ESS 随 beta 降 (32->23.4)")
+print("  -> beta=1 虽无偏且 MSE 最小, 但 ESS 降 => 梯度被大 w 样本主导, 噪声放大")
+print("  => 退火: 初期 beta~0 高 ESS 稳梯度, 后期 beta->1 还原无偏保证收敛")
+`} title="PER beta 退火: w 幅度 + ESS + 偏差权衡" />
+
+### sum-tree:让按优先级采样降到 $O(\log N)$
+
+公式 $P(i)=p_i^\alpha/\sum_j p_j^\alpha$ 写下来轻巧,工程上却有个**致命瓶颈**:缓冲区动辄上百万条,每采一个样本都要算一次分母、再做加权抽样。若朴素实现——每次遍历整个缓冲区累加优先级、再按前缀和二分——单次采样 $O(N)$、TD 步更新某条优先级后还要重建前缀和又 $O(N)$。一个 batch 采几十条、每步都更新,**百万缓冲区下根本跑不动**。PER 用一个数据结构把这个代价压到 $O(\log N)$:**sum-tree**(线段树变体)[21]。
+
+**结构**:把优先级组织成一棵**完全二叉树**,用数组表示(索引 1-based,便于父子关系 `tree[i] = tree[2i] + tree[2i+1]`):
+
+- **叶节点**($N$ 个,索引 $N\ldots 2N-1$):存各条转移的优先级 $p_i$;
+- **内部节点**(索引 $1\ldots N-1$,根=1):存**子树优先级之和**——每个内部节点等于其左右子之和,根节点自然就是 $\sum_j p_j$。
+
+**采样**(下行,$O(\log N)$):从根出发,先抽一个 $s\in[0,\text{root})$ 的均匀随机数,然后向下走——
+
+- 若 $s\le$ 左子树和,走左;
+- 否则 $s\mathrel{-}=$ 左子树和,走右。
+
+走到叶层即采到的样本。整个过程只沿一条路径下行,深度 $\log_2 N$。
+
+**更新**(上行,$O(\log N)$):某条转移的 TD 误差更新后要改它的优先级——改对应叶节点的值,然后沿父链一路回传,把每个祖先的「子树和」增量更新(等价于 `tree[i] += delta` 一路到根)。同样只走一条路径,深度 $\log_2 N$。
+
+下面这段代码建一棵 $N=8$ 叶的 sum-tree,演示建树、按优先级采样、更新优先级,并对比朴素 $O(N)$ 法在大缓冲区下的代价差距:
+
+<CodeRunner defaultCode={`import numpy as np
+
+class SumTree:
+    """N 叶 sum-tree, 数组表示完全二叉树 (索引 1-based, 0 不用).
+    内部节点: tree[i] = tree[2i] + tree[2i+1];  叶节点: tree[i] = p_i.
+    叶在数组索引 N..2N-1, 内部节点 1..N-1 (根=1).
+    """
+    def __init__(self, n_leaves):
+        self.n = n_leaves
+        self.tree = np.zeros(2 * n_leaves)
+
+    def update(self, leaf_idx, priority):
+        """改第 leaf_idx 个叶的优先级, 上行回传到根. O(log N)."""
+        i = leaf_idx + self.n          # 叶在数组中的索引
+        delta = priority - self.tree[i]
+        self.tree[i] = priority
+        while i > 1:                    # 上行到根
+            i //= 2
+            self.tree[i] += delta       # 等价于 tree[2i]+tree[2i+1]
+
+    def total(self):
+        return self.tree[1]             # 根 = 全部优先级之和
+
+    def get(self, s):
+        """抽 s in [0, total), 下行找到对应叶. O(log N). 返回 leaf_idx."""
+        i = 1
+        while i < self.n:               # 还没到叶层
+            left = 2 * i
+            if s <= self.tree[left]:
+                i = left
+            else:
+                s -= self.tree[left]
+                i = 2 * i + 1
+        return i - self.n               # 返回叶 idx (0-based)
+
+# ============ (1) 建树 + 结构可视化 ============
+print("=" * 58)
+print("(1) sum-tree 结构 (N=8 叶, 完全二叉树)")
+print("=" * 58)
+priorities = np.array([3.0, 1.0, 8.0, 2.0, 5.0, 1.0, 2.0, 4.0])  # 8 个 |delta|+eps
+tree = SumTree(8)
+for i, p in enumerate(priorities):
+    tree.update(i, p)
+
+print(f"\\n叶节点优先级 (|delta|+eps): {priorities.tolist()}")
+print(f"总和 (根 tree[1]) = {tree.total():.1f}  (应 = {priorities.sum():.1f})")
+print(f"\\n内部节点 (子树和):")
+for i in range(1, 8):
+    print(f"  tree[{i}] = {tree.tree[i]:.1f}  (左 tree[{2*i}]={tree.tree[2*i]:.1f} + 右 tree[{2*i+1}]={tree.tree[2*i+1]:.1f})")
+print(f"\\n性质: 每个内部节点 = 左子 + 右子, 根 = 全部和. 采样/更新 O(log N) = log2(8) = 3 步")
+
+# ============ (2) 按优先级采样 (O(log N) 下行) ============
+print("\\n" + "=" * 58)
+print("(2) 按优先级采样: O(log N) 下行")
+print("=" * 58)
+probs = [float(p / priorities.sum()) for p in priorities]
+print(f"\\n采样概率 P(i) = p_i / sum = {[round(p, 3) for p in probs]}")
+print(f"理论分布 (大数定律, 100000 次采样):")
+rng = np.random.default_rng(42)
+counts = np.zeros(8, dtype=int)
+for _ in range(100000):
+    s = rng.uniform(0, tree.total())
+    idx = tree.get(s)
+    counts[idx] += 1
+empirical = counts / 100000
+print(f"  {'leaf':>5} {'p_i':>7} {'theory':>8} {'empirical':>10}")
+for i in range(8):
+    print(f"  {i:>5} {priorities[i]:>7.1f} {probs[i]:>8.3f} {empirical[i]:>10.3f}")
+print(f"\\n经验频率 ≈ 理论概率, 验证 sum-tree 采样正确 (无需 O(N) 遍历)")
+
+# ============ (3) 更新优先级 (O(log N) 上行) ============
+print("\\n" + "=" * 58)
+print("(3) 更新优先级: O(log N) 上行回传 vs 朴素 O(N) 重建")
+print("=" * 58)
+print(f"\\n把叶 2 的优先级从 {priorities[2]} 改成 10.0:")
+tree.update(2, 10.0)
+print(f"  sum-tree: 改 tree[10]=10.0, 上行回传 tree[5]/tree[2]/tree[1] (3 步, O(log N))")
+print(f"  新根 tree[1] = {tree.total():.1f}  (应 = {priorities.sum() - 8.0 + 10.0:.1f})")
+print(f"  朴素法: 改数组[2]=10, 重建整个前缀和数组 (8 步, O(N))")
+
+# ============ (4) 规模对比: sum-tree vs 朴素法 ============
+print("\\n" + "=" * 58)
+print("(4) 规模对比: 大缓冲区下 sum-tree vs 朴素法")
+print("=" * 58)
+for N in [1000, 100000, 1000000]:
+    logN = np.log2(N)
+    print(f"  N={N:>8}: sum-tree = {logN:.0f} 步 (O(log N))  vs  朴素 = {N} 步 (O(N))  ->  快 {N/logN:.0f}x")
+
+print(f"\\n结论: PER 缓冲区百万级, sum-tree 把采样+更新从 O(N)~1e6 降到 O(log N)~20,")
+print(f"      是 PER 能 scale 到百万缓冲区的工程核心. Schaul 2016 [PER] 在 49 个 Atari")
+print(f"      游戏中 41 个超越 uniform replay, 达新 SOTA.")
+`} title="sum-tree:PER 的 O(log N) 采样引擎" />
+
+> 💡 **sum-tree 之于 PER,好比哈希表之于字典查找**——把一个看似「必然 $O(N)$」的操作,靠一个数据结构压到 $O(\log N)$,让算法从「理论上好、工程上跑不动」变成「真能上百万缓冲区」。这也是 PER 工程实现的标配:主流 RL 库(OpenAI baselines、Stable-Baselines3、Ray RLlib、CleanRL)的 PER 实现无一例外都用 sum-tree。值得注意的是,sum-tree 只解决「**按给定优先级高效采样**」的问题,它不判断「优先级该是多少」——优先级本身仍来自 TD 误差 $|\delta|$,是算法层的事;数据结构层只负责把「按这个分布抽样」做快。
+
+> 💡 PER 把「该学什么」的判断从「无差别均匀」变成「按误差聚焦」,样本效率提升明显,是 Rainbow 的核心组件之一。但它也引入超参($\alpha,\beta$)和实现复杂度,且对噪声奖励敏感——若 TD 误差本身就嘈杂,优先级会跟着抖动,效果打折。
+
+
+
+## 分布强化学习:学返回值的分布,而非其期望
+
+前面所有方法都把「在 $s$ 做 $a$ 有多好」压缩成**一个标量** $Q(s,a)=\mathbb E[R]$。但返回值 $R=\sum_t\gamma^t r_t$ 本是个**随机变量**——同一状态起,不同轨迹可能拿到很不一样的累计奖励。把它求期望,就把这条分布的**形状信息全丢了**:返回值是单峰还是双峰、有没有长尾、风险多大,期望都看不出来。**分布强化学习(distributional RL)** 干脆学返回值的**整个分布** $Z(s,a)$[1]。
+
+### 分布贝尔曼算子:分布的递推
+
+把标量贝尔曼 $Q=\mathbb E[r+\gamma Q']$ 升级到分布,得到**分布贝尔曼算子**——返回值分布满足[1]:
+
+$$
+Z(s,a)\ \stackrel{D}{=}\ r+\gamma\,Z(s',a^*)
+$$
+
+即「在 $s$ 做 $a$ 的返回值分布」$\stackrel{分布}{=}$「即时奖励 $r$」加「折扣后的下一状态返回值分布」。注意这是**分布意义上的等式**(同分布),不是数值相等——平移 $r$、缩放 $\gamma$ 改变的是整条分布的形状与位置。理论上,策略评估下该算子在 Wasserstein 距离下是收缩的;但**控制设定下**(目标策略 $a^*$ 在变)一般不再收缩,这是分布 RL 的「distributional instability」——不过经验上,函数逼近的近似设定反而压住了这个不稳定性,分布 RL 仍稳得好用[1]。
+
+### C51:用 51 个固定原子近似分布
+
+连续分布难参数化,**C51**(Categorical 51)[1] 把返回值分布离散成 $N=51$ 个等距**原子** $\{z_0,\dots,z_{50}\}$(支撑区间 $[V_\min,V_\max]$ 覆盖返回值的可能范围),网络对每个 $(s,a)$ 输出这 51 个原子上的**概率质量**(softmax)。
+
+麻烦在于:一步 Bellman 更新 $tz_j=r+\gamma z_j$ 会把原子挪到**支撑之外**的位置($tz_j$ 不一定落在某个 $z_k$ 上)。C51 的解法是**投影**:把每个 $tz_j$ 上的质量,按距离**分配给最近的两个支撑原子**[1]:
+
+$$
+\text{proj}(tz_j):\quad p_{\text{lo}} \mathrel{+}= p_j\cdot\frac{z_{\text{hi}}-tz_j}{\Delta z},\qquad p_{\text{hi}} \mathrel{+}= p_j\cdot\frac{tz_j-z_{\text{lo}}}{\Delta z}
+$$
+
+其中 $z_{\text{lo}},z_{\text{hi}}$ 是夹住 $tz_j$ 的两个相邻支撑原子,$\Delta z$ 是原子间距。超出 $[V_\min,V_\max]$ 的质量堆积到边界原子(截断)。损失就是预测分布与投影后目标分布的 **KL 散度**(等价于交叉熵)。下面拖动 $r$ 与 $\gamma$,看双峰的下一状态分布如何被平移并投影回固定支撑:
+
+<DistributionalReturnViz />
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# C51 类别投影演示:51 个原子,支撑 [-10, 10]
+N = 51
+Vmin, Vmax = -10.0, 10.0
+dz = (Vmax - Vmin) / (N - 1)
+support = np.linspace(Vmin, Vmax, N)
+
+# 下一状态分布:双峰(z=-4 与 z=3),正是分布 RL 保留多模态的强项
+def next_dist():
+    p = np.zeros(N)
+    for m in [-4, 3]:
+        p += 0.5 * np.exp(-0.5 * ((support - m) / 1.2) ** 2)
+    return p / p.sum()
+
+def project(next_d, r, gamma):
+    out = np.zeros(N)
+    for j in range(N):
+        if next_d[j] == 0: continue
+        tz = r + gamma * support[j]
+        if tz <= Vmin:   out[0]      += next_d[j]
+        elif tz >= Vmax: out[-1]     += next_d[j]
+        else:
+            b = (tz - Vmin) / dz
+            lo, hi = int(np.floor(b)), int(np.ceil(b))
+            if lo == hi: out[lo] += next_d[j]          # 整数 b:全给该原子
+            else:
+                out[lo] += next_d[j] * (hi - b)
+                out[hi] += next_d[j] * (b - lo)
+    return out
+
+nxt = next_dist()
+tgt = project(nxt, r=2.0, gamma=0.9)
+
+print(f"下一状态均值 E[Z']  = {np.dot(nxt, support):+.3f}")
+print(f"目标均值 r+γ·E[Z'] = {2.0 + 0.9*np.dot(nxt, support):+.3f}  (标准 DQN 只学这个标量)")
+print(f"投影后均值         = {np.dot(tgt, support):+.3f}  (分布 RL 保留整条分布)")
+print(f"质量守恒: {tgt.sum():.4f}")
+print("\\n-> 双峰被 r=2 平移、γ=0.9 压缩后,峰值从 z=-4/3 移到约 z=-1.6/4.7")
+`} />
+
+### QR-DQN 与 IQN:分位数表示
+
+C51 的固定支撑有个坑:返回值范围估错(实际超出 $[V_\min,V_\max]$)就被截断失真。**QR-DQN(Quantile Regression DQN)**[2] 换个参数化——学返回值分布的 $N$ 个**分位数** $\theta_1\le\cdots\le\theta_N$(对应概率 $\tau_i=i/N$),无需预设支撑范围。损失是**分位 Huber 损失**(对高估/低估不对称的 Huber,由 $\tau$ 控制不对称度):
+
+$$
+\mathcal L_\tau(\theta)=\rho_\tau^\kappa(\delta)=\begin{cases}\tfrac{1}{2}\delta^2 & |\delta|\le\kappa\\ \kappa(|\delta|-\tfrac{\kappa}{2}) & \text{otherwise}\end{cases}\ \text{,加权 }\begin{cases}\tau & \delta>0\\ 1-\tau & \delta\le 0\end{cases}
+$$
+
+**IQN(Implicit Quantile Networks)**[3] 更进一步:不固定 $N$ 个分位数,而是每次**采样** $\tau\sim U(0,1)$,用 $\cos(\pi\tau)$ 嵌入到网络里,学一个「给定 $\tau$ 输出对应分位数」的函数。这样能用任意精细的分位数估计,且自然支持风险敏感决策(按需偏向上分位或下分位)。
+
+上面 FQF-vs-QR-DQN 的 CodeRunner 只演示「分位落在哪」,并不含**分位回归的训练步**。把 QR-DQN 的核心更新拼出来其实很短——学 $N$ 个分位值,用分位 Huber 损失去逼近 Bellman 目标分位:
+
+```
+# QR-DQN 训练一步 伪代码 (Dabney et al. 2017)
+# 网络对每个 (s,a) 输出 N 个分位值 θ_i(s,a), 对应 τ_i=(i-0.5)/N
+a* = argmax_a  (1/N) Σ_i θ_i(s', a)        # 用分位均值当 Q 值,选贪心动作
+for j in range(N):
+    θ'_j = r + γ * θ_j(s', a*)              # N 个目标分位(无需固定支撑 [Vmin,Vmax])
+# 分位 Huber 损失:每对 (预测分位 i, 目标分位 j) 都算,τ 控制不对称惩罚
+loss = 0
+for i in range(N):
+    for j in range(N):
+        u = θ'_j - θ_i(s, a)                # 目标 - 预测
+        loss += ρ_Huber(u) * |τ_i - 1[u<0]|  # u<0 权重 1-τ_i, u>0 权重 τ_i
+minimize(loss / N)
+# IQN: 把固定的 τ_i 换成每步采样 τ~U(0,1),经 cos(πτ) 嵌入网络
+```
+
+对比 C51:C51 固定分位值(支撑原子)、学各原子的概率,更新要做投影 + KL;QR-DQN 反过来固定概率 $\tau_i$、学分位值,更新是分位回归、无需投影,也就绕开了「支撑范围估错被截断」的坑。
+
+### 三者对比
+
+| 维度 | C51 | QR-DQN | IQN |
+|---|---|---|---|
+| 表示 | 固定 51 原子类别分布 | $N$ 个固定分位数 | 隐式,采样 $\tau$ |
+| 支撑范围 | 需预设 $[V_\min,V_\max]$(估错则截断) | 无需(分位数自适应) | 无需 |
+| 损失 | KL/交叉熵投影 | 分位 Huber | 分位 Huber(采样 $\tau$) |
+| 优点 | 简单稳定 | 避开截断 | 任意精细 + 风险敏感 |
+| Atari | 优于 DQN | 优于 C51 | 当時 SOTA |
+
+> 💡 **为何分布更稳?** 三条主流解释:① **多模态返回值**被完整保留(标量期望会把双峰平均成一个不存在的中间值,误导策略);② **更丰富的梯度信号**(51 个概率而非 1 个标量,每步都纠正整条分布);③ **风险感知**(能区分「稳赚 5 块」与「一半概率赚 10、一半概率 0」——期望相同但风险迥异)。分布 RL 是 **Rainbow 六组件之一**,也是 QR-DQN/IQN 等 Atari SOTA 的核心。
+
+### FQF:全参数化分位函数
+
+C51 固定返回值学概率、QR-DQN 固定分位位置学分位值、IQN 随机采样分位位置——三者都只参数化了分布的**一侧**(x 轴或 y 轴)。**FQF(Fully Parameterized Quantile Function,Yang et al., 2019)[15]** 把另一侧也学起来:用两个网络**联合学「分位该放在哪里」(x 轴的 τ 位置)与「分位值是多少」(y 轴的 θ)**。
+
+- **Fraction proposal network**:输出一组非均匀的分位位置 $0<\tau_1<\cdots<\tau_N<1$——网络学到该把分位**集中在分布复杂的区段**(多峰处、方差大处),而不是均匀铺开;
+- **Quantile value network**:给定这些 $\tau_i$,输出对应的分位值 $\theta_i$;
+- 两个网络联合训练,fraction proposal 用「最小化 1-Wasserstein 距离」的目标自举更新(把分位往分布还刻画得不好的区段挪)。
+
+直觉:返回值分布若是双峰(一峰在 -4、一峰在 +3),均匀分位(QR-DQN)会在两峰之间的**谷底**(密度低、信息少)浪费分位,而 FQF 学到把分位集中到两个峰处,用同样的 $N$ 个分位把双峰描得更准。
+
+<CodeRunner language="python" title="FQF vs QR-DQN:分位位置的选择" defaultCode={`import numpy as np
+rng = np.random.default_rng(0)
+
+# 双峰返回分布:70% N(-4,0.8) + 30% N(3,1.0) —— 多模态正是分布 RL 的强项
+true = np.where(rng.random(20000) < 0.7, rng.normal(-4, 0.8, 20000), rng.normal(3, 1.0, 20000))
+N = 8
+def qvals(taus): return np.quantile(true, taus)
+
+# QR-DQN:均匀分位位置 τ_i = (i-0.5)/N
+tau_uniform = np.linspace(1/(2*N), 1 - 1/(2*N), N)
+# FQF:fraction proposal 学出的非均匀 τ —— 两峰处密集、谷底稀疏
+tau_fqf = np.array([0.05, 0.15, 0.30, 0.45, 0.60, 0.78, 0.88, 0.96])
+
+print("=== FQF(学位置) vs QR-DQN(固定均匀):分位如何分配 ===")
+print("真实返回分布:双峰 70% N(-4,0.8) + 30% N(3,1.0), N=8 个分位\\n")
+print(f"{'方法':<10} | 分位位置 τ                                | 分位值")
+print("-" * 88)
+print(f"{'QR-DQN':<10} | {np.round(tau_uniform, 3)} | {np.round(qvals(tau_uniform), 2)}")
+print(f"{'FQF':<10} | {np.round(tau_fqf, 3)} | {np.round(qvals(tau_fqf), 2)}")
+print()
+qv_u, qv_f = qvals(tau_uniform), qvals(tau_fqf)
+print(f"分位值落在左峰(<-2): QR-DQN {np.sum(qv_u<-2)} 个 / FQF {np.sum(qv_f<-2)} 个")
+print(f"分位值落在右峰(>1):  QR-DQN {np.sum(qv_u>1)} 个 / FQF {np.sum(qv_f>1)} 个")
+print()
+print("-> FQF 的 fraction proposal 学到:把分位集中到两个峰(密度高处),")
+print("   谷底(密度低、信息少)少放分位。QR-DQN 均匀 τ 在谷底浪费了分位。")
+print("   同样 N=8 个分位,FQF 在双峰处分辨率更高 —— 这就是「同时学位置+值」的优势。")
+`} />
+
+FQF 在 55 款 Atari 游戏上显著超越此前所有分布 RL 算法,刷新了非分布式智能体的 Atari Learning Environment 纪录[15]。它的局限是 fraction proposal 网络增加了计算与训练复杂度(每步要多一轮自举更新),推理也比 QR-DQN 慢。
+
+### 分位交叉与表示谱系
+
+QR-DQN/IQN/FQF 都用「分位值」参数化分布,有个共通隐患:**分位交叉**。分位函数在数学上必须**单调非降**($\tau_1<\tau_2 \Rightarrow \theta_{\tau_1}\le\theta_{\tau_2}$),但 QR-DQN 的 $N$ 个分位是**独立回归**的输出 head,各 head 之间没有单调约束——小批量梯度噪声让它们各自抖动,相邻分位可能交叉($\theta_{\tau_i}>\theta_{\tau_{i+1}}$),破坏分布合法性。
+
+<CodeRunner language="python" title="分位交叉问题演示" defaultCode={`import numpy as np
+rng = np.random.default_rng(0)
+
+# 分位交叉:QR-DQN 各分位独立回归(独立 head),无单调约束。
+# 真实 N(0,1),三分位 τ=0.25/0.5/0.75 真值单调非降:
+true_q = np.array([-0.674, 0.0, 0.674])
+
+N_runs = 2000
+sigma = 0.25  # 各 head 的小批量估计噪声
+
+# QR-DQN:三个分位独立带噪估计,无单调约束
+qr_crosses = 0
+for _ in range(N_runs):
+    est = true_q + rng.normal(0, sigma, 3)  # 各 head 独立抖动
+    if not (est[0] <= est[1] <= est[2]):     # 违反单调
+        qr_crosses += 1
+
+# NCQR:估计后强制单调(排序修正)
+ncqr_crosses = 0
+for _ in range(N_runs):
+    est = true_q + rng.normal(0, sigma, 3)
+    est = np.sort(est)  # 非交叉:排序保证单调
+    if not (est[0] <= est[1] <= est[2]):
+        ncqr_crosses += 1
+
+print("=== 分位交叉问题(QR-DQN 的隐患)===")
+print(f"真实 N(0,1),三分位 τ=0.25/0.5/0.75 真值 {true_q}(单调)\\n")
+print(f"模拟 QR-DQN 三个独立 head 带噪估计(σ={sigma}):")
+print(f"  {N_runs} 次中交叉(违反 θ_0.25≤θ_0.5≤θ_0.75)次数: {qr_crosses} ({qr_crosses/N_runs*100:.1f}%)")
+print(f"对比 NCQR(排序后强制单调): {N_runs} 次中交叉次数: {ncqr_crosses}")
+print()
+print("-> QR-DQN 各分位独立回归无单调约束,~{:.0f}% 概率交叉,".format(qr_crosses/N_runs*100))
+print("   破坏分位函数「单调非降」的合法性 → 对应分布密度在某些区段为负、argmax 策略不稳。")
+print("   NCQR(非交叉分位回归)加单调约束/排序修正后交叉率归零。")
+`} />
+
+**NCQR(Non-Crossing Quantile Regression,Zhou et al., 2020)**[16] 的解法是给 quantile network 加**单调约束**——或在输出层排序、或在损失里惩罚交叉——保证 $\theta_{\tau_1}\le\cdots\le\theta_{\tau_N}$。代价是损失一部分灵活性(排序修正引入额外偏差),但换来分布合法性与策略稳定性。
+
+另一条截然不同的路线是**参数化分布**:不离散化、不分位,而是直接学一个**连续参数化分布**去拟合返回值。代表是用 **Beta 分布混合**建模[17]——Beta 分布支撑有界 $[0,1]$、形状灵活(单峰/双峰/U 型都行),网络输出若干组 $(\alpha_k,\beta_k)$ 与混合权重,直接最大化返回值的对数似然。它的好处是**无截断、无投影、平滑连续**;局限是预设了分布族(Beta),若真实返回形状不在该族内会失配。
+
+至此,分布 RL 的**五条表示路线**谱系完整:
+
+| 表示路线 | 代表方法 | 参数化 | 关键优劣 |
+|---|---|---|---|
+| **类别分布** | C51 | 固定 51 原子,学概率 | 简单稳定;支撑估错则截断 |
+| **分位数** | QR-DQN | 固定均匀 τ,学分位值 | 避开截断;分位可能交叉 |
+| **隐式分位** | IQN | 采样 τ,学「τ→分位值」函数 | 任意精细 + 风险敏感;仍可能交叉 |
+| **全参数化** | FQF | 同时学 τ 位置 + 分位值 | 自适应集中分辨率;训练更复杂 |
+| **参数化分布** | ER-DQN(Beta) | 学连续分布的形状参数 | 平滑无截断;受限于预设分布族 |
+
+> 📌 **分布 RL 的演进逻辑**:从「固定 x 学 y」(C51)→「固定 y 学 x 反过来」(QR-DQN)→「采样 x 学 y」(IQN)→「同时学 x 与 y」(FQF),每一步都把「人为固定的那部分」交给网络去学,换取更精细的分布刻画。非交叉分位(NCQR)与参数化分布(ER-DQN)则是从**约束**与**连续化**两个正交方向补强。这条线至今仍是 Atari 等 benchmark 上最强 DQN 变体的核心。
+
+## 稀疏奖励与 HER:把失败变成功
+
+前面所有 DQN 变体都假设**奖励足够稠密**——Atari 每步都有得分,网格世界每步都有 -0.02。但现实里很多任务**奖励极度稀疏**:机器人要把方块推到指定位置,只有「推到了」给 1、其余全 0;机械臂要抓起物体,只有「抓住了」给 1。这种**稀疏二元奖励**对 DQN 是灾难——智能体随机探索几乎永远碰不到奖励,Q 值全 0、学不动。
+
+### 问题:随机探索摸不到奖励
+
+设想 6×6 网格,起点固定、每回合随机指定一个目标格,只有「到达目标」给 1、其余全 0。ε-greedy 探索要瞎撞多少步才能碰到目标?在 36 格里撞中 1 格,期望 ~36 步,而每回合上限往往只有 30-40 步——**绝大多数回合拿 0 奖励,replay buffer 里全是 $r=0$ 的转移,DQN 没有任何正信号可学**。这就是稀疏奖励的核心困境:不是算法不收敛,而是**探索根本采不到成功**。
+
+### 目标条件 RL 与通用价值函数
+
+解法的第一步是把「目标」从环境参数变成**策略的输入**——学一个**目标条件**的 $Q(s,a,g)$,其中 $g$ 是目标(如「到达状态 $g$」)。这样同一个网络就能服务所有目标,而不是每个目标学一张表。Schaul et al. 2015 的**通用价值函数(universal value function, UVF)** [5] 给了这个想法理论基础:不再为每个目标 $g$ 学一个独立的 $V^g(s)$,而是学一个通用 $V(s,g)$,把目标作为输入的一部分,$V^g(s)=V(s,g)$。关键好处是**泛化**——相似目标共享表征,训练时没见过的目标也能估出合理价值(因为网络学的是「从 $s$ 到 $g$ 的距离」这个函数,而非死记每个 $(s,g)$ 对)。
+
+目标条件的 Q-learning 更新式:
+
+$$
+Q(s,a,g)\;\leftarrow\;Q(s,a,g)+\alpha\big[r_g+\gamma\max_{a'}Q(s',a',g)-Q(s,a,g)\big]
+$$
+
+其中 $r_g=1$ 若 $s'=g$ 否则 $0$。但光有目标条件还不够——**如果探索采不到 $s'=g$ 的成功转移,$r_g$ 永远是 0,Q 还是学不动**。
+
+### HER:把失败 episode 的 goal 重标为实际末态
+
+**Hindsight Experience Replay(HER,Andrychowicz et al. 2017 [6])** 的洞见朴素到离谱:**既然「到达原始目标」的成功转移采不到,那就把「实际到达的状态」当作新目标**——失败 episode 里,智能体毕竟*到达了某个状态*,把这个实际末态 $g'$ 当作目标,那条本来全 0 奖励的轨迹立刻变成「成功到达 $g'$」的 $r=1$ 转移。
+
+具体做法:在 replay 时,对失败 episode 的转移 $(s,a,r=0,s',g)$,以一定概率(论文用 50%-80%)把目标**重标**为实际末态 $g'\leftarrow s'$,并相应把奖励重算 $r'\leftarrow 1$ 若 $s'=g'$ 否则 $0$(重标后必为 1):
+
+$$
+(s, a, r{=}0, s', g) \;\longrightarrow\; (s, a, r'{=}1, s', g'{=}s')
+$$
+
+这些重标后的「人造成功」转移喂给目标条件 Q-learning,网络就学到了「从 $s$ 怎么走到 $s'$」的通用能力——而**任何目标都是某个 $s'$**,所以泛化后就能到达任意目标。妙处在于:HER 不改算法、不改网络、只改**数据**——给失败 episode 也提取出学习信号,把「探索采不到的成功」用 hindsight 补出来。
+
+### 为什么这能泛化
+
+直觉:重标后网络学的不再是「怎么到固定的 $g$」(采不到),而是「怎么从 $s$ 到 $s'$」(每条轨迹都给出了一个 $(s\to s')$ 样本)。这是一个**对所有状态对都有定义**的函数,而原始目标 $g$ 只是其中一个状态——学到了通用的「点到点」能力,「到 $g$」自然被覆盖。配合 UVF 的泛化,即便 $g$ 在训练里没被重标过,网络也能从相似状态对内插出 $Q(s,a,g)$。这本质上是一种 **implicit curriculum**:早期智能体只能到达近处状态,HER 就先教它「走到近处」;随着策略变好能到更远处,HER 教更远的目标——难度自动爬升,无需手工设计课程。
+
+下面这个演示在 6×6 网格上对比 baseline(普通 replay)与 HER(80% 重标),看 HER 如何在稀疏奖励下把样本效率拉起来:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(0)
+
+# 6x6 网格 HER 演示:起点固定 (0,0),每回合随机目标 g。
+# 稀疏二元奖励:到达 g 给 1,否则 0。目标条件 Q[s, g, a]。
+N = 6
+START = (0, 0)
+A4 = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+def step(r, c, a):
+    dr, dc = A4[a]
+    return (max(0, min(N-1, r+dr)), max(0, min(N-1, c+dc)))
+
+def train(her, episodes=500, alpha=0.2, gamma=0.95, buf_size=2000, batch=32, eps=0.15):
+    Q = np.zeros((N*N, N*N, 4))   # (state, goal, action)
+    buf = []; succ = []
+    for ep in range(episodes):
+        r, c = START
+        g = int(rng.integers(N*N))      # 每回合随机目标
+        total = 0.0
+        for _ in range(40):
+            s = r*N + c
+            a = int(rng.integers(4)) if rng.random() < eps else int(np.argmax(Q[s, g]))
+            nr, nc = step(r, c, a)
+            ns = nr*N + nc
+            reward = 1.0 if ns == g else 0.0
+            total += reward
+            buf.append((s, a, reward, ns, g))
+            if len(buf) > buf_size:
+                buf.pop(int(rng.integers(len(buf))))
+            r, c = nr, nc
+            if ns == g:
+                break
+        succ.append(1.0 if total > 0 else 0.0)
+        if len(buf) >= batch:
+            idx = rng.choice(len(buf), size=batch, replace=False)
+            for i in idx:
+                sb, ab, rb, nsb, gb = buf[i]
+                if her and rng.random() < 0.8:
+                    gb2 = nsb                      # HER: 目标重标为实际末态
+                    rb2 = 1.0                      # 重算奖励(必为 1)
+                else:
+                    gb2, rb2 = gb, rb
+                target = rb2 + gamma * (0 if nsb == gb2 else np.max(Q[nsb, gb2]))
+                Q[sb, gb2, ab] += alpha * (target - Q[sb, gb2, ab])
+    ma = np.convolve(succ, np.ones(50)/50, mode='valid')
+    return ma, Q
+
+base, Qb = train(her=False)
+herq, Qh = train(her=True)
+print("6x6 网格, 起点固定, 每回合随机目标, 稀疏二元奖励:")
+print(f"  baseline  前50回合成功率: {base[0]:.2f}  末50回合: {base[-1]:.2f}")
+print(f"  HER       前50回合成功率: {herq[0]:.2f}  末50回合: {herq[-1]:.2f}")
+print(f"  baseline  学到的非零 Q 数: {np.count_nonzero(Qb)}")
+print(f"  HER       学到的非零 Q 数: {np.count_nonzero(Qh)}")
+print()
+# 成功率随训练回合演化的 sparkline(每个 # ≈ 10%, 50 个采样点)
+W = 50
+bi = np.linspace(0, len(base)-1, W).astype(int)
+hi = np.linspace(0, len(herq)-1, W).astype(int)
+bs = [base[i] for i in bi]; hs = [herq[i] for i in hi]
+def spark_row(vals, label):
+    return label + " " + " ".join("#" * max(1, int(v*10)) for v in vals)
+print("成功率随训练回合演化(每个 # ≈ 10%, 50 采样点):")
+print(spark_row(bs, "baseline"))
+print(spark_row(hs, "HER     "))
+print()
+print("-> baseline 随机探索几乎采不到 '到达 g' 的成功转移 -> Q 大半为 0, 学不动")
+print("-> HER 把失败 episode 的 goal 重标为实际末态 -> 每条轨迹都产生 r=1 的人造成功")
+print("   -> 网络学到通用的 '点到点' 能力, 泛化到任意目标, 样本效率显著提升")
+`} />
+
+> 💡 **HER 的适用边界**:① 必须是**目标条件**任务(能从「到达某状态」构造奖励,如机器人位姿目标);② **兼容任意 off-policy 算法**(DQN/DDPG/SAC),因为它只改 replay buffer 的数据,不改算法;③ **目标必须是状态空间子集**(能把 $g$ 设为某个 $s'$ 才能重标);④ 奖励越稀疏、探索越难,HER 收益越大——稠密奖励任务里 HER 的 relabel 信号被真实奖励淹没,收益有限。Andrychowicz et al. 在机器人推动/滑动/抓放任务上,HER 让原本完全学不会的稀疏奖励任务数次就能学会,是稀疏奖励 RL 的里程碑 [6]。
+
+> 🔗 **与 UVF 的关系**:HER 是工程 trick(重标 goal 造数据),UVF [5] 是其理论基础(为何 $V(s,g)$ 能泛化到未见目标)。HER 之所以能从「到达 $s'$」泛化到「到达 $g$」,正是依赖 UVF 的目标条件函数泛化能力——没有 UVF 的泛化,HER 学到的只是孤立状态对的查表,无法迁移。两者合起来:HER 提供数据,UVF 提供泛化,共同攻克稀疏奖励。
+
+### bit-flipping:HER 最经典的 toy
+
+Andrychowicz et al. 2017 用一个极简的 toy 把 HER 的价值讲得最清楚——**bit-flipping 环境**:状态是 $n$ 位二进制串 $s\in\{0,1\}^n$,动作是「翻转某一位」$a\in\{1,\dots,n\}$,目标 $g$ 也是 $n$ 位串,奖励 $r=0$ 若 $s'=g$ 否则 $-1$,回合最多 $n$ 步。这本质是个 $n$ 位组合锁:**只有把所有位都翻到目标值才给非负奖励,中间任何状态都是 -1**。
+
+这个 toy 为何致命?**随机策略命中目标的概率是 $2^{-n}$**——$n=5$ 时 3%、$n=10$ 时千分之一、$n=20$ 时百万分之一。每回合只 $n$ 步,期望命中次数 $\approx n\cdot 2^{-n}$ 随 $n$ 指数衰减。于是裸 DQN 的 replay buffer 里**几乎全是 $r=-1$ 的转移**,没有任何正向梯度信号——Q 值全 -1、学不动。这正是稀疏奖励的核心病灶:**不是算法不收敛,是探索采不到成功,replay 里没有正信号**。
+
+HER 的解法在这玩具上效果最直观:失败轨迹(没到 $g$)的每一步,把 goal 重标为「这步实际到达的 $s'$」,奖励重算成 $0$(重标后必「成功」)——**于是每条 transition 都成了正信号**,buffer 里正信号比例从 $2^{-n}$ 跃升到 $1.0$,无论 $n$ 多大都有密集学习信号。论文实测:裸 DQN 在 $n\gtrsim 20$-30 时完全学不动,DQN+HER 解到 $n=50$。
+
+下面演示不训 Q 表($2^n$ 状态对大 $n$ 不可行),而是直接统计**buffer 里正信号($r\ne -1$)的比例**——这是 DQN 能否学的根本前提:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(0)
+
+# bit-flipping: n 位组合锁, 稀疏二元奖励 (达标=0, 否则=-1)
+#   state = n bit, action = 翻转一位, goal = 目标 n bit
+#   随机策略命中概率 2^-n, n 大时 buffer 里几乎全是 r=-1 -> DQN 学不动
+#   HER: 失败轨迹重标 goal 为实际末态 -> 每条 transition 都成正信号
+
+def run_episode(n):
+    s = rng.integers(0, 2, size=n)
+    g = rng.integers(0, 2, size=n)
+    traj = []
+    for _ in range(n):
+        a = int(rng.integers(n))
+        s2 = s.copy(); s2[a] = 1 - s2[a]
+        done = np.array_equal(s2, g)
+        r = 0.0 if done else -1.0
+        traj.append((s.copy(), a, r, s2.copy(), done))
+        s = s2
+        if done:
+            break
+    return traj
+
+print("=== bit-flipping: n 位组合锁, 稀疏二元奖励 (达标=0, 否则=-1) ===")
+print()
+print(f"{'n':>3} {'2^-n (随机命中)':>18} {'baseline 正信号比例':>22} {'HER 正信号比例':>18}")
+for n in [5, 8, 10, 12, 15]:
+    base_pos = 0; base_tot = 0; her_tot = 0
+    for _ in range(200):
+        traj = run_episode(n)
+        for (s, a, r, s2, done) in traj:
+            base_tot += 1
+            if r != -1.0:
+                base_pos += 1
+            her_tot += 1
+    base_ratio = base_pos / base_tot if base_tot else 0
+    print(f"{n:>3} {2**(-n):>18.2e} {base_ratio:>22.4f} {1.0:>18.4f}")
+print()
+print("解读: n 增大 -> 随机命中 2^-n 指数下降 -> baseline 正信号比例趋近 0;")
+print("      DQN 从全 -1 的 buffer 里学不到东西 (梯度为 0).")
+print("      HER 把每条失败轨迹重标成 '成功到达实际末态' -> 正信号比例恒为 1.0,")
+print("      无论 n 多大都有密集学习信号, 这是 HER 能 scale 到大 n 的根本原因.")
+`} title="bit-flipping: 为何裸 DQN 学不动而 HER 能 scale" />
+
+### 四种 relabeling 策略: $\tilde g$ 取自何处
+
+HER 的重标机制里有一个实践者必须调的旋钮:**重标的目标 $\tilde g$ 从哪里取?** 论文对比了四种策略:
+
+| 策略 | $\tilde g$ 取自 | 直觉 | 适用 |
+|---|---|---|---|
+| **final** | 轨迹末状态 $f_g(s_T)$ | 「整条轨迹最终到了哪,就把那当目标」 | 确定性任务、单目标 |
+| **future** | 同一 episode 内 $t$ 之后某状态的 $f_g$($k$ 个) | 「中间到过的状态也可当目标」 | 通用默认,$k=4$ 常用 |
+| **episode** | 同一 episode 内任意状态(含 $t$ 之前) | 「这条轨迹碰过的状态都行」 | 长轨迹、状态空间大 |
+| **random** | 整个数据集任意状态 | 「任何见过的状态都当目标」 | 状态空间全覆盖 |
+
+**final** 最简单但信号最少(每条轨迹只产 1 个重标目标);**future** 是论文默认推荐——每条 transition 重标 $k$ 个未来目标($k=4$),在「目标必须从轨迹中段取」(而非末态)的随机/动态环境里更鲁棒,因为末态可能因 stochastic 动力学飘到无关区域;**episode/random** 信号最多但可能引入「与当前策略无关的遥远目标」拖慢学习。
+
+实践规律:**确定性 + 短轨迹用 final 就够**(机器人精准到位);**stochastic 动力学 + 长轨迹用 future $k=4$**(覆盖中段、避免末态噪声);**episode/random** 在状态空间巨大、单条轨迹覆盖不足时才考虑。bit-flipping 这类确定性 toy 用 final 即可——末态就是「这局翻到的最终位串」,直接当目标。
+
+### 为何必须 off-policy
+
+HER 一个常被忽略但关键的前提:**它只能配 off-policy 算法**(DQN/DDPG/SAC),不能配 on-policy(PPO/REINFORCE)。原因在 relabel 改变了 MDP:
+
+- 原始 transition $(s,a,r_g,s',g)$ 来自「目标为 $g$」的 MDP,行为策略 $\pi_\beta(\cdot\mid s,g)$ 按 $g$ 采样;
+- 重标后 $(s,a,r_{\tilde g},s',\tilde g)$ 变成「目标为 $\tilde g$」的**另一个 MDP** 的数据——但动作 $a$ 当初可不是按 $\tilde g$ 选的。
+
+on-policy 方法要求 buffer 里的动作来自**当前要评估/改进的策略**,重标改了 $g$ 就破坏了这个一致性($a$ 不是 $\pi(\cdot\mid s,\tilde g)$ 采的),importance ratio 无法追溯。而 off-policy 方法(DQN 的 Q-learning、DDPG/SAC 的确定性策略梯度)只要求 transition 是**某个行为策略**产生的、能算 TD target 即可——重标后的 $(s,a,r_{\tilde g},s',\tilde g)$ 仍是合法的 off-policy transition,Q-learning 照常 $\max_{a'}Q(s',a',\tilde g)$。所以 HER 的「改数据不改算法」本质是「改了 MDP 但靠 off-policy 容忍行为策略与目标策略不一致」——这也是它天然落在价值方法(DQN)篇的原因。
+
+## UVF 与 successor features:从目标条件到任务迁移
+
+上一节把 UVF 当成 HER 的「理论基础」一句话带过,但 UVF 本身是个深刻的思想:它把价值函数从「一张表」变成「两个向量的内积」,从而**参数从 $O(|S|\cdot|G|)$ 降到 $O(d(|S|+|G|))$**——这背后的低秩结构,以及它衍生出的 **successor features(后继特征)** 与**零样本任务迁移**,是现代 RL 表征学习的主干之一。本节展开讲。
+
+### UVFA:价值矩阵是(近似)低秩的
+
+Schaul et al. 2015 的 **UVFA(Universal Value Function Approximators)** [5] 把目标条件价值 $V(s,g)$ 写成两个嵌入的内积:
+
+$$
+V(s,g)\;\approx\;\sigma\!\big(\boldsymbol\phi(s)^\top\boldsymbol\psi(g)\big)
+$$
+
+$\boldsymbol\phi(s)\in\mathbb R^d$ 是状态嵌入,$\boldsymbol\psi(g)\in\mathbb R^d$ 是目标嵌入,$\sigma$ 是单调非线性(常取恒等)。把所有 $(s,g)$ 对的价值排成一张**价值矩阵** $\mathbf V\in\mathbb R^{|S|\times|G|}$,$V_{s,g}=V^*(s,g)$。关键定理:**若 $V^*(s,g)=\boldsymbol\phi(s)^\top\boldsymbol\psi(g)$ 能用 $d$ 维嵌入分解,则 $\mathrm{rank}(\mathbf V)\le d$**;反之 $\mathbf V$ 秩为 $r$ 时存在 $r$ 维嵌入精确分解。
+
+这跟**矩阵补全**(Netflix 猜电影)是同一回事:不用看全每个 $(s,g)$ 对,只要观察 $O(d\log|G|)$ 个目标的价值,就能**内插出整个矩阵**——因为低秩结构是天然的隐式正则。参数量从查表的 $O(|S|\cdot|G|)$ 降到 $O(d(|S|+|G|))$,这就是「**相似目标共享表征、训练没见过的目标也能估出合理价值**」的数学根基,也是 HER 能泛化的真正原因。
+
+### successor features:把「转移统计」与「奖励」解耦
+
+UVFA 处理的是**目标**变化($g$ 不同)。Barreto et al. 2017 的 **successor features(SF)** [7] 处理的是更一般的**任务**变化——奖励函数变了,但环境动力学不变。它的起点是 Dayan 1993 的**后继表示(successor representation, SR)**:对固定策略 $\pi$,矩阵 $\mathbf M_\pi$ 记录「从 $s$ 出发,期望折扣访问各状态的次数」:
+
+$$
+M_\pi(s,s')=\mathbb E_\pi\!\left[\sum_{k=0}^{\infty}\gamma^k\mathbf 1[s_{t+k}=s']\mid s_t=s\right],\qquad \mathbf M_\pi=\mathbf I+\gamma\mathbf P_\pi\mathbf M_\pi
+$$
+
+直觉:$M_\pi(s,s')$ 编码「从 $s$ 沿 $\pi$ 走,会多频繁到 $s'$」——把**转移统计**从**奖励**里剥离出来。
+
+后继特征是 SR 的特征版:当奖励能线性分解 $r(s,a)=\boldsymbol\phi(s,a)^\top\boldsymbol w$(特征 $\boldsymbol\phi$ 乘任务权重 $\boldsymbol w$),把 SR 的「状态占用」换成「特征占用」:
+
+$$
+\boldsymbol\psi_\pi(s,a)=\mathbb E_\pi\!\left[\sum_{k=0}^{\infty}\gamma^k\boldsymbol\phi(s_{t+k},a_{t+k})\mid s_t=s,a_t=a\right],\qquad \boldsymbol\psi_\pi(s,a)=\boldsymbol\phi(s,a)+\gamma\,\mathbb E_{s'}\!\big[\boldsymbol\psi_\pi(s',\pi(s'))\big]
+$$
+
+$\boldsymbol\phi$ 退化成 one-hot 状态指示时,SF 就还原成 SR。SF 的杀手锏在于**价值函数干净地因式分解**:
+
+$$
+Q^\pi(s,a)\;=\;\boldsymbol\psi_\pi(s,a)^\top\boldsymbol w
+$$
+
+这由期望线性直接得到:折扣累计奖励 $\sum\gamma^k r=\big(\sum\gamma^k\boldsymbol\phi\big)^\top\boldsymbol w$,前一个括号正是 $\boldsymbol\psi_\pi$。
+
+### 零样本任务迁移:只换个 $\boldsymbol w$,不重学 $\boldsymbol\psi$
+
+分解 $Q=\boldsymbol\psi^\top\boldsymbol w$ 的迁移含义是:**动力学不变、只奖励变了的新任务,只需拿已有的 $\boldsymbol\psi_\pi$ 点乘新的 $\boldsymbol w'$,立刻得到新任务的 Q——不用重学**。更进一步,**广义策略改进(GPI)** 能把多个旧任务的策略组合起来:对当前任务 $\boldsymbol w$,用每个旧任务的 $\boldsymbol\psi_{\pi_i}$ 算出 $Q^{\pi_i}(s,a)=\boldsymbol\psi_{\pi_i}^\top\boldsymbol w$,取所有策略里最大的动作 $\arg\max_a\max_i Q^{\pi_i}(s,a)$——这比单策略改进严格更强,且**零额外学习** [7]。
+
+下面这个演示同时验证两件事:**(1) SF 分解 $Q=\boldsymbol\psi^\top\boldsymbol w$ 与直接 Q-learning 学到的 Q 完全一致;(2) 任务迁移时只换 $\boldsymbol w$、不重学 $\boldsymbol\psi$,新任务 Q 立刻正确**;同时给出 UVFA 低秩结构的参数节省:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(0)
+
+# 5 状态链,两端吸收。动力学固定,奖励线性分解 r(s,a) = phi(s,a) . w
+N, NA, GAMMA = 5, 2, 0.9
+def step(s, a):
+    if s == 0 or s == N-1: return s
+    return max(0, s-1) if a == 0 else min(N-1, s+1)
+def phi(s, a):                     # 3 维特征: [向左指示, 向右指示, 中间状态指示]
+    v = np.zeros(3)
+    v[0] = 1.0 if a == 0 else 0.0
+    v[1] = 1.0 if a == 1 else 0.0
+    v[2] = 1.0 if 0 < s < N-1 else 0.0
+    return v
+
+w_A = np.array([0.0, 1.0, 0.1])    # 任务 A: 偏向右走 + 中间小奖
+w_B = np.array([1.0, 0.0, 0.1])    # 任务 B: 偏向左走 + 中间小奖 (只奖励变, 动力学不变)
+
+# --- 学后继特征 psi(s,a): 只依赖动力学, 任务无关 ---
+psi = np.zeros((N, NA, 3)); alpha = 0.05
+for ep in range(20000):
+    s = int(rng.integers(N))
+    for _ in range(50):
+        a = int(rng.integers(NA)); ns = step(s, a)
+        psi[s,a] += alpha * (phi(s,a) + GAMMA*psi[ns].mean(axis=0) - psi[s,a])
+        s = ns
+        if s==0 or s==N-1: break
+
+# --- Q via SF: Q(s,a) = psi(s,a) . w ---
+Q_A_sf = psi @ w_A
+Q_B_sf = psi @ w_B        # 任务 B: 零样本迁移, 只换 w, 不重学 psi
+
+# --- 直接 Q-learning 学每个任务 (作 ground truth) ---
+def learn_Q(w, seed):
+    r = np.random.default_rng(seed); Q = np.zeros((N, NA))
+    for ep in range(20000):
+        s = int(r.integers(N))
+        for _ in range(50):
+            a = int(r.integers(NA)); ns = step(s, a); rw = phi(s,a) @ w
+            Q[s,a] += alpha * (rw + GAMMA*Q[ns].mean(axis=0) - Q[s,a])
+            s = ns
+            if s==0 or s==N-1: break
+    return Q
+Q_A_dir = learn_Q(w_A, 1); Q_B_dir = learn_Q(w_B, 2)
+
+print("任务 A (w=[0,1,0.1], 偏右):")
+print(f"  直接 Q-learning : {np.round(Q_A_dir,2).tolist()}")
+print(f"  SF (psi.w)      : {np.round(Q_A_sf,2).tolist()}")
+print(f"  max|diff|       : {np.abs(Q_A_dir-Q_A_sf).max():.4f}")
+print()
+print("任务 B (w=[1,0,0.1], 偏左) —— 零样本迁移: 只换 w, 不重学 psi:")
+print(f"  直接 Q-learning : {np.round(Q_B_dir,2).tolist()}")
+print(f"  SF (psi.w_B)    : {np.round(Q_B_sf,2).tolist()}")
+print(f"  max|diff|       : {np.abs(Q_B_dir-Q_B_sf).max():.4f}  (-> 分解正确, 迁移无需重学)")
+print()
+
+# --- UVFA 低秩结构: 价值矩阵 V(s,g) = phi(s).psi(g) 参数节省 ---
+NS, NG, D = 20, 30, 3
+phi_s = rng.normal(size=(NS, D)); psi_g = rng.normal(size=(NG, D))
+V = phi_s @ psi_g.T                 # 真实 rank = D
+params_uvfa = D * (NS + NG)
+params_table = NS * NG
+print(f"UVFA 低秩: 价值矩阵 V(s,g)=phi(s).psi(g), shape ({NS},{NG}), rank={np.linalg.matrix_rank(V)}")
+print(f"  UVFA 参数 = d*(NS+NG) = {D}*({NS}+{NG}) = {params_uvfa}")
+print(f"  查表参数 = NS*NG = {NS}*{NG} = {params_table}")
+print(f"  节省 {100*(1-params_uvfa/params_table):.0f}% (rank {D} << min(NS,NG)={min(NS,NG)})")
+print(f"  泛化: 观察 O(d*log NG)={int(np.ceil(D*np.log(NG)))} 个目标 -> 恢复全部 {NG} 个目标")
+`} />
+
+跑一下会看到两件事:**(1) 任务 A 里 SF 分解 $\psi^\top\boldsymbol w$ 与直接 Q-learning 的 Q 完全一致(max 误差 ≈0);(2) 任务 B 零样本迁移——只换 $\boldsymbol w$、不重学 $\boldsymbol\psi$,新任务 Q 立刻正确(max 误差 ≈0)**。同时 UVFA 低秩结构用 150 参数 vs 查表 600(节省 75%),rank 3 ≪ 20 个状态——这就是「观察 $O(d\log|G|)$ 个目标就能内插出整个价值矩阵」的实证。
+
+下面这个交互演示把「换 $\boldsymbol w$、不重学 $\boldsymbol\psi$」做成可视的:切换任务 A/B,看 Q 条形与贪婪策略箭头随之翻转,而右侧 $\boldsymbol\psi$ 面板纹丝不动。4 状态链,$\boldsymbol\psi_\pi(s,a)$ 用均匀策略 TD 学得(任务无关),两个任务同动力学只奖励变——任务 A 偏右、任务 B 偏左,策略随之整体翻转:
+
+<SuccessorFeatureViz />
+
+### GPI 的两个定理:不劣于任一源策略,且能 leapfrog 严格超越
+
+上面把 GPI 写成一句「取所有策略里最大的动作」。但 Barreto et al. 2017 [7] 给了两个更强的保证,值得展开:
+
+**定理 1(广义策略改进)**:设已有 $n$ 个策略 $\pi_1,\ldots,\pi_n$,其近似价值 $\tilde Q^{\pi_i}$ 满足 $|Q^{\pi_i}(s,a)-\tilde Q^{\pi_i}(s,a)|\le\epsilon$。定义 GPI 策略
+
+$$
+\pi(s)\in\operatorname*{arg\,max}_a\,\max_i\,\tilde Q^{\pi_i}(s,a)
+$$
+
+则它在新任务上的回报满足
+
+$$
+Q^{\pi}(s,a)\;\ge\;\max_i\,Q^{\pi_i}(s,a)\;-\;\frac{2}{1-\gamma}\,\epsilon
+$$
+
+当 $\epsilon\to0$(价值估得准),GPI 策略**不劣于任一源策略**——不管新任务是什么,只要源策略池里有一个还行的,GPI 就不会比它差。这是「迁移至少不伤」的形式化保证。
+
+**leapfrog(严格超越)**:更强的是,GPI 能**严格优于所有源策略**——不是只匹配最优源策略,而是 leapfrog 超越。机制是「逐状态取最优源策略拼接」:若不同源策略在不同状态各自最优(即 $\arg\max_i\max_a\tilde Q^{\pi_i}(s,a)$ 在 $s$ 与 $s'$ 处落到不同 $i$),GPI 在每个状态挑那个状态最强的源策略的动作,拼起来就严格优于任何一个「全程单一」的源策略。直觉:三个臭皮匠(各有所长的源策略)拼成一个诸葛亮(GPI)。
+
+**定理 2(迁移上界)**:GPI 策略与新任务最优 $\pi_i^*$ 的差距被**任务向量距离**上界:
+
+$$
+Q_i^{\pi_i^*}(s,a)-Q^{\pi}_i(s,a)\;\le\;\frac{2}{1-\gamma}\Bigl(\boldsymbol\phi_{\max}\,\min_j\|\mathbf w_i-\mathbf w_j\|+\epsilon\Bigr)
+$$
+
+其中 $\boldsymbol\phi_{\max}=\max_{s,a}\|\boldsymbol\phi(s,a)\|$。关键是 $\min_j\|\mathbf w_i-\mathbf w_j\|$——新任务 $\mathbf w_i$ 与**最近的源任务** $\mathbf w_j$ 的距离。距离越小上界越紧:**见过相似任务就迁移得好**,这是「相似性迁移」的形式化。配合 SF,迁移退化成估 $\mathbf w_i$ 的监督学习($\boldsymbol\psi$ 模块跨任务复用),$\mathbf w_i$ 维度通常远小于状态空间,几条轨迹就能估准。
+
+下面这个 toy 同时验证定理 1(不劣于源策略)与 leapfrog(严格超越):
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 2 状态 x 2 动作 toy。动力学固定, 奖励线性 r = phi(s,a) . w
+# s0: a0 留 s0, a1 进 s1;  s1: a0 回 s0, a1 留 s1
+NS, NA, GAMMA = 2, 2, 0.9
+def step(s, a):
+    return 0 if a == 0 else 1   # a0 -> s0, a1 -> s1 (两状态都一样)
+
+def phi(s, a):
+    v = np.zeros(3)
+    v[0] = 1.0 if (s == 0 and a == 1) else 0.0   # 在 s0 向右进 s1
+    v[1] = 1.0 if (s == 1 and a == 0) else 0.0   # 在 s1 向左回 s0
+    v[2] = 1.0 if (s == 1 and a == 1) else 0.0   # 留在 s1
+    return v
+
+# 两源任务 -> 两源策略 (各有所长)
+# pi1 总取 a1: 在 s0 强(进 s1), 在 s1 弱(留 s1)
+# pi2 总取 a0: 在 s0 弱(留 s0), 在 s1 强(回 s0)
+def pi1(s): return 1
+def pi2(s): return 0
+
+# 解析算 psi_pi: psi_pi(s,a) = E[sum gamma^t phi(s_t,a_t) | s_0=s, a_0=a, pi]
+def compute_psi(policy):
+    psi = np.zeros((NS, NA, 3))
+    for _ in range(5000):
+        for s in range(NS):
+            for a in range(NA):
+                ns = step(s, a); a_next = policy(ns)
+                psi[s, a] = phi(s, a) + GAMMA * psi[ns, a_next]
+    return psi
+psi1 = compute_psi(pi1); psi2 = compute_psi(pi2)
+
+# 新任务 w_new: 同时奖励 's0向右' + 's1向左' -> 需在 s0 取 a1, 在 s1 取 a0
+w_new = np.array([1.0, 1.0, 0.0])
+
+# 各源策略在新任务下的 Q (用 SF 分解: Q = psi . w)
+Q_pi1 = psi1 @ w_new   # shape (NS, NA)
+Q_pi2 = psi2 @ w_new
+
+# GPI: pi_GPI(s) = argmax_a max_i Q^pi_i(s,a)
+def pi_gpi(s):
+    return int(np.argmax(np.maximum(Q_pi1[s], Q_pi2[s])))
+
+def policy_return(policy, w, s0=0, H=50):
+    s = s0; G = 0.0; t = 0
+    for _ in range(H):
+        a = policy(s); G += (GAMMA**t) * (phi(s,a) @ w)
+        s = step(s, a); t += 1
+    return G
+
+R_pi1 = policy_return(pi1, w_new)
+R_pi2 = policy_return(pi2, w_new)
+R_gpi = policy_return(pi_gpi, w_new)
+
+print("=== leapfrog: GPI 严格超越所有源策略 ===")
+print(f"新任务 w_new = {w_new.tolist()} (同时奖励 's0向右' + 's1向左')")
+print(f"  -> 最优策略: s0 取 a1, s1 取 a0  (单一源策略都做不到)\\n")
+print(f"  pi1 (总 a1): s0 强(进s1), s1 弱(留s1) — 拿不到 's1向左' 奖励")
+print(f"  pi2 (总 a0): s0 弱(留s0), s1 强(回s0) — 拿不到 's0向右' 奖励\\n")
+print(f"{'策略':>6} {'s0动作':>7} {'s1动作':>7} {'新任务回报':>12}")
+print(f"{'pi1':>6} {pi1(0):>7} {pi1(1):>7} {R_pi1:>12.4f}")
+print(f"{'pi2':>6} {pi2(0):>7} {pi2(1):>7} {R_pi2:>12.4f}")
+print(f"{'GPI':>6} {pi_gpi(0):>7} {pi_gpi(1):>7} {R_gpi:>12.4f}")
+print()
+print(f"max(R_pi1, R_pi2) = {max(R_pi1, R_pi2):.4f}   (定理1: GPI >= 此值 - 0, epsilon=0)")
+print(f"R_gpi              = {R_gpi:.4f}")
+print(f"leapfrog 增量      = {R_gpi - max(R_pi1, R_pi2):+.4f}   (>0 => 严格超越所有源策略)")
+print()
+print("机制: pi1 在 s0 最优(取 a1), pi2 在 s1 最优(取 a0);")
+print("      GPI 逐状态取最优源策略 -> s0 用 pi1 的 a1, s1 用 pi2 的 a0;")
+print("      拼接后两状态都最优 -> 严格优于任一单一源策略 (leapfrog).")
+print()
+print("迁移上界 (定理2): ||w_new - w_1|| = {:.3f}, ||w_new - w_2|| = {:.3f}".format(
+    np.linalg.norm(w_new - np.array([1.,0.,0.])), np.linalg.norm(w_new - np.array([0.,1.,0.]))))
+print("  min 距离 = 1.000 -> 上界 2/(1-0.9) * (phi_max * 1.0) = 20 * phi_max")
+print("  (toy 简单, 上界松; 真实场景任务相近时上界紧, 迁移质量高)")
+`} title="GPI leapfrog: 严格超越所有源策略" />
+
+跑一下会看到 GPI 回报($\approx9.95$)严格高于两源策略($1.0$ / $0.0$)——定理 1 的「不劣于任一源策略」成立($9.95\ge\max(1.0,0.0)$),且 leapfrog 严格超越($+8.95$)。机制正是「逐状态取最优源策略拼接」:$\pi_1$ 在 $s_0$ 强(取 $a_1$ 进 $s_1$)、$\pi_2$ 在 $s_1$ 强(取 $a_0$ 回 $s_0$),GPI 在 $s_0$ 用 $\pi_1$、在 $s_1$ 用 $\pi_2$,拼起来两状态都最优,而任一单一源策略必有一个状态犯错。**这就是「三个臭皮匠拼成诸葛亮」的形式化**——单源策略各有所短,GPI 把各所长拼接,严格超越全部。
+
+### 谱系:SR → SF → UVFA,一条「解耦表征与奖励」的主线
+
+| 方法 | 解耦了什么 | 形式 | 迁移对象 |
+|---|---|---|---|
+| **后继表示 SR**(Dayan 1993) | 转移统计 vs 奖励 | $M_\pi(s,s')$ 状态占用,$V=M_\pi^\top r$ | 换奖励 $r$ 重算 $V$,不重学 $M$ |
+| **后继特征 SF**(Barreto 2017 [7]) | 特征占用 vs 任务权重 | $\boldsymbol\psi_\pi(s,a)$,$Q=\boldsymbol\psi^\top\boldsymbol w$ | 换 $\boldsymbol w$ 重算 $Q$,不重学 $\boldsymbol\psi$;GPI 组合多策略 |
+| **UVFA**(Schaul 2015 [5]) | 状态嵌入 vs 目标嵌入 | $V(s,g)\approx\boldsymbol\phi(s)^\top\boldsymbol\psi(g)$ | 换目标 $g$ 内插出 $V$,低秩结构 |
+
+三者共享同一个洞见:**把价值函数因式分解成「环境/表征」与「奖励/任务」两部分,前者可复用、后者轻量替换**。SR/SF 解耦动力学与奖励(任务迁移),UVFA 解耦状态与目标(目标泛化)——方向不同,但都是用**低维嵌入**替代**大查表**,让 RL 从「每个任务从头学」走向「学一次、迁移多次」。
+
+> 💡 **与现代 RL 的连接**:SF 与**潜在表征学习**、**世界模型**([model-based RL](/tutorials/model-based-rl) 的 RSSM)同属「学一个可复用的环境表征」路线——SF 学「特征占用」,世界模型学「潜动力学」,都是把环境结构压缩进一个可迁移的表征。UVFA 的低秩思想也出现在 [offline RL](/tutorials/offline-rl) 的分布约束与 [HRL](/tutorials/hierarchical-rl) 的选项发现(eigenoptions 与拉普拉斯谱,本质都是状态图的低秩结构)里。一条主线:**RL 的泛化能力,归根结底来自价值/动力学矩阵的低秩可分解性**。
+
+
+## 多任务强化学习:一个策略,多个任务
+
+到此为止本篇所有方法都假设**单一任务**——一个固定的 MDP,一条奖励函数。但真实的 Atari 智能体要玩 57 种游戏,机器人要在同一具身下又走又抓又放,对话模型要既能写代码又能做摘要又能翻译。**多任务强化学习(multi-task RL)**问的是:能不能用一个策略同时搞定**一组固定的任务**,而不是每个任务从头各训一个?
+
+### 任务条件化:把任务变成输入
+
+多任务 RL 的核心机制是把「任务身份」变成策略与价值函数的输入。单任务策略是 $\pi(a\mid s)$,多任务则升为**任务条件化策略**:
+
+$$\pi(a\mid s,z),\qquad Q(s,a,z)$$
+
+其中 $z$ 是**任务标识**——可以是离散的 one-hot 任务 id(任务 1/2/3),也可以是从任务描述学出来的**任务嵌入**(task embedding)向量。给定 $z$,智能体应当在该任务下选最优动作。训练时每个 batch 混合来自不同任务的转移,梯度对 $\theta$ 的更新被**所有任务共享**。
+
+把 $z$ 看作状态的一部分,多任务 RL 在数学上就是**单个更大的 MDP**——状态空间扩成 $S\times Z$,每个 $z$ 对应一组奖励/转移。所以前面所有 DQN 工具(Double、Dueling、PER、分布 RL)都可直接搬过来,唯一的改动是网络多接一个 $z$ 输入。
+
+### 两种架构:硬共享 vs 软条件化
+
+怎么把 $z$ 喂进网络,有两种典型范式,取舍在「**共享多少参数**」:
+
+**硬参数共享(hard parameter sharing)**——共享一个骨干网络(backbone,特征提取器),只在末端给每个任务接一个**独立的头**(task-specific head)。骨干吃 $s$ 出特征 $\phi(s)$,第 $k$ 个任务的头 $h_k$ 把 $\phi(s)$ 映射成该任务的 Q 值或动作。直觉:低层特征(边缘、运动、物体)跨任务通用,高层决策(该往哪走)任务特异。优点是参数效率高、任务间能**正迁移**(共享特征);风险是任务差异大时,共享骨干被迫学一个各方都勉强但都不优的折中表征——**负迁移**。
+
+**软条件化(soft conditioning)**——整个网络仍是单一一套权重,但 $z$ 通过**乘性/加性调制**注入每一层,最典型的是 **FiLM**(Feature-wise Linear Modulation,Perez et al. 2018):每一层特征 $\phi$ 被任务嵌入仿射变换为 $\gamma(z)\odot\phi+\beta(z)$,其中 $\gamma,\beta$ 由 $z$ 经小网络生成。这样不同任务**走同一条计算图但激活模式不同**,比硬共享更灵活(每层都任务感知),比完全独立参数更省。也可简单地把 $z$ 与 $s$ 拼接后送入网络(concatenation),是最朴素的软条件化。
+
+两者没有绝对优劣:硬共享参数省、易正迁移但易负迁移;软条件化灵活但 $\gamma/\beta$ 调制若过强会让不同任务的激活**互相干扰**。实践中常混用——共享骨干 + 任务头(硬共享)的同时,骨干内用 FiLM 注入 $z$(软条件化)。
+
+### 负迁移:任务间互相拖累
+
+多任务 RL 的头号敌人是**负迁移**(negative transfer):共享参数后,某任务的训练**拉低了**另一任务的性能,联合训练反而不如单任务训练。根源是**梯度冲突**——两个任务对同一参数的梯度方向相反,朴素地把梯度求和(sum of per-task gradients)会让它们部分抵消,谁也学不好。
+
+下面这个 toy 把负迁移剥到最简:两任务共享一个 2 维参数 $\boldsymbol w=(w_0,w_1)$,任务 A 想把 $w_0$ 推向 $+3$、任务 B 想把 $w_0$ 推向 $-3$($w_1$ 两任务都不关心),两者在 $w_0$ 方向上**零和冲突**。单独训各任务 loss 都能到 0,但朴素联合训练(梯度求和)在 $w_0$ 上互相抵消,卡在折中点 $w_0=0$,两任务都背着 4.5 的损失:
+
+<CodeRunner defaultCode={`# 负迁移 toy:两任务共享参数 w=(w0,w1),w0 方向零和冲突
+import numpy as np
+
+TA = np.array([3.0, 0.0])   # 任务 A 想要 w0=+3
+TB = np.array([-3.0, 0.0])  # 任务 B 想要 w0=-3
+def grad_A(w): return w - TA
+def grad_B(w): return w - TB
+def loss_A(w): return 0.5 * np.sum((w - TA) ** 2)
+def loss_B(w): return 0.5 * np.sum((w - TB) ** 2)
+
+lr, steps = 0.1, 300
+
+# 单独训 A
+w = np.zeros(2)
+for _ in range(steps): w -= lr * grad_A(w)
+print(f"单独训 A:  w={w}  loss_A={loss_A(w):.4f}")
+
+# 单独训 B
+w = np.zeros(2)
+for _ in range(steps): w -= lr * grad_B(w)
+print(f"单独训 B:  w={w}  loss_B={loss_B(w):.4f}")
+
+# 朴素联合:梯度求和 grad_A + grad_B
+w = np.zeros(2)
+for _ in range(steps): w -= lr * (grad_A(w) + grad_B(w))
+print(f"朴素联合:  w={w}  loss_A={loss_A(w):.4f}  loss_B={loss_B(w):.4f}  sum={loss_A(w)+loss_B(w):.4f}")
+print()
+print("-> w0 方向两梯度抵消, 卡在折中点 w0=0; 两任务都背着 4.5 损失")
+print("-> 这就是负迁移: 共享参数下任务互相拖累, 联合反而比单独训差")`} title="负迁移:梯度冲突下的共享训练" />
+
+跑出来会看到:单独训各任务 loss≈0(各自收敛到自己的最优 $\boldsymbol w$),但朴素联合训练的 $\boldsymbol w$ 卡在 $(0,0)$,两任务 loss 各 4.5——**联合训练严格劣于单任务训练**。这就是为什么不能简单地把多任务损失加起来求梯度。
+
+### 解法一:梯度手术(PCGrad)
+
+直观对策:**别让冲突的梯度互相抵消**。Yu et al. 2020 的 **PCGrad**(Projecting Conflicting Gradients)[22] 做了一件极简的事——对每对任务梯度 $\boldsymbol g_i,\boldsymbol g_j$,若它们的内积 $\boldsymbol g_i^\top\boldsymbol g_j<0$(方向冲突,会互相抵消),就把 $\boldsymbol g_i$ 投影到 $\boldsymbol g_j$ 的**法平面**上,即减去 $\boldsymbol g_i$ 在 $\boldsymbol g_j$ 方向上的(负)分量:
+
+$$\boldsymbol g_i \leftarrow \boldsymbol g_i - \frac{\boldsymbol g_i^\top\boldsymbol g_j}{\|\boldsymbol g_j\|^2}\,\boldsymbol g_j \qquad (\text{当 } \boldsymbol g_i^\top\boldsymbol g_j<0)$$
+
+投影后 $\boldsymbol g_i$ 与 $\boldsymbol g_j$ 正交($\boldsymbol g_i^\perp\!{}^\top\boldsymbol g_j=0$),不再有冲突分量;若两梯度本来同向(内积>0,不冲突),原样保留——只动冲突的。这对所有任务两两做一遍,再把投影后的各任务梯度求和回传。效果:消除互相抵消的分量,每个任务至少沿自己的方向前进,不被另一个任务反向拖。在多任务监督学习与多任务 RL(MuJoCo 多技能)上稳定缓解负迁移,实现简单、几乎零额外开销。注意 PCGrad 不是万能——它只消**冲突分量**,不解决任务间**真正的资源争抢**(两个任务就是想要不同的表征),且对完全对称的零和冲突(如上 toy)投影后两任务仍各退一步,只是不再原地卡死。
+
+### 解法二:蒸馏对齐(Distral)
+
+另一条路:Teh et al. 2017 的 **Distral**(Distill & Transfer)[23] 不在梯度层面动刀,而是**结构上**引入一个共享的**蒸馏策略**(distilled policy)$\pi_d$,让所有任务专属策略 $\pi_k$ 都向它靠拢。损失为各任务 RL 目标加上一项 **KL 正则**:
+
+$$\mathcal L_k = \underbrace{\mathcal L_k^{\text{RL}}(\pi_k)}_{\text{任务 }k\text{ 的 RL 目标}} + \beta\,\underbrace{D_{\mathrm{KL}}\!\big(\pi_k(\cdot\mid s)\,\|\,\pi_d(\cdot\mid s)\big)}_{\text{别离共享策略太远}} + \eta\,\underbrace{D_{\mathrm{KL}}\!\big(\pi_d(\cdot\mid s)\,\|\,\pi_k(\cdot\mid s)\big)}_{\text{共享策略也追任务}}$$
+
+第一项让 $\pi_k$ 在自己任务上做好;第二项约束 $\pi_k$ 别跑离共享的 $\pi_d$ 太远(行为正则,抑制各任务各自为政、共享表征被扯碎);第三项反过来让 $\pi_d$ 跟上各任务(蒸馏,把多任务共性吸进 $\pi_d$)。两步交替:各 $\pi_k$ 带正则训练 → $\pi_d$ 用各 $\pi_k$ 的平均/采样蒸馏更新。KL 正则把「共享什么」从硬共享的隐式假设显式化成一个可调旋钮(强度 $\beta$),任务差异大就调大 $\beta$ 强制对齐,差异小就调小让各任务自由。Distral 在多任务 MuJoCo 上显著优于朴素共享与完全独立,且 $\pi_d$ 还能直接当零样本迁移策略拿到没训过的新任务上试。
+
+### 解法三:PopArt——自适应归一化价值头
+
+PCGrad 在**梯度方向**上动刀(消冲突分量),Distral 在**结构**上动刀(加蒸馏策略正则),还有一类多任务病不在这两层——**奖励尺度失衡**:Atari-57 里 Pong 奖励在 $\pm1$ 之间,Atlantis 单局奖励数百;若同一个价值头直接回归所有任务的 return,大尺度任务的 TD 误差 $\delta_t\sim\sigma_{\text{big}}$ 数百倍于小尺度任务,梯度被大尺度任务**完全主导**,小尺度任务几乎学不动。朴素办法是 reward clipping(把奖励裁到 $[-1,1]$),但这**改变了优化目标**——裁剪后智能体优化的是「奖励的频率」而非「奖励的累计和」,只有当裁剪前后的目标恰好对齐时才无害 [27]。
+
+PopArt(Preserving Outputs Per Action,Hessel et al. 2018 [27])的思路是**只归一化学习更新,不改优化目标**。把价值头分解成一个**归一化预测** $n(s)$ 和一个线性缩放:
+
+$$v(s)=\sigma\cdot n(s)+\mu,\qquad n(s)=\boldsymbol w^\top\boldsymbol\phi(s)+b$$
+
+其中 $(\mu,\sigma)$ 是 return 的**运行统计**(EMA 跟踪均值与标准差,论文用 $\beta=3\times10^{-4}$,无需调参),**不回传梯度**——它们只是统计量,不是可学参数。价值头 $\boldsymbol w, b$ 在**归一化空间**里学:价值更新目标变成归一化的 $(G_t-\mu)/\sigma$ 而非原始 $G_t$:
+
+$$\Delta\theta\propto\!\left(\frac{G_t-\mu}{\sigma}-n_\theta(s_t)\right)\!\nabla_\theta n_\theta(s_t)$$
+
+这样一来,无论任务的原始 return 尺度是 $\pm1$ 还是数百,归一化后的 TD 误差都是 $O(1)$ 量级,**梯度幅度跨任务自动平衡**——大尺度任务不再淹没小尺度任务。
+
+#### 保留输出:统计更新时同步调权
+
+PopArt 最精妙的一步是「**保留输出**」。$(\mu,\sigma)$ 是运行统计,会随训练进展不断更新;一旦它从 $(\mu,\sigma)$ 变成 $(\mu',\sigma')$,归一化目标 $(G-\mu)/\sigma$ 就跟着漂移,价值头原本学得好好的 $n(s)$ 突然对不上新目标——这等于在训练里**插入了一次目标跳变**,破坏稳定性。PopArt 的解法是:统计更新时**同步调整最后一层的 $\boldsymbol w, b$**,使得**非归一化输出 $v(s)$ 在更新前后完全不变** [27]:
+
+$$\sigma'\!\cdot(\boldsymbol w'^\top\!\boldsymbol\phi(s)+b')+\mu'=\sigma\!\cdot(\boldsymbol w^\top\!\boldsymbol\phi(s)+b)+\mu\quad\forall s$$
+
+解出:
+
+$$\boldsymbol w'=\frac{\sigma}{\sigma'}\boldsymbol w,\qquad b'=\frac{\sigma b+\mu-\mu'}{\sigma'}$$
+
+直观说:统计变了,我**立刻把权重缩放补偿回去**,让网络对外输出的真实价值估计 $v(s)$ 一动不动。于是统计跟踪不引入任何目标漂移——学习者「无感」,只是梯度幅度被自动平衡了。这正是 PopArt 优于朴素 reward normalization 的根本:朴素归一化改了优化目标(裁剪/缩放 return 等于换了一个不同的 MDP),PopArt **非归一化 $v(s)$ 仍是真 return**,优化目标不变,只是梯度尺度被自适应校准。
+
+#### 多任务扩展:每任务独立统计 + 多头价值头
+
+多任务设定下,每个任务 $i$ 有自己的奖励分布,故有自己的 $(\mu_i,\sigma_i)$。价值头做成**多头**:每个任务一个头 $(\boldsymbol w_i, b_i)$,配独立的 $(\mu_i,\sigma_i)$;任务 $i$ 的统计更新时**只调第 $i$ 行权重** $(\boldsymbol w_i, b_i)$,其他任务的头不动 [27]:
+
+$$\boldsymbol w_i'=\frac{\sigma_i}{\sigma_i'}\boldsymbol w_i,\qquad b_i'=\frac{\sigma_i b_i+\mu_i-\mu_i'}{\sigma_i'}$$
+
+关键设计:**策略网络跨任务共享,且不条件化任务身份**——只有价值头是任务特异的(每个任务一个头),而价值头仅训练时作 baseline 降方差用,推理时不需要。所以最终得到的是「**一个通用策略 $\pi(a\mid s)$,只依赖状态,不依赖任务标签**」——部署到任一任务环境上,策略照常工作,无需告诉它现在是哪个游戏。
+
+#### PopArt-IMPALA:首个超人类的多任务 Atari 智能体
+
+PopArt 与 [IMPALA 篇](/tutorials/policy-gradient) 的 actor-learner 解耦架构天然契合:IMPALA 提供分布式采集(actors 跨多个 Atari 游戏并行 rollout),PopArt 给每个游戏配独立的价值头统计 $(\mu_i,\sigma_i)$,V-trace 偏策略目标里的 return $G_t^v$ 用归一化的 $(G_t^v-\mu_i)/\sigma_i$ 替代。组合后的 **PopArt-IMPALA** 在 Atari-57 上拿到**中位人类归一化分 110.7%**(带 clipping)/ 101.5%(不带 clipping),而 vanilla IMPALA 只有 59.7% / ~0%——**这是首次有单个智能体在多任务 Atari 上整体超越人类基准** [27]。
+
+一个关键消融:把 PopArt 拿掉、只保留多头价值头(MultiHead-IMPALA,有任务特异的价值头容量但无自适应归一化),性能**反而略低于** vanilla IMPALA。这说明提升来自**自适应归一化**本身,而不是「多头给了更多容量」——容量多了但不归一化,大尺度任务照样主导梯度,多头只是让问题更突出。
+
+下面这个 CodeRunner 把 PopArt 的三件事用最小玩具演示:奖励尺度失衡、归一化平衡梯度、「保留输出」让 $v(s)$ 在统计更新前后纹丝不动。
+
+<CodeRunner defaultCode={`# === PopArt: 多任务价值头自适应归一化(保留输出) ===
+import numpy as np
+
+print("【1】多任务奖励 scale 失衡:大 scale 任务主导梯度")
+print("   Atari-57: Pong 奖励 ±1, Atlantis 奖励数百 -> 同一价值头不归一化时大 scale 主导")
+rng = np.random.default_rng(7)
+returns_A = rng.normal(1.0, 0.3, 1000)
+returns_B = rng.normal(200.0, 50.0, 1000)
+mu_A, sig_A = returns_A.mean(), returns_A.std()
+mu_B, sig_B = returns_B.mean(), returns_B.std()
+print(f"   任务 A(Pong-like):  return mu={mu_A:.3f}  sigma={sig_A:.3f}")
+print(f"   任务 B(Atlantis-like): return mu={mu_B:.3f}  sigma={sig_B:.3f}")
+print(f"   不归一化:任务 B 的 TD 误差 ~{sig_B:.1f} vs 任务 A ~{sig_A:.1f},B 梯度幅度 ~{sig_B/sig_A:.0f}x 主导")
+print()
+
+print("【2】PopArt 归一化:v(s)=sigma*n(s)+mu,n(s) 为归一化价值头输出")
+print("   统计 (mu,sigma) 用 EMA 跟踪 return,不回传梯度;价值头在归一化空间学")
+print("   归一化后两任务 TD 误差都 ~O(1),梯度幅度自动平衡")
+n_target_A = (1.0 - mu_A) / sig_A
+n_target_B = (200.0 - mu_B) / sig_B
+print(f"   任务 A return=1.0 -> 归一化目标 n*={n_target_A:+.3f}")
+print(f"   任务 B return=200.0 -> 归一化目标 n*={n_target_B:+.3f}")
+print(f"   两任务归一化后 TD 误差同量级,梯度幅度自动平衡(不再 B 主导)")
+print()
+
+print("【3】保留输出:统计更新时同步调权,使非归一化 v(s) 不变")
+print("   v(s)=sigma*(w.f(s)+b)+mu; (mu,sigma)->(mu',sigma') 时调 w,b 使 v(s) 不变")
+mu, sig = 0.0, 1.0
+w, b = 2.0, 1.0
+f = 1.0
+v_before = sig * (w * f + b) + mu
+print(f"   更新前: mu={mu}, sigma={sig}, w={w}, b={b}, f(s)={f}")
+print(f"   v(s) = sigma*(w*f+b)+mu = {sig}*({w}*{f}+{b})+{mu} = {v_before}")
+mu2, sig2 = 0.5, 2.0
+w2 = (sig / sig2) * w
+b2 = (sig * b + mu - mu2) / sig2
+v_after = sig2 * (w2 * f + b2) + mu2
+print(f"   统计更新: mu'={mu2}, sigma'={sig2}")
+print(f"   调权保留输出: w'=(sigma/sigma')*w={w2}, b'=(sigma*b+mu-mu')/sigma'={b2}")
+print(f"   更新后: v(s) = sigma'*(w'*f+b')+mu' = {sig2}*({w2}*{f}+{b2})+{mu2} = {v_after}")
+print(f"   -> v(s) 更新前={v_before}, 更新后={v_after}, 差={abs(v_after-v_before):.2e} (不变!)")
+print(f"   统计更新不引入目标漂移,学习者无感")
+print()
+
+print("【4】vs 朴素 reward clipping:clipping 改优化目标,PopArt 不改")
+print("   朴素 reward clipping r'=clip(r,-1,1): 优化的是奖励[频率]而非累计,目标变了")
+print("   PopArt 只归一化[学习更新](梯度 scale 不变),非归一化 v(s) 仍是真 return")
+print("   -> 优化目标不变,只是梯度幅度自动跨任务平衡")
+print()
+
+print("【5】多任务扩展:每任务独立 (mu_i, sigma_i),只调该任务对应的权重行")
+print("   多头价值头:每任务一个头 w_i, b_i + 独立 (mu_i, sigma_i)")
+print("   任务 i 统计更新时只调 w_i, b_i,其他任务的头不动")
+print("   策略网络跨任务共享,不条件化任务身份;价值头仅训练时作 baseline 降方差")
+print()
+
+print("【6】PopArt-IMPALA 实测:Atari-57 中位人类归一化分")
+print("   IMPALA:              59.7%(clip)/  ~0%(no clip)")
+print("   PopArt-IMPALA:      110.7%(clip)/ 101.5%(no clip)  <- 首个单智能体超人类")
+print("   消融 MultiHead-IMPALA(多头无归一化): 略差于 vanilla IMPALA")
+print("   -> 提升来自[自适应归一化]而非[多头容量]")
+`} title="PopArt:保留输出的价值头自适应归一化" />
+
+> 💡 **三解法各治一层**:PCGrad 在**梯度方向**层消冲突分量(治负迁移的方向抵消)、Distral 在**结构**层加蒸馏正则(治表征被扯碎)、PopArt 在**价值头尺度**层自适应归一化(治奖励尺度失衡)。三者正交,可叠加——一个大规模多任务系统完全可以同时用 PCGrad 修梯度 + Distral 正则策略 + PopArt 归一化价值头。PopArt 还和 [IMPALA 的 V-trace](/tutorials/policy-gradient) 天然配对:V-trace 的 return $G_t^v$ 直接喂给 PopArt 的归一化器,组成 PopArt-IMPALA——这是大规模多任务 RL 的标配组合 [27]。
+
+### 评估协议与基准:mean / worst / harmonic,以及 Meta-World
+
+三解法(PCGrad/Distral/PopArt)回答的是「**如何学**」;但多任务 RL 还有一个同等重要的问题——「**如何评**」。单任务 RL 只有一条曲线,看峰值即可;多任务 RL 有 $K$ 条曲线(每任务一条),**怎么把 $K$ 个数压成一个数来比高低**,直接决定结论。
+
+#### 三个聚合指标:mean / worst / harmonic mean
+
+给定 $K$ 个任务的成功率 $\{\text{sr}_1,\dots,\text{sr}_K\}$(多任务 RL 几乎都用 **success rate**——达成判定,二值 episodic 奖励取均值——而非累计 return,因为跨任务 return 量级不可比):
+
+- **均值 mean**:$\bar{\text{sr}}=\frac1K\sum_i \text{sr}_i$。最常用,但对**短板不敏感**——9 个任务 0.95 + 1 个任务 0.02,mean 仍有 0.85,掩盖了「有一个任务完全没学会」。
+- **最差任务 worst**:$\min_i \text{sr}_i$。只看短板,优化它等于最大化最弱任务——鲁棒但偏激,一个均衡 0.7 的策略会打败一个 9 强 1 弱的策略。
+- **调和平均 harmonic mean**:$\text{HM}=\frac{K}{\sum_i 1/\text{sr}_i}$。**对短板极度敏感**:某个 $\text{sr}_i\to 0$ 时 $1/\text{sr}_i\to\infty$、HM $\to 0$。几何上,调和平均只在**所有**值都高时才高,既奖励整体水平又惩罚短板,是多任务评估的推荐聚合 [28]。
+
+三者可能给出**相反结论**:策略 A(9 强 1 弱,mean 0.85)在 mean 下胜策略 B(均衡 0.7,mean 0.70);但在 worst 与 harmonic 下 B 胜 A(0.68 vs 0.02 / 0.71 vs 0.17)。**报多任务结果必须同时给三个**,只报 mean 会藏住短板。
+
+#### Meta-World:多任务与元学习 RL 的标准基准
+
+**Meta-World**(Yu et al., CoRL 2019 [28])是当前多任务/元学习 RL 的事实标准基准,由 50 个**机器人操作任务**(Sawyer 机械臂:抓取、推送、按压、开抽屉等)组成,每个任务有不同的物体初始位置变体。它填补的空白是:此前的元 RL 基准任务分布**太窄**(「不同跑步速度算不同任务」),无法测出真正的泛化能力;Meta-World 提供了足够宽的任务分布,让「能否泛化到没见过的任务」可量化。
+
+基准矩阵分两类四档:
+
+| 基准 | 类型 | 训练任务 | 测试任务 | 评估什么 |
+|---|---|---|---|---|
+| **MT10** | 多任务 | 10 | —(无 held-out) | 同时学好 10 个任务 |
+| **MT50** | 多任务 | 50 | —(无 held-out) | 同时学好 50 个任务(更难,负迁移更严重) |
+| **ML10** | 元学习 | 10 | 5(held-out) | 在**没见过**的 5 个任务上快速适应 |
+| **ML45** | 元学习 | 45 | 5(held-out) | 大训练集下能否泛化到 5 个新任务 |
+
+**MT = Multi-Task**(多任务,无 held-out,测同时学好);**ML = Meta-Learning**(元学习,有 held-out,测快速适应)。观测里追加 **one-hot 任务 ID** 给策略(多任务设定下策略知道当前是哪个任务;元学习设定下测试时任务未知,需 few-shot 适应)。指标统一是**每任务 success rate**,再按上面三个聚合指标汇报 [28]。
+
+MT10/MT50 测的是「**容量**」——一个网络能否同时记住做好多个任务;ML10/ML45 测的是「**泛化**」——训练时没见过的任务能否快速上手。前者对应本节的多任务 RL,后者对应 [策略梯度篇的元 RL](/tutorials/policy-gradient)(MAML/RL²)。**多任务做好不等于元学习做好**:一个把 MT50 全部训到 0.9 的策略,在 ML45 的 5 个 held-out 新任务上可能仍需几百步才能从零学起,没有 meta 先验带来的 few-shot 加速。
+
+#### 负迁移:多任务训练不保证每个任务都变好
+
+评估多任务时还要看**单任务曲线随训练的变化**,而不只看终点。同一任务单独训可能平稳上升到 0.95;但在 MT10 里联合训练,前期可能被其他任务的梯度带偏降到 0.1,后期才回升——这段「先降后升」就是**负迁移**(negative transfer)。负迁移期的长短不可预测,正是 PCGrad(消冲突分量)/Distral(结构正则)/PopArt(尺度归一化)三解法要缩短的:它们不改变「最终能否学好」,而是减少多任务训练前期的互相拖累。评估时若只看最终 mean SR,会漏掉「训练中期某任务曾长时间接近 0」这一稳定性问题——这也是为什么多任务论文常附**逐任务学习曲线**而非只报聚合数 [22][23][27]。
+
+<CodeRunner defaultCode={`# === 多任务 RL 评估协议与基准(Meta-World 风格) ===
+import numpy as np
+
+rng = np.random.default_rng(42)
+
+# 【1】三个聚合指标看同一组数据,结论可能相反
+# 策略 A: 9 个任务接近 1.0, 1 个任务几乎为 0(短板明显)
+# 策略 B: 10 个任务都在 0.7 左右(均衡但无强项)
+sr_A = np.array([0.95, 0.93, 0.97, 0.92, 0.96, 0.94, 0.91, 0.95, 0.93, 0.02])
+sr_B = np.array([0.70, 0.71, 0.69, 0.72, 0.70, 0.71, 0.68, 0.73, 0.70, 0.71])
+print("【1】三个聚合指标看同一组数据,结论可能相反")
+print(f"   策略 A(9 强 1 弱): mean={sr_A.mean():.3f}, worst={sr_A.min():.3f}, harmonic={len(sr_A)/np.sum(1/np.maximum(sr_A,1e-9)):.3f}")
+print(f"   策略 B(均衡 0.7): mean={sr_B.mean():.3f}, worst={sr_B.min():.3f}, harmonic={len(sr_B)/np.sum(1/np.maximum(sr_B,1e-9)):.3f}")
+print(f"   -> mean 看 A 远胜 B; worst 看 B 胜 A; harmonic 惩罚短板更狠")
+
+# 【2】harmonic mean 为何惩罚短板: 对接近 0 的值极度敏感
+print()
+print("【2】harmonic mean 对短板的敏感度")
+xs = np.array([1.0, 1.0, 1.0, 1.0, 0.1])
+print(f"   [1,1,1,1,0.1]:  mean={xs.mean():.3f}, harmonic={len(xs)/np.sum(1/xs):.3f}")
+xs2 = np.array([1.0, 1.0, 1.0, 1.0, 0.01])
+print(f"   [1,1,1,1,0.01]: mean={xs2.mean():.3f}, harmonic={len(xs2)/np.sum(1/xs2):.3f}")
+print(f"   -> mean 只略降, harmonic 几乎归零(短板被放大)")
+
+# 【3】Meta-World 基准矩阵
+print()
+print("【3】Meta-World 基准矩阵(Yu et al. CoRL 2019, 50 个机器人操作任务)")
+print("   MT10  (多任务): 10 训练, 无 held-out, 目标=同时学好 10 个")
+print("   MT50  (多任务): 50 训练, 无 held-out, 目标=同时学好 50 个")
+print("   ML10  (元学习): 10 训练 + 5 测试(held-out), 测快速适应未见任务")
+print("   ML45  (元学习): 45 训练 + 5 测试(held-out), 测快速适应未见任务")
+print("   观测追加 one-hot 任务 ID; 指标=每任务 success rate")
+
+# 【4】负迁移: 同一任务在 MT10 多任务训练下可能先降后升
+print()
+print("【4】负迁移: 同一任务在 MT10 多任务训练下可能先降后升")
+epochs = np.arange(0, 100, 5)
+solo = 0.95 * (1 - np.exp(-epochs/20))
+mt10 = np.where(epochs < 40, 0.5*np.exp(-epochs/15) + 0.1, 0.95*(1-np.exp(-(epochs-40)/15)))
+for e, s, m in zip(epochs[::3], solo[::3], mt10[::3]):
+    tag = "  <- 负迁移" if m < s - 0.05 else ""
+    print(f"   epoch={e:3d}: 单任务 SR={s:.3f}, MT10 SR={m:.3f}{tag}")
+print("   -> 多任务训练不保证每个任务单调变好, 负迁移期需耐心或解法(PCGrad/Distral/PopArt)")
+
+# 【5】few-shot 适应: meta-RL 的卖点(ML10/ML45 held-out test 测这个)
+print()
+print("【5】few-shot 适应: meta-RL 的卖点(ML10/ML45 held-out test 测这个)")
+shots = np.array([1, 5, 10, 50, 200])
+from_scratch = 0.8 * (1 - np.exp(-(shots-1)/50))
+from_scratch[0] = 0.05
+meta_init = 0.8 * (1 - np.exp(-(shots-1)/8))
+meta_init[0] = 0.3
+for sh, fs, mi in zip(shots, from_scratch, meta_init):
+    print(f"   见 {sh:3d} 步新任务: 从零学 SR={fs:.3f}, meta 先验 SR={mi:.3f}")
+print(f"   -> 5 步内 meta 先验({meta_init[1]:.3f}) 远超从零学({from_scratch[1]:.3f}); 这是 meta-RL 相对多任务的增量")
+
+# 【6】MT10 多任务 reward scale 失衡(呼应 PopArt 解法三)
+print()
+print("【6】MT10 多任务 reward scale 失衡(呼应 PopArt 解法三)")
+returns_scale = np.array([1, 2, 5, 1, 3, 200, 150, 1, 80, 4], dtype=float)
+print(f"   10 任务单局 return 量级: {returns_scale.astype(int).tolist()}")
+print(f"   最大/最小 = {returns_scale.max()/returns_scale.min():.0f}x")
+print(f"   -> 大尺度任务 TD 误差主导梯度, 小尺度任务学不动")
+print(f"   -> PopArt 每任务独立 (mu_i, sigma_i) 归一化价值头后, 梯度幅度跨任务对齐")
+norm_targets = (returns_scale - returns_scale.mean()) / returns_scale.std()
+print(f"   归一化后目标量级: {[round(float(x), 2) for x in norm_targets]}")
+print(f"   -> 量级差异从 {returns_scale.max()/returns_scale.min():.0f}x 压到 ~{norm_targets.max()-norm_targets.min():.1f} 范围, 梯度对齐")
+`} title="多任务 RL 评估协议与 Meta-World 基准" />
+
+### 与相关范式的边界
+
+多任务 RL 容易和几个邻居混淆,这里厘清:
+
+- **目标条件 RL / HER**:goal-conditioned policy $\pi(a\mid s,g)$ 里的 $g$ 是**状态空间内的目标**(末态、子目标),HER(R21 在本篇)靠重标 goal 造人造成功。多任务里的 $z$ 更宽——可以是 goal,也可以是奖励函数整体、动力学变体、对手身份;当 $z$ 就是 goal 时,多任务 RL 退化成目标条件 RL。
+- **后继特征 SF / 零样本迁移**:SF 把 $Q$ 因式分解成 $\boldsymbol\psi^\top\boldsymbol w$,$\boldsymbol\psi$ 任务无关、$\boldsymbol w$ 任务特异,换 $\boldsymbol w$ 即零样本到新任务——这是**结构化**的多任务(任务空间被线性奖励权重参数化)。一般多任务 RL 不假设这种线性可分解性,所以不能零样本,但能处理 SF 处理不了的任意奖励结构。
+- **元强化学习 meta-RL**(见 [策略梯度](/tutorials/policy-gradient) 篇元 RL 小节):meta-RL 训一个能**几步快速适应新任务**的先验/初始化(MAML 学易微调初始化、RL² 把适应编码进 RNN 隐状态),测试任务是**训练时没见过的**。多任务 RL 则是**固定任务集**,目标是同时做好这一组,不要求泛化到集合外。一句话:**多任务 = 一个策略管一组已知任务;元 RL = 学一个能快速适应未知任务的先验**。
+
+> 💡 **为什么放在 DQN 篇**:多任务 RL 的最小完整形态——任务条件化 $Q(s,a,z)$ + 共享骨干训练——天然落在价值方法的框架里(把 $z$ 当状态一部分接进 Q 网络),PCGrad/Distral 也是 DQN/PPO 通用的训练技巧。把它放在 SF/UVF(结构化迁移的极限)之后、Rainbow(单任务 DQN 的工程集成)之前,正好补上「**从单任务到多任务**」这一跃,也为后续策略梯度篇的元 RL(跨任务先验)留下接口。
+
+## Rainbow:六组件集成 + NoisyNet 参数空间探索
+
+前面几节我们把 DQN 家族拆成一块块「砖」:Double 修高估、Dueling 拆 $V/A$、PER 聚焦该学的样本、分布 RL 保留返回值整条分布。Hessel et al. 2018 的 **Rainbow**[8] 问了一个自然的问题:**这些改进互相正交,那把它们全叠起来会怎样?** 答案是:在 Atari 2600 上同时取得更高的**数据效率**与更高的**最终性能**,一举超越所有单项改进——「六合一」就是它得名的原因(赤橙黄绿蓝靛紫,六色光谱)。
+
+Rainbow 的六块砖是:① **Double DQN**(解耦选与评,治高估);② **优先经验回放 PER**(按 $|\delta|$ 加权采样);③ **Dueling 网络**($V/A$ 分解);④ **多步回报** $n$-step return(用 $G_{t:t+n}=\sum_{k=0}^{n-1}\gamma^k r_{t+k}+\gamma^n Q(s_{t+n},a^*)$ 替代 1-step TD 目标,降偏差、增方差,是 TD(0) 与 MC 之间的折中,见 [时序差分](/tutorials/temporal-difference) 篇的资格迹谱系);⑤ **分布 RL**(C51,学返回值分布而非期望);⑥ **NoisyNet**(参数空间探索,替代 ε-greedy)。前五块本篇都已单独成节,唯第六块 NoisyNet 还没展开——它是六组件里唯一还没讲的,也是「探索」这件事的一个范式转折,值得单独说清。
+
+### NoisyNet:把噪声注入参数,而非动作
+
+DQN 原版的探索靠 **ε-greedy**:以概率 ε 随机选一个动作。这是**动作空间探索**——随机性加在「选哪个动作」上,与当前状态无关(无论你在什么局面,都以同样的 ε 瞎选)。Fortunato et al. 2018 的 **NoisyNet**[9] 提出一条截然不同的路:**参数空间探索**——把可学的随机噪声注入网络权重,让探索随状态自然变化。
+
+标准线性层 $y=wx+b$。NoisyNet 把它换成**噪声线性层**:
+
+$$\tilde w = \mu + \sigma \odot \epsilon,\qquad \tilde b = \mu_b + \sigma_b \odot \epsilon_b$$
+
+其中 $\mu,\sigma$(以及偏置的 $\mu_b,\sigma_b$)都是**可训练参数**,与网络其余权重一起用梯度下降学;而 $\epsilon,\epsilon_b$ 是**零均值随机噪声**,每次前向传播重新采样。于是每个权重不再是定值,而是「均值 + 可学噪声幅度 × 随机扰动」。关键在 $\sigma$ 也是学出来的——训练中网络会**自动决定哪些权重需要更多探索**($\sigma$ 大)、哪些该稳定($\sigma$ 小),无需手调 ε 衰减 schedule。
+
+**因式分解噪声**:朴素实现给每个权重独立采样一个噪声,一层 $p\times q$ 要 $pq$ 个噪声变量,开销大。NoisyNet 用因式分解:$\epsilon_{ij}=f(\epsilon_i)\cdot f(\epsilon_j)$,其中 $\epsilon_i,\epsilon_j$ 分别是输入/输出维度的独立噪声,$f(x)=\text{sgn}(x)\sqrt{|x|}$。这样一层只需 $p+q$ 个噪声(从 $O(pq)$ 降到 $O(p+q)$),且仍保持零均值、有界方差。因子 $f$ 的作用是稳定方差——直接用 $\epsilon_i\epsilon_j$ 会让方差随维度缩放,套上 $f$ 后每条权重的噪声方差量级与维度无关。
+
+**状态条件探索**:这是 NoisyNet 相对 ε-greedy 最深刻的优点。ε-greedy 的随机动作与状态无关——无论你在什么局面,都以同样的 ε 瞎选一个均匀随机的动作。NoisyNet 的噪声加在权重上,前向传播时同一组权重扰动会与当前状态 $s$ 相互作用:**不同状态产生不同的动作扰动**——在状态 A 下扰动后的网络可能偏向动作 1,在状态 B 下同一扰动可能偏向动作 3。也就是说,扰动后的策略是状态的函数,探索「往哪走」由当前局面决定,而不是无差别地均匀撒。此外,输入特征幅度大的状态,其输出扰动幅度也相应放大(线性层的天然性质),探索强度随状态自然变化——这些都是 ε-greedy 的固定 ε 做不到的。
+
+<CodeRunner title="NoisyNet 状态条件探索:参数空间 vs 动作空间" language="python" defaultCode={`import numpy as np
+
+# NoisyNet 因式分解噪声演示:对比 ε-greedy(动作空间)vs NoisyNet(参数空间)
+rng = np.random.default_rng(0)
+
+def f(x):  # f(x) = sign(x)*sqrt(|x|), 稳定方差
+    return np.sign(x) * np.sqrt(np.abs(x))
+
+# 一个 2 输入 -> 3 输出的噪声线性层
+mu = rng.normal(0, 1, (3, 2))     # 可学均值
+sigma = np.full((3, 2), 0.5)      # 可学噪声幅度(初始 0.5)
+
+def noisy_linear(x, mu, sigma):
+    # 因式分解噪声: eps_ij = f(eps_i) * f(eps_j)
+    eps_in = f(rng.uniform(-1, 1, 2))    # 输入维度噪声
+    eps_out = f(rng.uniform(-1, 1, 3))   # 输出维度噪声
+    eps = np.outer(eps_out, eps_in)      # (3,2) 外积 = 因式分解噪声
+    w_tilde = mu + sigma * eps
+    return w_tilde @ x
+
+# 两个状态: s1 明确(特征大), s2 模糊(特征小)
+s_clear = np.array([1.0, 1.0])    # 明确状态
+s_vague = np.array([0.1, 0.1])    # 模糊状态
+
+# 看 NoisyNet 在两状态下输出方差(探索强度)
+outs_clear, outs_vague = [], []
+for _ in range(2000):
+    outs_clear.append(noisy_linear(s_clear, mu, sigma))
+    outs_vague.append(noisy_linear(s_vague, mu, sigma))
+outs_clear, outs_vague = np.array(outs_clear), np.array(outs_vague)
+
+print("=== NoisyNet 状态条件探索 ===")
+print(f"明确状态 s={s_clear}: 输出均值={outs_clear.mean(0).round(3)} 标准差={outs_clear.std(0).round(3)}")
+print(f"模糊状态 s={s_vague}: 输出均值={outs_vague.mean(0).round(3)} 标准差={outs_vague.std(0).round(3)}")
+print()
+print("观察: 两状态输出的均值不同(权重均值与状态相乘),")
+print("      标准差(探索强度)也随状态变化 —— 这是 ε-greedy 做不到的状态条件探索。")
+print("      ε-greedy 无论状态如何,都以固定 ε 概率随机动作,探索与状态无关。")
+`} />
+
+运行这段代码,你会看到 NoisyNet 在「明确状态」和「模糊状态」下输出的标准差不同——探索强度随状态变化。这正是参数空间探索相对动作空间探索的优势:探索不是无差别的均匀撒,而是跟着网络对该状态的不确定性走。
+
+### 六组件为何大多互补
+
+Rainbow 的消融研究(逐个去掉某组件看掉多少分)给出贡献排序:
+
+| 去掉的组件 | 性能下降 | 直觉解释 |
+|---|---|---|
+| **分布 RL**(C51) | ██████████ 最多 | 返回值分布信息最丰富,丢了退化回标量 $Q$,梯度信号变单一 |
+| **多步回报** | ████████ 第二 | 1-step TD 偏差大、传播慢,$n$-step 大幅加速信用分配 |
+| **PER** | █████ 中等 | 回到均匀采样,样本效率下降但不致命 |
+| **Dueling** | █████ 中等 | $V/A$ 分解对动作差异小的状态帮助大,丢了退化回普通 $Q$ |
+| **NoisyNet** | ███ 数据效率↓,最终分不掉 | 探索范式不同,长期终态相近,但前期靠状态条件探索学得更快 |
+| **Double** | ██ 较小 | 高估偏差在分布 RL + 多步的加持下已被部分缓解,边际贡献小 |
+
+> 💡 **为何大多互补?** 六组件改的是 DQN 的**不同侧面**:Double 改目标、Dueling 改网络结构、PER 改采样、多步改回报长度、分布 RL 改输出表示、NoisyNet 改探索。各管一摊,故增益大多可叠加。唯一**非独立**之处:分布 RL 与多步回报都在「丰富梯度信号」,有部分重叠;且分布 RL 的多模态输出天然缓解高估(不再对单点 $\max$ 过度乐观),所以加上分布 RL 后 Double 的边际贡献变小——这正是消融里「去掉 Double 掉分较小」的原因。
+
+### 小结:从散砖到集成
+
+Rainbow 的价值不在「发明了第六个组件」,而在**用消融厘清了六组件各自的贡献与互补关系**——它是一份「DQN 改进谱系的总账」。理解了它,你就理解了 2015–2017 年价值方法那条主线:原始 DQN 的回放 + 目标网络是骨架,Double/Dueling/PER/多步/分布 RL/NoisyNet 是六块各自补一个缺口的肌肉,叠起来就是当时离散动作深度 RL 的最强基线。此后 QR-DQN、IQN 在分布 RL 上继续深化,R2D2 加循环,Agent57 自适应探索——但都是在 Rainbow 这套地基上往前走。
+
+> 💡 **NoisyNet 的后续**:参数空间探索的思想不止于 DQN。它也用于 A3C(替代熵正则)等策略方法,并启发了后续的**不确定性驱动探索**(用网络权重的后验方差量化「该探索哪里」,如 Bayesian DL + RL)。但当状态空间极大、网络极深时,因式分解噪声的表达力有限,**基于计数 / 基于好奇心**(见 [强化学习入门](/tutorials/reinforcement-learning) 的内在奖励小节)等内在奖励方法在 Montezuma's Revenge 这类极稀疏任务上往往更强——NoisyNet 解决的是「普通状态下该不该探索」,而非「极稀疏下如何发现远处奖励」。
+
+## 部分可观测与循环 Q 网络:DRQN → R2D2
+
+前面所有 DQN 变体都默认一个假设:**智能体能直接观测到真实状态** $s$(Atari 像素帧、gridworld 位置)。这是 MDP 的马尔可夫性——下一步只取决于当前状态,与历史无关。但真实环境常常**看不全状态**:Atari 的 `frame-skipping` 让中间帧丢失、扑克看不到对手手牌、自动驾驶传感器有噪、机器人定位有盲区。这时单帧观测 $o_t$ 不再是马尔可夫的——**reward 可能取决于几步前的观测**,单帧 $Q(o_t,a)$ 学不到最优策略。
+
+[入门篇](/tutorials/reinforcement-learning)的 POMDP 小节讲过表格版解法(显式维护**信念状态** $b_t(s)=P(s_t=s\mid h_t)$,把任意长历史压成一个马尔可夫分布,在信念 MDP 上跑全套算法)。但高维观测(像素)下显式信念更新不可行。深度 RL 的做法更直接:**用循环网络(LSTM/GRU)把历史隐式压成一个隐状态** $h_t$,让 $Q(a\mid h_t)$ 依赖隐状态而非单帧。这一节讲清循环 Q 网络的两块硬骨头:为什么需要循环(DRQN),以及循环 Q **从经验回放训练**时为什么不能朴素搬 DQN 的回放范式(R2D2 的三件套)。
+
+### 为什么帧堆叠不够:部分可观测的本质
+
+DQN 原本用 **4 帧堆叠**(把连续 4 帧拼成输入)近似马尔可夫化——4 帧够推 Pong 球速(2 帧算位移)。但帧堆叠有两个硬伤:
+
+- **窗口固定长度**:依赖超过窗口的信息全丢。Pong 球速只需 2 帧,但扑克要记整局已出牌、Montezuma 要记几步前拿到的钥匙——这些依赖远超 4 帧。
+- **被动拼接,不主动取舍**:堆叠把原始像素原样拼起来,不会决定「该记什么、该忘什么」。无关帧也占窗口、关键帧也只占一格。
+
+循环网络把历史压成一个**学出来的**隐状态 $h_t=\text{LSTM}(h_{t-1},\phi(o_t))$,长度固定(不随历史变长)、内容由 TD 误差驱动(自动学该记什么)。下面 toy 把「帧堆叠看不到、循环看得到」算清楚:
+
+<CodeRunner defaultCode={`# === 部分可观测与循环 Q 网络:DRQN → R2D2 ===
+import numpy as np
+
+# 【1】为什么帧堆叠不够:部分可观测的本质
+# DQN 用 4 帧堆叠 "近似" 马尔可夫化 (看到 4 帧能推速度), 但有两个硬伤:
+#   (a) 堆叠窗口固定长度, 超过窗口的依赖全丢 (Pong 球速只需 2 帧, 但扑克/麻将要记整局)
+#   (b) 堆叠是 "被动拼接", 不会主动决定 "该记什么、该忘什么"
+# 循环网络把历史压成一个学出来的隐状态 h_t, 长度自适应、内容由 TD 误差驱动
+
+# 部分可观测 toy: 一维走廊, 智能体只能看到 "当前格子亮度" (0 或 1)
+# 但奖励取决于 "3 步前是否经过了亮格" — 必须跨 3 步记忆
+# 帧堆叠 (window=2) 看不到 3 步前; 循环 (h_t 跨任意步) 能记
+def corridor_step(history):
+    # reward = 1 当且仅当 history[-3] == 1 (3 步前经过亮格) 且当前到终点
+    if len(history) < 3:
+        return 0.0
+    return 1.0 if (history[-3] == 1 and history[-1] == 1) else 0.0
+
+print("【1】部分可观测 toy: reward 依赖 3 步前的观测")
+seq = [1, 0, 0, 1, 0, 1]  # 在第 1、4、6 步经过亮格
+for t in range(3, len(seq)):
+    r = corridor_step(seq[:t+1])
+    print(f"   t={t}, history={seq[:t+1]}, reward={r}")
+print("   -> 第 6 步 reward=1 (3 步前 t=3 经过亮格), 帧堆叠 window=2 看不到 t=3")
+print()
+
+# 【2】DRQN: 把 DQN 第一个 FC 层换成 LSTM
+# DQN:   conv -> FC -> Q(s,a)            (单帧, 假设马尔可夫)
+# DRQN:   conv -> LSTM(h_t) -> Q(s,a)    (h_t = LSTM(h_{t-1}, conv_out))
+# 关键: BPTT 沿时间反传, LSTM 的门控决定 "记什么/忘什么/输出什么"
+# Hausknecht 2015 [29] 发现: 标准 Atari 上 DRQN ≈ DQN (无系统优势),
+#   但 "闪烁 Atari" (屏幕随机闪烁, 单帧大量信息丢失) 上 DRQN 远超 DQN
+#   — 循环的价值在 "观测退化时仍能从历史补信息"
+print("【2】DRQN 架构: conv -> LSTM(h_t) -> Q(s,a), BPTT 沿时间反传")
+print("   LSTM 门控: input gate 决定记多少新信息, forget gate 决定留多少旧信息")
+print("   标准 Atari: DRQN ≈ DQN; 闪烁 Atari: DRQN >> DQN (观测退化时循环补信息)")
+print()
+
+# 【3】循环 Q 从回放训练的三大难题 (朴素做法的坑)
+# 难题: 回放采样的是 "片段", 但 LSTM 隐状态是沿连续轨迹流动的
+#   从回放抽一段 (s_0,...,s_n), h_0 从哪来?
+#   (a) h_0 = 0 (零初始化): h_0 不代表 "真实历史", LSTM 要花几步才 "进入状态"
+#       -> 训练分布 (h_0=0) 与执行分布 (h_0=真实连续隐状态) 不一致 = train/test mismatch
+#   (b) 完整轨迹回放: 必须存整条 episode, 长任务内存爆 + 样本效率低 (不能跨 episode 复用片段)
+#   (c) 固定窗口截断 BPTT: 梯度只反传 K 步, K 步外的依赖学不到 (但 K 够大通常够用)
+print("【3】循环 Q 从回放训练的三大难题:")
+print("   (a) h_0=0 零初始化 -> train/test mismatch (训练从零隐状态, 执行从连续隐状态)")
+print("   (b) 完整轨迹回放 -> 内存爆 + 不能跨 episode 复用片段")
+print("   (c) 截断 BPTT (梯度只反传 K 步) -> K 步外的依赖学不到")
+print()
+
+# 【4】R2D2 的三件套 (Kapturowski 2019 [30]) — 工程上把循环 Q 真正跑通
+#   ① 存储隐状态 (stored hidden state): 回放缓冲区除了 (s,a,r,s'), 还存 actor 当时的 h
+#      -> 回放时用真实 h_0 初始化 LSTM, 而非零, 贴近执行分布
+#   ② Burn-in: 抽到一段后, 先 "空跑" 前 b 步 (不回传梯度) 让 LSTM 从 h_0 重建到 h_b
+#      -> 抵消 "stored h 略陈旧/有偏" 的残余 mismatch, 在 h_b 处再开始学习
+#   ③ 截断 BPTT: 只在 burn-in 后的 K 步回传梯度 (典型 K=20~80)
+#      -> 可控内存/算力, 又能学到中等长度的时间依赖
+# 配合分布式架构: 数百 actor (不同 ε 产多样数据) + 单 learner + 优先回放 (Ape-X 谱系)
+print("【4】R2D2 三件套 (Kapturowski ICLR 2019 [30]):")
+print("   ① stored hidden state: 回放存 actor 当时的 h_0, 初始化贴近执行分布")
+print("   ② burn-in: 抽到片段先空跑 b 步不回传梯度, 让 LSTM 从 h_0 重建到 h_b")
+print("   ③ 截断 BPTT: 只在 burn-in 后 K 步回传梯度 (典型 K=20~80)")
+print("   + 分布式: 数百 actor (不同 ε) + 单 learner + 优先回放 (Ape-X 谱系)")
+print()
+
+# 【5】burn-in 数值演示: stored h_0 vs 零初始化 vs burn-in
+# 简化 LSTM: h_t = 0.9 * h_{t-1} + 0.1 * x_t (线性循环, 直观看记忆衰减)
+# 真实轨迹 h 真值 = 从 t=-10 开始连续跑; 零初始化从 h_0=0 开始; stored 从 h_0=真值[-1]
+def linear_recurrent(x_seq, h_init):
+    h = h_init
+    for x in x_seq:
+        h = 0.9 * h + 0.1 * x
+    return h
+
+np.random.seed(0)
+true_history = np.random.randn(20)         # 模拟 actor 在 t=-20..-1 的真实轨迹
+h_true_end = linear_recurrent(true_history, 0.0)  # 真实连续隐状态 (执行分布)
+
+# 现在从 t=0 开始看一段新输入 x[0:8]
+x_new = np.random.randn(8)
+# (a) 零初始化: h_0 = 0 (训练分布)
+h_zero = linear_recurrent(x_new, 0.0)
+# (b) stored hidden state: h_0 = h_true_end (执行分布)
+h_stored = linear_recurrent(x_new, h_true_end)
+# (c) burn-in: 先空跑 b=4 步 (不学习), 再从 h_4 学 K=4 步
+burn_in_b = 4
+h_after_burnin = linear_recurrent(x_new[:burn_in_b], h_true_end)  # 空跑到 h_4
+h_burnin = linear_recurrent(x_new[burn_in_b:], h_after_burnin)     # 从 h_4 学到 h_8
+
+# 误差对比 (以 "执行分布真值" 为基准: 从 h_true_end 连续跑完整 8 步)
+h_exec = linear_recurrent(x_new, h_true_end)
+err_zero = abs(h_zero - h_exec)
+err_stored = abs(h_stored - h_exec)   # stored h_0 对了, 但截断 BPTT 不空跑也能学
+err_burnin = abs(h_burnin - h_exec)
+
+print("【5】burn-in 数值演示 (线性循环 h_t=0.9*h_{t-1}+0.1*x_t):")
+print(f"   执行分布真值 h_8 (从真实 h 连续跑): {h_exec:+.4f}")
+print(f"   零初始化      h_8 (h_0=0):          {h_zero:+.4f}  误差 {err_zero:.4f}")
+print(f"   stored h_0    h_8 (h_0=真值):       {h_stored:+.4f}  误差 {err_stored:.4f}")
+print(f"   burn-in b=4   h_8 (先空跑再学):     {h_burnin:+.4f}  误差 {err_burnin:.4f}")
+print("   -> 零初始化误差最大 (train/test mismatch); stored + burn-in 误差最小")
+print()
+
+# 【6】"幻觉" 现象: R2D2 的 LSTM 会表示当前观测里没有的信息
+# R2D2 论文观察到: 循环 agent 能发展出跨多步的时序策略,
+#   隐状态里 "携带" 当前帧看不到的信息 (有时被非正式称作 "幻觉" — hallucination)
+# 例: Atari 里敌人当前帧被遮挡, 但 LSTM 的 h 记着它几帧前在哪, 据此行动
+# 这是循环 Q 比帧堆叠强的深层原因: 堆叠只能看固定窗口的原始像素, LSTM 能学 "该记什么"
+print("【6】R2D2 的 '幻觉' 现象:")
+print("   LSTM 隐状态携带当前帧看不到的信息 (如被遮挡敌人几帧前的位置)")
+print("   -> 发展出跨多步的时序策略, 据记忆而非仅当前感官行动")
+print("   这是循环 Q 比帧堆叠强的深层原因: 堆叠只存固定窗口原始像素, LSTM 学 '该记什么'")
+print()
+
+# 【7】谱系: DRQN -> R2D2 -> Agent57 (循环 + 自适应探索)
+# DRQN (2015): 证明循环能处理部分可观测 (闪烁 Atari), 但单机、未解决回放训练难题
+# R2D2 (2019): 三件套 (stored h + burn-in + 截断 BPTT) + 分布式, Atari-57 大幅超越 Ape-X/IMPALA
+# Agent57 (2020 [13]): R2D2 + NGU 双时间尺度好奇心 + 策略族群, 首个全 57 款 Atari 超人类
+#   (入门篇/Rainbow 谱系已提过 Agent57, 这里补上 "它底子是 R2D2 循环" 这条线)
+print("【7】谱系: DRQN(2015) -> R2D2(2019) -> Agent57(2020)")
+print("   DRQN: 证明循环处理部分可观测 (闪烁 Atari), 单机, 未解决回放训练难题")
+print("   R2D2: 三件套 + 分布式, Atari-57 大幅超越 Ape-X DQN / IMPALA")
+print("   Agent57 [13]: R2D2 + NGU 双好奇心 + 策略族群, 首个全 57 款 Atari 超人类")
+`} title="循环 Q 网络:DRQN → R2D2 的部分可观测处理" />
+
+**看数(图)要点**:
+
+- **帧堆叠的盲区**:【1】里 reward 在 t=5 触发,因为它依赖 3 步前(t=2)经过亮格——窗口=2 的帧堆叠在 t=5 时只看到 t=4、t=5,根本看不到 t=2,学不到这层依赖。循环的 $h_t$ 把整条历史压成一个向量,任意长依赖都能进。
+- **DRQN 的价值定位**:【2】强调 DRQN 在**标准 Atari 上不比 DQN 强**(没有系统优势)——因为标准 Atari 帧堆叠已够马尔可夫。循环的增益只在**观测退化**时显现(闪烁 Atari、frame-skipping 丢帧、传感器有噪)。这是循环 Q 的适用边界:别为循环而循环,马尔可夫够用时帧堆叠更省。
+- **burn-in 的数学直觉**:【5】里零初始化误差 0.1416、stored + burn-in 误差 0.0000,差距来自 $h_0$ 是否贴近执行分布。零初始化的 $h_0=0$ 让 LSTM 从「假起点」出发,前几步隐状态都偏;stored hidden state 把真实 $h_0$ 存进回放,burn-in 再空跑几步让 LSTM 自校正,到达 $h_b$ 时分布已对齐——这才开始回传梯度。
+
+### DRQN:把 DQN 的全连接层换成 LSTM
+
+DRQN(Deep Recurrent Q-Network,Hausknecht et al., 2015 [29])的改动极小:**把 DQN 第一个卷积后的全连接层换成 LSTM**。
+
+$$\underbrace{\text{conv}(\phi(o_t))}_{\text{卷积特征}} \;\longrightarrow\; \underbrace{h_t=\text{LSTM}(h_{t-1},\,\cdot)}_{\text{循环隐状态}} \;\longrightarrow\; Q(h_t,a)$$
+
+- **训练**:BPTT(backprop through time)沿时间反传梯度,把一条轨迹上各步的 TD 误差累加到 LSTM 权重。LSTM 的三门(input/forget/output gate)决定「记多少新信息、留多少旧信息、输出什么」,内容由 TD 误差驱动——网络自己学该记什么。
+- **结果**:标准 Atari 上 DRQN ≈ DQN(无系统优势,因为 4 帧堆叠已够马尔可夫);**闪烁 Atari**(屏幕随机闪烁,单帧大量信息丢失)上 DRQN 显著优于 DQN——观测退化时循环从历史补信息。
+- **定位**:DRQN 证明「循环能处理部分可观测」,但它是单机、小规模实验,**没解决循环 Q 从经验回放训练的核心难题**(下面 R2D2 三件套才是工程上把循环 Q 真正跑通的关键)。
+
+### R2D2 的三件套:让循环 Q 能从回放训练
+
+朴素把 LSTM 塞进 DQN 会撞上三个坑,因为**经验回放采样的是「片段」,而 LSTM 隐状态沿连续轨迹流动**——从回放抽一段 $(o_0,\dots,o_n)$,$h_0$ 从哪来?
+
+- **坑 a:零初始化** $h_0=\mathbf 0$。$h_0$ 不代表真实历史,LSTM 要花几步才「进入状态」→ 训练分布($h_0=0$)与执行分布($h_0=$ 真实连续隐状态)不一致 = **train/test mismatch**。
+- **坑 b:完整轨迹回放**。存整条 episode 才能恢复 $h_0$ → 长任务内存爆 + 不能跨 episode 复用片段,样本效率低。
+- **坑 c:截断 BPTT**。梯度只反传 $K$ 步,$K$ 步外的依赖学不到(但 $K$ 够大通常够用)。
+
+R2D2(Recurrent Replay Distributed DQN,Kapturowski et al., ICLR 2019 [30])用三件套工程上解决:
+
+1. **存储隐状态(stored hidden state)**:回放缓冲区除了存 $(s,a,r,s')$,还存 actor 当时算出的隐状态 $h_0$。回放时用真实 $h_0$ 初始化 LSTM,而非零——初始化贴近执行分布,mismatch 从源头缩小。
+2. **Burn-in**:抽到一段后,先「空跑」前 $b$ 步(只前向、不回传梯度),让 LSTM 从 $h_0$ 重建到 $h_b$。抵消「stored $h$ 略陈旧/有偏」的残余 mismatch,在 $h_b$ 处分布已对齐,再开始学习。
+3. **截断 BPTT**:只在 burn-in 后的 $K$ 步回传梯度(典型 $K=20\sim80$)。可控内存/算力,又能学到中等长度的时间依赖。
+
+配合**分布式架构**(数百 actor 用不同 $\varepsilon$ 产多样数据 + 单 learner + 优先回放,继承 Ape-X DQN 谱系),R2D2 在 Atari-57 上大幅超越 Ape-X DQN 与 IMPALA,刷新当时离散控制深度 RL 的最好成绩。论文还观察到循环 agent 会发展出**跨多步的时序策略**,隐状态携带当前帧看不到的信息——有时被非正式称作「幻觉(hallucination)」:如敌人当前帧被遮挡,LSTM 的 $h$ 记着它几帧前在哪,据此行动。这是循环 Q 比帧堆叠强的深层原因:堆叠只存固定窗口原始像素,LSTM 学「该记什么」。
+
+三件套单独讲清了,但它们如何在**一次训练更新**里拼到一起?核心是「用存下的 $h_0$ 初始化 → burn-in 空跑对齐 → 只在后半段回传梯度」:
+
+```
+# R2D2 训练一段序列 伪代码 (Kapturowski et al. 2019)
+seq, h0_stored = replay.sample()      # 采一段轨迹, 连同 actor 当时的隐状态 h0
+h = h0_stored                         # ① 用真实 h0 初始化 LSTM(而非零), 贴近执行分布
+
+# ② burn-in: 前 b 步只前向、不回传梯度, 让 h 从 h0 重建对齐
+for t in range(burn_in_steps):
+    _, h = lstm(seq[t], h)            # 空跑, h 更新但不算 loss
+h = h.detach()                        # 截断梯度: burn-in 段不参与反传
+
+# ③ 截断 BPTT: 只在之后的 K 步上算 TD 误差并回传
+loss = 0
+for t in range(burn_in_steps, burn_in_steps + K):
+    q, h = lstm(seq[t], h)
+    y = r_t + γ * max_a Q_target(seq[t+1], a)   # (常配 double + n-step)
+    loss += huber(q[a_t] - y)
+backprop(loss)                        # 梯度只反传这 K 步(典型 K=20~80)
+```
+
+对比朴素做法(每段都从 $h_0=0$ 学起):零初始化让 LSTM 从「假起点」出发,前几步隐状态全偏、训练与执行分布对不上;R2D2 用 stored $h_0$ + burn-in 把这个 mismatch 抹掉,循环 Q 才第一次能稳定地从经验回放训练。
+
+### 谱系:DRQN → R2D2 → Agent57
+
+把循环 Q 这条线收口:
+
+| 算法 | 年份 | 核心贡献 | 局限/后续 |
+|---|---|---|---|
+| **DRQN** [29] | 2015 | conv→LSTM,证明循环处理部分可观测(闪烁 Atari) | 单机,未解决回放训练难题 |
+| **R2D2** [30] | 2019 | stored $h$ + burn-in + 截断 BPTT + 分布式,循环 Q 真正可训 | Atari-57 大幅超越 Ape-X DQN / IMPALA |
+| **Agent57** [13] | 2020 | R2D2 + NGU 双时间尺度好奇心 + 策略族群 | 首个全 57 款 Atari 超人类 |
+
+[入门篇](/tutorials/reinforcement-learning)的 POMDP 小节讲过表格版的信念状态解法,本篇补上**深度价值方法侧**的对应物:信念 MDP 里的 $b_t$(显式分布)→ DRQN/R2D2 里的 $h_t$(隐式隐状态),两条路解决同一个「状态看不全」问题。而 Agent57 的「R2D2 循环底子 + NGU 双好奇心」组合,把本篇的**循环 Q** 与下一节的**有向探索**两条线缝合——这也是为什么 Agent57 能在 Montezuma(稀疏奖励,要长程记忆 + 定向探索)与 Pong(密集奖励,无需记忆)两头通吃。
+
+> 💡 **与入门篇 POMDP 的呼应**:入门篇用 Tiger 问题的贝叶斯滤波演示了**显式信念更新** $b'(s')=\eta\,Z(o\mid s',a)\sum_s P(s'\mid s,a)b(s)$——那时环境模型 $P,Z$ 已知,能算精确后验。本篇的循环 Q 处理的是**模型未知、高维像素**的设定:没法算精确 $b_t$,改用 LSTM 把历史压成 $h_t$ 隐式逼近信念。两者是「信念 MDP」同一框架在不同信息假设下的实例化。
+
+## 探索深化:从盲目随机到定向智能探索
+
+NoisyNet 把探索从「动作空间」挪到「参数空间」,但本质上仍是**无向探索(undirected exploration)**——随机扰动权重,不依赖「哪里不确定」的显式估计。入门篇讲过稀疏奖励下的**内在动机**(count-based / ICM / RND,见 [强化学习入门](/tutorials/reinforcement-learning) 的内在奖励小节),它们已经是**有向探索(directed exploration)**——朝「没见过 / 预测不准」的方向走。这里把探索策略的全谱系补全,并讲清 NoisyNet 之后深度 RL 探索的三个关键演进:**Bootstrapped DQN** 的后验采样式深度探索、**NGU / Agent57** 的双时间尺度好奇心、**Go-Explore** 的「先返回后探索」。
+
+### 探索的两大类:无向 vs 有向
+
+| | 无向探索(undirected) | 有向探索(directed) |
+|---|---|---|
+| **代表** | ε-greedy、高斯动作噪声、NoisyNet 参数噪声 | UCB、count-based、ICM/RND 好奇心、Bootstrapped DQN |
+| **依据什么探索** | 随机(不看你「哪里没把握」) | 不确定性 / 新奇度(专挑没把握的) |
+| **优点** | 简单、通用、易实现 | 样本效率高,长程稀疏任务上能找到远处奖励 |
+| **缺点** | 长程稀疏任务上几乎到不了远处 | 需额外维护不确定性估计,易掉进 noisy-TV 等陷阱 |
+
+ε-greedy 每步独立撒随机,是**浅探索**——它可能连续走两步「右」又随机走三步「左」,在长链上原地打转。有向探索之所以强,在于它能**连贯地**朝同一方向多步推进(coherent),这正是发现远处奖励所必需的。下面三种方法,都是把「连贯多步试新」做到位的不同路线。
+
+### Bootstrapped DQN:用多个 head 做 Thompson 采样式深度探索
+
+**Bootstrapped DQN**(Osband et al. 2016 [11])的核心想法异常简洁:把 Q 网络的最后一层换成 **K 个并行的 head**,每个 head 用**不同的 bootstrap 子采样**训练——即每条经验用一个随机 binary mask 决定「哪些 head 在这条数据上学习」。结果:K 个 head 各自拟合了**略有不同的 Q 函数**,它们在「数据充分处」一致、在「数据稀疏处」分歧大。
+
+<CodeRunner title="Bootstrapped DQN:K 个 head 的不确定性驱动深度探索" language="python" defaultCode={`import numpy as np
+
+# Bootstrapped DQN toy:5 状态 × 3 动作,真值 Q*(s,a) = 0.3·s·a
+S, A = 5, 3
+Qstar = np.array([[0.3*s*a for a in range(A)] for s in range(S)])
+rng = np.random.default_rng(7)
+
+K = 8  # 8 个 head
+# 每个 head 只见过 ~55% 的 (s,a) 样本(binary mask),其余回退到 0;样本带噪声
+heads = []
+for k in range(K):
+    mask = rng.random((S, A)) < 0.55
+    noisy = Qstar + rng.normal(0, 0.4, (S, A))
+    heads.append(np.where(mask, noisy, 0.0))
+heads = np.array(heads)  # (K, S, A)
+
+mean_q = heads.mean(0)   # 跨 head 均值
+std_q  = heads.std(0)    # 跨 head 标准差 = 不确定性
+
+print("真值 argmax:", Qstar.argmax(1).tolist())
+print("mean-Q argmax:", mean_q.argmax(1).tolist(), " (应与真值一致)")
+print()
+
+# 数据稀疏的 (s,a) → head 间分歧大 → 高不确定性 → 该探索
+print("状态 s=4 各动作的 head 覆盖与 Q 分歧:")
+for a in range(A):
+    cov = (heads[:, 4, a] != 0).sum()
+    print(f"  a={a}: {cov}/{K} head 有数据, Q 均值={mean_q[4,a]:+.2f} std={std_q[4,a]:.2f}")
+
+# Thompson 采样式探索:每回合抽一个 head,用它的贪心策略行动(整回合一致)
+print()
+print("Thompson 采样 20 回合(状态 s=4 的动作分布):")
+cnt = np.zeros(A, dtype=int)
+for _ in range(20):
+    k = rng.integers(K)
+    cnt[heads[k, 4].argmax()] += 1
+print(f"  动作 0/1/2 被选次数: {cnt.tolist()}")
+print("  → 高均值动作被选多,高 std 动作偶被试;抽到不同 head 走不同路 = 深度探索")
+`} />
+
+运行这段代码你会看到:① 跨 head 的 **mean-Q argmax 与真值一致**(集成降方差);② 数据稀疏的 (s,a)(覆盖少的列)**跨 head std 更大**——这就是不确定性;③ **Thompson 采样**式探索:每回合随机抽一个 head,用它的贪心策略**整回合一致**地行动,不同 head 给出不同路线。
+
+> 💡 **为什么这是「深度」探索?** ε-greedy 每步独立随机,走到一半可能被打回去,长链上几乎到不了远处。Bootstrapped DQN 抽到一个 head 后,该 head 的偏好**贯穿整条轨迹**——如果这个 head「相信」右行有价值,它就会一路右行到底。这种**连贯多步试新(coherent)**正是发现远处奖励所必需的,Osband et al. 称之为 **deep exploration**。它本质是把 bandit 里的 Thompson 采样(后验采样)搬到了 RL:每个 head 是对「真 Q 后验」的一次近似采样。
+
+下面这个交互 viz 把上面的 toy 具象化:左半是 K 个 head 在选中状态的 Q 值散点(分歧越散越不确定),右半是跨 head 的 Q 标准差柱状图(紫柱=探索 bonus)。调低「数据覆盖率」coverage,看分歧与 std 如何涨高——数据稀疏处不确定性自然变大。
+
+<BootstrappedDqnViz />
+
+### NGU 与 Agent57:短时 + 长时双好奇心,攻克全局长程探索
+
+入门篇的好奇心小节结尾留了一个开放难题:**ICM/RND 只擅长局部探索**(走到相邻新奇区),需要长程协调决策的**全局探索**(如「先去 A 房拿钥匙、再回 B 房开门」这种跨远距离依赖)仍超出能力。**NGU**(Never Give Up,Badia et al. 2020a [12])与 **Agent57**(Badia et al. 2020b [13])正是为解决这个难题而生。
+
+**NGU 的关键创新**是**两个时间尺度的内在奖励叠加**:
+
+$$r^i_t = r^{\text{episodic}}_t \cdot \mathrm{clip}(\alpha_t,\, 1,\, L)$$
+
+- **短时(回合内,episodic)**:用一个**情景记忆(episodic memory)**存当前回合见过的状态嵌入; novelty = 到记忆中 k 近邻的**逆核距离**。它**回合内快速衰减**——同一回合内反复回访同一状态会被迅速惩罚,逼智能体在**本回合**走新路。回合结束清空,所以不影响跨回合。
+- **长时(跨回合,life-long)**:就是 **RND** 预测误差。它**慢速衰减**——跨回合地惩罚「历史去过很多次的状态」,防止智能体每回合都奔向同一片「局部新奇」。
+
+两者相乘:既惩罚「本回合内重复」(短时),又惩罚「跨回合反复去同一片区域」(长时)。短时项保证回合内的连贯推进(不被局部新奇困住),长时项保证跨回合的多样性(不每回合重蹈同一覆辙)——这正是入门篇点名缺失的**全局长程探索**的正解。
+
+**Agent57** 在 NGU 之上加了两件事,成为**首个在全部 57 款 Atari 游戏上超越人类基准**的 DRL 智能体:
+
+1. **策略族群**:维护一组策略,各有不同的内外奖励权衡系数 $\beta_j$ 与折扣 $\gamma_j$。有的策略重探索($\beta$ 大、$\gamma$ 长,适合稀疏奖励的 Montezuma),有的重利用($\beta$ 小、$\gamma$ 短,适合密集奖励的 Pong)。用一个**滑窗 UCB 元控制器**决定本回合调度哪个策略——**探索-利用的权衡本身被当作一个 bandit 来解**。
+2. **奖励分解 Q 值**:$Q(s,a) = Q^e(s,a) + \beta_j \cdot Q^i(s,a)$,外在 $Q^e$ 与内在 $Q^i$ 分别训练两个头,再用 $\beta_j$ 加权合并。
+
+> 💡 **与 NoisyNet 的关系**:R32 讲 NoisyNet 解决「普通状态下该不该探索」,但它在 Montezuma's Revenge 这种极稀疏长程任务上力不从心——因式分解噪声的表达力撑不起「跨几十步找钥匙再开门」的协调决策。NGU/Agent57 用**记忆 + 双时间尺度好奇心**补上了这一课:它们不是替代 NoisyNet,而是把探索的「时间视野」从一步推进到整回合乃至跨回合。
+
+### Go-Explore:先返回,再探索
+
+**Go-Explore**(Ecoffet et al. 2019/2020 [14])走了一条更直接的路线,干脆**绕过「靠随机性发现远处奖励」这个困境**:既然难点是「随机探索摸不到远处」,那就**先记住去过的好地方,下次直接从那里接着探索**。它的两阶段算法:
+
+1. **第一阶段(找轨迹,无网络)**:维护一个「存档(archive)」记录有意思的状态。从存档里挑一个状态**回滚(simulator reset 到该状态)**,从那里继续随机探索;若发现新状态或更好路径,加入存档。这一步像图搜索(Dijkstra 式),不需要神经网络,只要能精确回到存档状态(需要可回滚的模拟器)。
+2. **第二阶段(鲁棒化)**:第一阶段找到的轨迹依赖「直接 reset 到存档状态」,但真实环境(机器人、在线游戏)不能 reset。第二阶段用**目标条件策略 + 自模仿学习**训练一个能**自主**走到存档状态的策略,把脆弱的「reset 依赖」换成可部署的策略。
+
+Go-Explore 在 Montezuma's Revenge 上拿到了当时的超高分解(远超 NGU 之前的方法),代价是**依赖可回滚模拟器**(第一阶段),且第二阶段鲁棒化仍较复杂。它的核心洞见是:**探索的瓶颈不在「随机性够不够」,而在「能否回到有前途的状态继续往前」**——这把探索问题从「采样」重构成了「搜索」。
+
+### 不确定性驱动的探索:VIME、集成分歧与情景可达性
+
+前面 Bootstrapped DQN / NGU / Go-Explore 三条路分别从「后验采样」「双时间尺度记忆」「状态回滚」攻探索,入门篇的 ICM/RND 则从「预测误差」攻。它们背后有一个共同的直觉——**智能体应当去自己「不确定」的地方**——但衡量「不确定」的方式各不相同。这一小节讲三种**直接以不确定性为核心信号**的探索法,它们与 ICM/RND 的「预测误差」有微妙但根本的区别:
+
+- **VIME**(Variational Information Maximizing Exploration,Houthooft et al. 2016 [18])——不预测下一状态、不数状态计数,而是**量化「这条转移让我对动力学模型本身的认知改变了多少」**。它维护一个动力学模型 $p(s'\mid s,a;\theta)$,但 $\theta$ 不是点估计而是**后验分布** $q_\phi(\theta)$(用贝叶斯神经网络 / 变分推断近似,因子化高斯)。见到一条新转移 $(s,a,s')$ 后,后验从 $q_{\phi_t}(\theta)$ 更新到 $q_{\phi_{t+1}}(\theta)$,VIME 把这两份后验的 **KL 散度**作为内在奖励:
+
+$$r^i_t = D_{\mathrm{KL}}\!\Big[q_{\phi_{t+1}}(\theta)\,\big\|\,q_{\phi_t}(\theta)\Big]$$
+
+直觉是:**KL 衡量后验改变的程度**。若 $(s,a,s')$ 是智能体见过很多次的熟悉转移,后验几乎不变,KL≈0;若是第一次见的陌生转移,后验大幅更新(均值移动、方差收缩),KL 大。所以 VIME 直接奖励「**能带来最多信息增益的转移**」——这是信息论意义下的「好奇」。注意它和 ICM/RND 的区别:ICM/RND 衡量「**预测误差**」(预测下一状态错得多离谱),VIME 衡量「**后验更新幅度**」(模型参数的信念改变了多少)。两者常正相关(陌生转移既预测错又让后验大改),但语义不同——预测误差会被**不可预测的随机性**(noisy TV)永久维持,而后验在充分采样后会收敛、KL 自然衰减,因此 VIME 对 noisy-TV 问题有一定内在缓解(随机性虽不可预测,但后验对该随机性的「不确定性」会随观测下降)。KL 没有闭式解(后验难解析),实践中用**二阶泰勒展开 + Fisher 信息矩阵**近似估计。
+
+- **基于分歧的探索**(Exploration via Disagreement,Pathak et al. 2019 [19])——更直接的不确定性信号:训一个 **forward model 的集成**(ensemble,$f_1,\dots,f_K$,常用 5 个),每个 model 在略不同的子集/初始化上训练。在某状态 $s$ 下,若这 $K$ 个 model 的预测**高度一致**,说明这个区域数据充分、模型有把握;若**分歧大**,说明数据稀疏、模型不确定——这正是该去探索的地方。内在奖励就是集成方差:
+
+$$r^i_t = \mathrm{Var}_{f_1,\dots,f_K}\!\big[f_i(\phi(s_t),a_t)\big]$$
+
+它最讨喜的性质是**可微**:方差是各 model 输出的连续函数,可以直接对策略参数求梯度,**把探索 bonus 直接塞进策略梯度的目标里端到端优化**(不像计数 bonus 那样只能加到奖励上被动响应)。Pathak et al. 2019 还用随机特征作 $\phi$,避免学特征时也学到「把陌生状态映射到熟悉特征」作弊。分歧探索和 VIME 都衡量「模型不确定性」,但 VIME 用贝叶斯后验(参数不确定性),disagreement 用集成方差(预测不确定性)——后者实现简单(无需变分推断),代价是集成训练成本 $K$ 倍。
+
+- **情景好奇心**(Episodic Curiosity through Reachability,Savinov et al. 2019 [20])——从完全不同的角度衡量「新」:不看预测误差也不看模型不确定性,而看**状态在转移图上的可达性(reachability)**。它维护一个**情景记忆** $M$(本回合内见过的状态嵌入),并用一个 siamese 比较器 $C(\phi(s_i),\phi(s_j))\in[0,1]$ 估计「$s_j$ 从 $s_i$ 出发几步内可达」(1=近、0=远)。对当前状态 $s_t$,把记忆里所有 $s_i$ 的比较结果聚合(取 max 或 90 分位)$C^M(\phi(s_t))$:若 $s_t$ 从记忆里某个状态**容易到达**(高 $C^M$),说明它不新;若**不容易到达**(低 $C^M$,即离记忆里所有状态都「远」),说明它新。bonus 为:
+
+$$r^i_t = C' - C^M(\phi(s_t))$$
+
+其中 $C'$ 是阈值(如 0.5)。关键洞见:novelty 来自**转移图结构**(可达性)而非**状态访问计数**或**预测误差**——一个状态哪怕被预测模型见过(误差低)、被计数器记过(次数高),只要它在**本回合的可达性图上离已记忆状态远**,就依然算新。作者声称这能缓解 noisy-TV 问题:电视画面虽不可预测(预测误差永久高),但它在可达性图上是个**已到达的局部区域**,不会再触发可达性 novelty。
+
+下面这个可运行示例直观对比 VIME(后验 KL)与 disagreement(集成方差)两种不确定性信号——在「熟悉转移」与「陌生转移」上各自如何响应:
+
+<CodeRunner defaultCode={`# VIME 后验 KL vs Disagreement 集成方差: 两种不确定性信号
+import math, random
+
+def kl_gauss(mu0, s0, mu1, s1):
+    """两个 1D 高斯后验的 KL(q1||q0)."""
+    return math.log(s0/s1) + (s1**2 + (mu1-mu0)**2)/(2*s0**2) - 0.5
+
+# --- VIME: 动力学模型参数 theta 的后验 q(theta) = N(mu, sigma^2) ---
+# 旧后验 (见到这条转移前)
+mu_t, sig_t = 0.50, 0.20
+
+# (a) 熟悉转移: 见过很多次, 后验几乎不变
+mu_fam, sig_fam = 0.52, 0.19
+kl_fam = kl_gauss(mu_t, sig_t, mu_fam, sig_fam)
+
+# (b) 陌生转移: 第一次见, 后验大幅更新 (均值大跳、方差显著收缩)
+mu_nov, sig_nov = 1.20, 0.08
+kl_nov = kl_gauss(mu_t, sig_t, mu_nov, sig_nov)
+
+print("=== VIME: 后验 KL 信息增益 ===")
+print(f"熟悉转移: KL = {kl_fam:.4f}  (后验几乎不变 -> 低信息增益)")
+print(f"陌生转移: KL = {kl_nov:.4f}  (后验大幅更新 -> 高信息增益)")
+print(f"  比值 = {kl_nov/kl_fam:.0f}x  -> VIME 奖励陌生转移\\n")
+
+# --- Disagreement: 5 个 forward model 的集成方差 ---
+random.seed(42)
+def variance(preds):
+    m = sum(preds)/len(preds)
+    return sum((p-m)**2 for p in preds)/len(preds)
+
+# 熟悉状态: 5 models 训练数据多, 预测一致 (低噪声)
+fam_preds = [0.50 + random.gauss(0, 0.03) for _ in range(5)]
+# 陌生状态: 5 models 各自外推, 分歧大 (高噪声)
+nov_preds = [random.gauss(0.50, 0.25) for _ in range(5)]
+
+var_fam = variance(fam_preds)
+var_nov = variance(nov_preds)
+
+print("=== Disagreement: 集成方差 ===")
+print(f"熟悉状态: 5 models = {[round(p,3) for p in fam_preds]}")
+print(f"  方差 = {var_fam:.4f}  (模型一致 -> 低不确定性)")
+print(f"陌生状态: 5 models = {[round(p,3) for p in nov_preds]}")
+print(f"  方差 = {var_nov:.4f}  (模型分歧 -> 高不确定性)")
+print(f"  比值 = {var_nov/var_fam:.0f}x  -> disagreement 奖励陌生状态")
+print()
+print("=> 两种信号都把'陌生'识别为高 bonus, 但机制不同:")
+print("   VIME: 量化模型参数后验的改变幅度 (信息论意义的好奇)")
+print("   Disagreement: 量化集成预测的分歧 (模型不确定性, 可微可直接优化策略)")
+`} />
+
+三种方法的对照:
+
+| 方法 | 不确定性信号 | 衡量什么 | noisy-TV? | 关键公式 |
+|---|---|---|---|---|
+| **VIME** [18] | 后验 KL | 模型参数后验更新幅度(信息增益) | 部分缓解(后验对随机性也会收敛) | $r^i=D_{\mathrm{KL}}[q_{\phi_{t+1}}\|q_{\phi_t}]$ |
+| **Disagreement** [19] | 集成方差 | $K$ 个模型预测的分歧 | 部分缓解(集成对随机区也会收敛) | $r^i=\mathrm{Var}_i[f_i(\phi(s),a)]$ |
+| **Episodic Curiosity** [20] | 可达性图 | 状态在转移图上离记忆状态多远 | ✅ 缓解(可达性而非预测/计数) | $r^i=C'-C^M(\phi(s))$ |
+| (对比) ICM/RND | 预测误差 | 下一状态预测错得多离谱 | ❌ 不缓解(随机性永远预测错) | $r^i=\|\hat\phi(s')-\phi(s')\|^2$ |
+
+这三种方法把「不确定性驱动探索」从单一视角(ICM/RND 的预测误差)拓展到三个互补视角:**参数后验信息增益**(VIME)、**集成预测分歧**(disagreement)、**状态可达性图**(episodic curiosity)。它们与前面的 Bootstrapped DQN(后验采样式深度探索)、NGU(双时间尺度记忆 + RND)共同构成了现代深度 RL 探索谱系——核心都是把「该探索哪里」从「无差别随机」升级为「**跟着不确定性走**」,只是在「如何衡量不确定性」上各有取舍。
+
+### 小结:探索策略谱系
+
+| 方法 | 探索类型 | 时间视野 | 关键机制 | 长程稀疏任务? |
+|---|---|---|---|---|
+| ε-greedy / NoisyNet | 无向 | 单步 | 随机扰动 | ❌ 浅探索,到不了远处 |
+| count-based / ICM / RND | 有向(新奇度) | 局部 | 预测误差 / 计数 bonus | ⚠️ 局部有效,全局长程弱 |
+| **VIME** [18] | 有向(信息增益) | 单步 | 动力学后验 KL,模型参数不确定性 | ⚠️ noisy-TV 部分缓解 |
+| **Disagreement** [19] | 有向(集成方差) | 单步 | 多模型预测分歧,可微端到端优化 | ⚠️ 实现简单,集成训练 $K$ 倍 |
+| **Episodic Curiosity** [20] | 有向(可达性) | 回合 | 转移图可达性,情景记忆 + 比较器 | ✅ 缓解 noisy-TV |
+| **Bootstrapped DQN** | 有向(后验采样) | 整回合 | 多 head 分歧 + Thompson 采样 | ✅ 连贯多步深度探索 |
+| **NGU / Agent57** | 有向(短+长时新奇) | 回合+跨回合 | 情景记忆 + RND 双时间尺度 | ✅ 全局长程,SOTA |
+| **Go-Explore** | 有向(状态回滚) | 跨回合 | 存档 + 先返回后探索 | ✅ 超高分(需可回滚) |
+
+探索是 RL 的核心难题之一——在奖励密集时随便试都能碰到信号,但真实世界的奖励常常极度稀疏。NoisyNet 把探索从动作空间搬到参数空间,Bootstrapped DQN 用多 head 实现后验采样式的**连贯深度探索**,NGU/Agent57 用记忆 + 双时间尺度好奇心攻克**全局长程探索**,Go-Explore 用「先返回再探索」把问题从采样重构为搜索。它们共同把深度 RL 的探索能力推到了 Atari 全 57 款游戏超人类的水平。
+
+<ExplorationSpectrumViz />
+
+上图把散落在 [bandit 篇](/tutorials/multi-armed-bandit)(ε-greedy/UCB/Thompson)、[入门篇](/tutorials/reinforcement-learning)(count-based/ICM/RND)与本篇(NoisyNet/Bootstrapped DQN/NGU/Agent57/Go-Explore)的探索方法收成一张谱系图。横轴是**时间视野**(单步 → 回合 → 跨回合),纵轴是**探索方向性**(无向盲目 → 有向定向),节点颜色编码**长程稀疏任务能力**(红❌ 浅探索 → 黄⚠️ 局部有效 → 绿✅ 全局长程)。核心趋势一目了然:**从左下到右上**,探索能力随「时间视野变长 + 方向性变智能」递进——ε-greedy 只能盲目试一步,NoisyNet 把扰动搬进参数空间但仍属单步无向,ICM/RND/VIME 用预测误差定向但只看局部,Bootstrapped DQN/Episodic Curiosity 把视野拉到整回合,NGU/Agent57/Go-Explore 终于能连贯多步定向探索到远处的稀疏奖励。连线表示方法间的演进与借鉴:RND 的长期好奇心 + Episodic Curiosity 的短期记忆汇合成 NGU,Bootstrapped DQN 的后验采样思想也贡献其中。点击任一节点查看其机制。
+
+## 表征学习:像素到特征的迁移学习
+
+前面所有 DQN 变体都假设「状态 $s$ 是个干净的低维向量」(如 CartPole 的 4 维)。但 Atari、机器人视觉、自动驾驶这些**从像素学习**的场景里,$s$ 是一张 $84\times84\times4$ 的图像——直接喂进 Q 网络让 CNN 端到端学,要学两件事:① **视觉表征**(从像素抽取出「球在哪、板在哪、敌人朝哪」这些语义特征);② **控制**(基于表征算 $Q(s,a)$)。两者混在一个梯度信号里互相拖累:奖励稀疏时 CNN 收到的训练信号极弱,表征学不动;表征学不好,Q 更学不动。**表征学习 for RL** 的核心洞见是:**把表征学习从控制学习里拆出来,用辅助任务单独喂监督信号**,让 CNN 先学到好特征,再交给 Q 头做控制。本节看三条主线——**对比学习(CURL)、自预测表征(SPR)、数据增强一致性(DrQ)**——它们是 2020-2021 年像素 RL 样本效率的三大支柱。
+
+### CURL:对比学习把「同状态近、异状态远」写进表征
+
+对比学习(contrastive learning)借自自监督视觉表征学习(SimCLR/MoCo):**不靠任何奖励标签,只靠「同一状态的两个增强视图应表征相近、不同状态的视图应表征相远」**这一不变性,学到判别性表征。CURL(Srinivas, Laskin, Abbeel, 2020 [24])把 InfoNCE 损失嫁接到 RL:对当前观测 $s_t$ 做数据增强(随机裁剪等)得两个视图 $s_t^{(1)},s_t^{(2)}$,编码器 $\phi$ 出嵌入 $z=\phi(s_t^{(1)})$、正样本 $z^+=\phi(s_t^{(2)})$,同 batch 内其他状态的嵌入当负样本 $\{z_k^-\}$,InfoNCE 损失为
+
+$$\mathcal L_{\text{InfoNCE}}=-\log\frac{\exp(\mathrm{sim}(z,z^+)/\tau)}{\exp(\mathrm{sim}(z,z^+)/\tau)+\sum_{k=1}^{K}\exp(\mathrm{sim}(z,z_k^-)/\tau)},$$
+
+其中 $\mathrm{sim}(u,v)=u^\top v/(\lVert u\rVert\lVert v\rVert)$ 是余弦相似度,$\tau$ 是温度。最小化该损失 $\Rightarrow$ 拉近正样本(同状态不同 view)、推开负样本(不同状态),表征空间里「同状态近、异状态远」,下游 $Q$ 头在这个判别性表征上更易学。CURL 在 DM Control 与 Atari 上相对基线提升 1.9x/1.2x,是**首个图像方法接近 state-based 特征的样本效率**。
+
+### SPR:预测未来表征,而非重建像素
+
+SPR(Schwarzer, Anand, Goel, Hjelm, Courville, Bachman, 2021 ICLR [25])换一条路:**不靠对比,靠预测**——训练 agent 预测自己**未来多步的 latent 表征**。给定当前观测 $s_t$,用编码器 $\phi$ 出 $z_t=\phi(s_t)$,再用一个学出的**过渡模型** $g$ 在 latent 空间前向预测 $k$ 步:$\hat z_{t+k}=g^{(k)}(z_t,a_{t:t+k})$;目标是对齐 EMA 目标编码器 $\phi_{\text{EMA}}$(agent 参数的指数移动平均,稳定目标)出的真实未来表征 $z_{t+k}^-=\phi_{\text{EMA}}(s_{t+k})$。损失为预测表征与目标表征的余弦距离 $\lVert\hat z_{t+k}-z_{t+k}^-\rVert^2$ 在多步 $k$ 上求和,再加数据增强一致性项(强制同一观测的多个 view 表征一致)。
+
+直觉:能预测未来表征 $\Rightarrow$ 当前表征 $z_t$ 必须编码「状态里对预测未来有用的信息」(球速、敌人朝向、自身动量),而非无关像素(背景纹理、光照)。**这正是 $Q(s,a)$ 真正需要的语义信息**——$Q$ 要估未来回报,就得懂未来怎么演化。SPR 在 Atari 100k 步上中位人类归一化分 0.415,较此前 SOTA 提升 55%,在 26 款游戏的 7 款上超专家人类。
+
+### DrQ:数据增强就够了,无需辅助任务
+
+DrQ(Kostrikov, Yarats, Fergus, 2020 [26])走最简路线:**连辅助损失都不用,纯数据增强正则化 $Q$ 网络**。对每个观测 $s_t$ 做 $K$ 次随机增强(如随机平移裁剪)得 $K$ 个 view $\{s_t^{(k)}\}$,每个 view 算一次 $Q$ 值,取平均作为该转移的 $Q$ 目标:$\bar Q(s_t,a)=\frac1K\sum_{k=1}^K Q_\theta(s_t^{(k)},a)$。这个 $K$-view 平均有两个好处:① **降方差**——$K$ 个独立噪声 view 的平均方差是单 view 的 $1/K$;② **正则化**——强制 $Q$ 对「无关像素扰动」不变,$Q$ 函数更平滑、泛化更好。DrQ 配 SAC 在 DM Control 上 SOTA,**超越 Dreamer/PlaNet/SLAC 等基于模型的方法与 CURL 等对比学习方法**,且实现极简(几行增强代码 + 平均),成为像素 RL 的强基线。DrQ 的成功说明:**有时候表征学习不需要花哨的辅助任务,把数据增强做对就够了**。
+
+### 动手看:InfoNCE 拉正样本、推开负样本 & 增强平均降方差
+
+下面这个 CodeRunner 用纯 numpy 把本节两件事一次看清:① **CURL 的 InfoNCE**——训练一个 2-D 嵌入空间(锚点 $z$、正样本 $z^+$、4 个负样本 $z_k^-$),看 InfoNCE 梯度如何把 $z^+$ 拉到与 $z$ 对齐($\mathrm{sim}\to+1$)、把 $z_k^-$ 推到反方向($\mathrm{sim}\to-1$)、损失下降;② **DrQ 的增强一致性**——对同一状态算 $K$ 个带噪 view 的 $Q$ 平均,看估计方差随 $K$ 按 $1/\sqrt K$ 下降。
+
+<CodeRunner defaultCode={`import numpy as np
+
+# ===== Part 1: CURL InfoNCE 把正样本拉近、负样本推开 =====
+def sim(a, b):
+    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+def infonce(z, zpos, znegs, tau=0.5):
+    sp = np.exp(sim(z, zpos) / tau)
+    sn = np.exp(np.array([sim(z, n) for n in znegs]) / tau)
+    return -np.log(sp / (sp + sn.sum()))
+
+# 锚点 z、正样本 z+(初始离 z 远,对比学习要拉它们对齐)、4 个负样本
+z = np.array([1.0, 0.0])
+zpos = np.array([0.3, 0.9])
+znegs = [np.array([-0.8, 0.5]), np.array([0.5, -0.9]),
+         np.array([-0.4, -0.7]), np.array([0.2, 0.95])]
+
+def grad(f, x, tau=0.5):
+    g = np.zeros_like(x); eps = 1e-4
+    for d in range(len(x)):
+        xp = x.copy(); xp[d] += eps
+        xm = x.copy(); xm[d] -= eps
+        g[d] = (f(xp, tau) - f(xm, tau)) / (2 * eps)
+    return g
+
+print("=== Part 1: InfoNCE 训练前 (正样本离锚点远) ===")
+print("sim(z,z+) = %+.4f  (低 -> 要拉对齐)" % sim(z, zpos))
+for i, n in enumerate(znegs):
+    print("sim(z,z_%d) = %+.4f" % (i, sim(z, n)))
+print("InfoNCE loss = %.4f" % infonce(z, zpos, znegs))
+
+lr = 0.2
+for _ in range(500):
+    gz = grad(lambda x, t: infonce(x, zpos, znegs, t), z)
+    gzp = grad(lambda x, t: infonce(z, x, znegs, t), zpos)
+    gns = [grad(lambda x, t, i=i: infonce(z, zpos,
+            [x if j == i else znegs[j] for j in range(len(znegs))], t), n)
+           for i, n in enumerate(znegs)]
+    z = z - lr * gz
+    zpos = zpos - lr * gzp
+    znegs = [n - lr * gns[i] for i, n in enumerate(znegs)]
+
+print()
+print("=== Part 1: InfoNCE 训练 500 步后 (所有嵌入一起学) ===")
+print("sim(z,z+) = %+.4f  (升到 +1 = 正样本拉到锚点对齐)" % sim(z, zpos))
+for i, n in enumerate(znegs):
+    print("sim(z,z_%d) = %+.4f  (降到 -1 = 负样本推开)" % (i, sim(z, n)))
+print("InfoNCE loss = %.4f  (大幅下降)" % infonce(z, zpos, znegs))
+
+# ===== Part 2: DrQ 增强 K-view 平均降方差 =====
+print()
+print("=== Part 2: DrQ K-view 平均 -> Q 估计方差 ~ 1/sqrt(K) ===")
+true_Q = 1.0
+sigma = 0.3
+rng = np.random.default_rng(42)
+for K in [1, 2, 4, 8]:
+    ests = []
+    for _ in range(20000):
+        qs = true_Q + rng.normal(0, sigma, K)
+        ests.append(qs.mean())
+    ests = np.array(ests)
+    print("K=%d views: bias=%+.4f  std=%.4f  (理论 sigma/sqrt(K)=%.4f)" %
+          (K, ests.mean() - true_Q, ests.std(), sigma / np.sqrt(K)))
+print("-> K 个增强 view 平均,方差按 1/sqrt(K) 收缩;Q 目标更稳、对像素扰动更鲁棒")
+`} title="表征学习:InfoNCE 对比 + DrQ 增强一致性" />
+
+跑完会看到两件事:① InfoNCE 训练前 $\mathrm{sim}(z,z^+)=+0.32$(正样本离锚点远),训练 500 步后 $\mathrm{sim}(z,z^+)\to+1.0$(正样本被拉到与锚点对齐)、4 个负样本的 $\mathrm{sim}$ 全部 $\to-1.0$(推到反方向),损失从 1.25 降到 0.07——**对比学习把「同状态近、异状态远」写进了表征空间**;② DrQ 的 $K$-view 平均,估计标准差 $K=1$ 时 0.30、$K=2$ 时 0.21、$K=4$ 时 0.15、$K=8$ 时 0.11,严格按 $\sigma/\sqrt K$ 收缩——**多 view 平均降方差,$Q$ 目标更稳**。把 $K$ 调大,降方差效果持续但边际递减($1/\sqrt K$ 是凹函数),实践中 $K=2$ 已性价比最高。
+
+### 三条主线对比
+
+| 方法 | 表征学习机制 | 监督信号 | 关键组件 | Atari 100k / DM Control |
+|------|------------|---------|---------|------------------------|
+| **CURL** [24] | 对比学习 | 同状态增强视图对比 | InfoNCE + 数据增强 | DM Control +1.9x,接近 state-based |
+| **SPR** [25] | 自预测 | 预测未来 latent 表征 | EMA 目标 + 过渡模型 + 增强 | Atari 100k 中位 0.415(+55% SOTA) |
+| **DrQ** [26] | 数据增强一致性 | 无辅助任务 | $K$-view $Q$ 平均 | DM Control SOTA,超越模型法/对比法 |
+
+三条路反映了表征学习 for RL 的三种哲学:**CURL** 用「判别」(对比拉近推开)、**SPR** 用「预测」(学未来表征)、**DrQ** 用「不变性」(增强一致)。它们不互斥——后续工作常组合(如 DrQ+SPR、DrQ+CURL)。共同点:**都不依赖 RL 的稀疏奖励信号学表征,而是用自监督/增强这类密集信号先把 CNN 喂饱**,再让 $Q$ 头在好表征上做控制,这正是像素 RL 样本效率突破的关键。
+
+> 💡 **一句话总结**:像素 RL 的瓶颈是表征学习与控制学习挤在一个稀疏梯度里互相拖累;CURL(对比)、SPR(预测)、DrQ(增强一致)三条路把表征学习拆出来用自监督信号单独喂,让 CNN 先学到判别性/预测性/不变性表征,$Q$ 头再在好特征上做控制,样本效率随之跃升。
+
+## 典型案例:DQN 家族与真实战绩
+
+| 里程碑 / 变体 | 关键改动 | 解决什么 |
+|---|---|---|
+| **DQN**(DeepMind 2015) | CNN 吃 Atari 像素 + 回放 + 目标网络 | 首次端到端从像素学控制,49 款游戏达人类水平 |
+| **Double DQN** | 在线网络选、目标网络评 | $\max$ 带来的价值高估 |
+| **Dueling DQN** | 网络拆成 $V(s)$ + 优势 $A(s,a)$ 两支 | 很多状态下「选哪个动作」其实无关紧要 |
+| **优先经验回放(PER)** | 按 TD 误差大小加权采样 | 均匀采样浪费在「已学会」的样本上 |
+| **Rainbow**(2017) | 把上述 6 项改进合一 | 各自增益叠加,Atari 上大幅超越原始 DQN |
+
+> 💡 这些改进**互相正交**、可以叠加——Rainbow 就是把 Double、Dueling、PER、多步回报、分布式 RL、噪声网络六样揉在一起。理解了原始 DQN 的「回放 + 目标网络」骨架,这些变体都只是在某一处做局部替换:Double 换目标、Dueling 换网络、PER 换采样。
+
+## 常见问题 FAQ
+
+**Q:DQN 和表格 Q-learning 到底差在哪?**
+更新规则同源(都朝 TD 目标逼近),区别只在**怎么存 Q**:表格是逐格记忆,DQN 用网络参数化并能泛化。为了让「参数化 + 自举 + 离策略」稳定,DQN 额外加了经验回放和目标网络。
+
+**Q:为什么 DQN 只能处理离散动作?**
+输出层给每个动作一个 Q 值、再取 $\max$,这要求动作**可枚举**。连续动作(如方向盘转角)没法枚举,得用 [策略梯度](/tutorials/policy-gradient) 一脉的 DDPG、SAC 等。
+
+**Q:目标网络的同步周期 $C$ 怎么选?**
+太小 → 目标几乎跟着在线网络动,退化回「追影子」不稳;太大 → 目标太陈旧、学得慢。经验上取几百到上万步,或用 Polyak 软更新 $\theta^-\leftarrow\tau\theta+(1-\tau)\theta^-$ 平滑跟随。
+
+**Q:过估计偏差和函数逼近有什么关系?**
+偏差源于 `max` 算子对带噪估计的系统性上偏——这在表格版就有。但函数逼近下噪声更大(网络对未见状态要猜,猜错的范围更宽),高估更严重,且会沿自举链复合放大,所以在 DQN 里几乎必然出现。这正是 Double DQN 的用武之地。
+
+**Q:Double、Dueling、PER 能一起用吗?**
+能,它们正交:Double 改目标(选/评解耦)、Dueling 改网络结构($V/A$ 分解)、PER 改采样(按 $|\delta|$ 加权)。**Rainbow** 就是把它们(再加多步回报、分布式 RL、噪声网络)六合一,在 Atari 上大幅超越原始 DQN。
+
+**Q:Dueling 里为什么必须减均值,不减行不行?**
+不减则 $V$ 与 $A$ 不可辨识——给 $V$ 加 $c$、给 $A$ 减 $c$,$Q$ 完全不变,梯度会在两者间来回推诿。减均值把优势支中心钉在零,$V$ 唯一化为「各动作平均价值」,学习信号才稳定。
+
+**Q:PER 的 $\beta$ 为什么退火到 1,而不是一直取 1?**
+$\beta=1$ 虽无偏但方差大,训练早期数据分布剧烈变化时大方差会拖慢甚至破坏学习。退火策略:前期 $\beta$ 小、容忍偏差换稳定,后期分布趋稳、逐步抬到 1 还原无偏。这是「先稳后准」的常见权衡。
+
+**Q:PER 为什么要用 sum-tree,直接开个数组按 $P(i)$ 抽不行吗?**
+能,但每次采样要 $O(N)$ 遍历算分母 + 前缀和,且每条优先级更新后还要重建前缀和。百万缓冲区下,单步采几十条 + 更新几十条,$O(N)$ 每步要跑百万次,根本带不动。sum-tree 把「按子树和下行采样」和「沿父链上行更新」都压到 $O(\log N)\approx 20$ 步——采样与更新的代价从「随缓冲区线性增长」变成「随缓冲区对数增长」,这是 PER 能 scale 到百万级 replay 的工程前提。本质是用一棵完全二叉树把「加权抽样」这个 $O(N)$ 操作降维,和哈希表把「查找」从 $O(N)$ 降到 $O(1)$ 是同一种思路。
+
+**Q:分布 RL 学分布,最后选动作时不还得取期望比较吗?**
+是的,选动作时通常仍用 $\mathbb E[Z(s,a)]$ 比较(或上分位数做风险敏感选择)。但**学**的是整条分布,梯度信号更丰富、多模态返回值不丢形状,经验上更稳——「最后取期望」不等于「只学期望」。C51 的期望就是 51 个原子质量的加权和,QR-DQN 是分位数平均。
+
+## 动手作业
+
+1. **关掉目标网络**:把训练里的 `Q(Wt, bns)` 改成 `Q(W, bns)`(用在线网络当目标),观察收敛是否变差或变乱。
+2. **关掉经验回放**:去掉缓冲区,改成每步只用当前这一条转移更新,看相关样本如何拖慢/带偏学习。
+3. **调同步周期**:把 `ep % 20` 改成 `ep % 1`(几乎不冻结)和 `ep % 100`(冻结很久),体会 $C$ 的两难。
+4. **加大网格**:把 `N` 改成 6、目标放右下角,看线性逼近还能否学出通路。
+5. **体验过估计**:在「极简 DQN」基础上,把目标里的 $\max$ 改成「在线网络选 + 目标网络评」(即手写一个 Double DQN),跑多轮看最终 $Q$ 值是否比标准版更贴近真值(标准版偏高)。
+6. **手算优先级**:取一批转移算 $|\delta|$,自行按 $P(i)\propto p_i^\alpha$ 设计采样(可用 `np.random.choice` 的 `p=` 参数),对比均匀采样的收敛速度。
+7. **改 sum-tree 看分布**:在 sum-tree 代码里把叶 2 的优先级从 8.0 改成 80.0(其余不变),重算各叶的采样概率 $P(i)$,观察「一条优先级飙升后,它的采样占比从 ~30% 涨到多少、其余被压缩多少」。再试着把 $\alpha$ 从 1 调到 0.5,看「优先级差距被压缩、分布更趋均匀」的效果——体会 $\alpha$ 如何在「聚焦高优先级」与「保证低优先级也被采到」之间调度。
+
+## 小结
+
+| 概念 | 含义 |
+|---|---|
+| 函数逼近 | 用 $Q(s,a;\theta)$ 网络替代查表,可泛化到没见过的状态 |
+| TD 回归损失 | $(y-Q(s,a;\theta))^2$,$y=r+\gamma\max Q(s',\cdot;\theta^-)$ |
+| 经验回放 | 缓冲区随机抽样,打破相关性、复用数据 |
+| 目标网络 $\theta^-$ | 滞后冻结的目标,避免「追自己影子」发散 |
+| 过估计偏差 | $\max$ 对带噪估计系统性上偏,自举下沿贝尔曼链复合放大 |
+| Double DQN | 在线网络选、目标网络评,噪声独立 → 偏差消失 |
+| Dueling DQN | 拆 $V(s)+A(s,a)$,减均值稳住辨识,善长「多动作等价」场景 |
+| 优先经验回放 | 按 $|\delta|$ 加权采样 + 重要性采样权重 $w_i=(1/(NP_i))^\beta$ 纠偏;sum-tree 把采样/更新压到 $O(\log N)$ 使百万缓冲区可行 [21] |
+| 分布 RL | 学返回值分布 $Z(s,a)$ 而非标量 $Q=\mathbb E[R]$;分布贝尔曼 $Z\stackrel D=r+\gamma Z'$ |
+| C51 / QR-DQN / IQN | 类别投影 / 分位数 / 隐式分位数,保留多模态与风险信息 |
+| NoisyNet | 可学噪声 $\tilde w=\mu+\sigma\odot\epsilon$ 注入权重,参数空间探索替代 ε-greedy;状态条件、σ 自适应衰减 [9] |
+| Rainbow | Double + Dueling + PER + 多步 + 分布式 + NoisyNet,六合一;消融:分布 RL 贡献最大 [8] |
+| HER | 把失败 episode 的 goal 重标为实际末态,稀疏奖励下造 $r=1$ 人造成功,泛化到任意目标 |
+| UVF / successor features | $V(s,g)\approx\boldsymbol\phi(s)^\top\boldsymbol\psi(g)$ 价值矩阵低秩;$Q=\boldsymbol\psi^\top\boldsymbol w$ 因式分解,换 $\boldsymbol w$ 零样本迁移任务 [5][7] |
+| 多任务 RL | 任务条件化 $\pi(a\mid s,z)$ 把任务身份作输入;硬共享(骨干+任务头)vs 软条件化(FiLM 调制);负迁移靠 PCGrad(投影冲突梯度)[22] 与 Distral(共享蒸馏策略+KL 正则)[23] 缓解 |
+
+> 🎯 一句话记住:**DQN = Q-learning 把表换成神经网络,再用经验回放 + 目标网络两块补丁稳住训练。** Double 修高估、Dueling 拆价值与优势、PER 聚焦该学的样本、分布 RL 保留返回值的整条分布、多步回报加速信用分配、NoisyNet 用参数噪声替代 ε-greedy 做状态条件探索——六者正交叠加成 Rainbow。离散动作的深度 RL 从这里起步;连续动作与大模型对齐,则要走 [策略梯度](/tutorials/policy-gradient) 与 [RLHF](/tutorials/rlhf) 那一脉。
+
+## 延伸阅读
+
+- **站内论文笔记**:[PPO](/papers/ppo-schulman) —— 价值函数方法的「对岸」:策略梯度怎么解决 DQN 处理不了的连续动作,以及两个家族如何在 actor-critic 里合流
+
+## 参考文献
+
+1. Bellemare, Dabney, Munos (2017). *A Distributional Perspective on Reinforcement Learning (C51)*. [arXiv:1707.06887](https://arxiv.org/abs/1707.06887). —— 分布 RL 奠基:从学标量 $Q=\mathbb E[R]$ 升级到学返回值分布 $Z(s,a)$;分布贝尔曼算子 $Z\stackrel D=r+\gamma Z(s',a^*)$(策略评估下 Wasserstein 收缩、控制下有 distributional instability);C51 用 51 个等距原子的类别分布 + KL/交叉熵投影(把 Bellman 平移后的目标投影回固定支撑);Atari 上匹配或优于 DQN。
+2. Dabney, Rowland, Bellemare, Munos (2018). *Distributional Reinforcement Learning with Quantile Regression (QR-DQN)*. [arXiv:1710.10044](https://arxiv.org/abs/1710.10044). —— 用 $N$ 个分位数表示返回值分布,避开 C51 固定支撑的截断问题;分位 Huber 损失(由 $\tau$ 控制不对称度);在 Atari 上显著优于 C51 及其他 DQN 改进。
+3. Dabney, Ostrovski, Silver, Dabney (2018). *Implicit Quantile Networks for Distributional Reinforcement Learning (IQN)*. [arXiv:1806.06923](https://arxiv.org/abs/1806.06923). —— 采样 $\tau\sim U(0,1)$ 用 $\cos(\pi\tau)$ 嵌入,学「给定分位数输出对应值」的函数;任意精细的分位数估计,自然支持风险敏感决策;当時 Atari SOTA。
+4. Sutton, R. S. & Barto, A. G. (2018). *Reinforcement Learning: An Introduction* (2nd ed.), **Chapter 11: On-policy vs Off-policy Control / §11.2–§11.3: The Deadly Triad & Baird's Counterexample**. MIT Press. [官方在线版](http://incompleteideas.net/book/RLbook2020.pdf). —— 致命三态(deadly triad)的权威出处:**函数逼近 + 自举 + 离策略**三者同时出现时半梯度方法可发散;Baird 1995 的 7 状态反例展示半梯度离策略 TD(0) 的 $\|w\|$ 单调增长到无穷;投影贝尔曼算子 $\Pi T$ 不再是 $\gamma$-收缩是发散的根源。本章还讨论 gradient-TD(GTD/TDC,Sutton et al. 2009)等收敛保证方法。本章是本篇「致命三态」一节的直接来源。
+5. Schaul, Horgan, Gregor, Silver (2015). *Universal Value Function Approximators*. [ICML 2015 / PMLR 37:1312-1320](https://proceedings.mlr.press/v37/schaul15.html). —— 通用价值函数(UVF):不再为每个目标 $g$ 学独立 $V^g(s)$,而是学一个通用 $V(s,g)$ 把目标作输入的一部分,$V^g(s)=V(s,g)$ 可泛化到训练时没见过的目标;**价值矩阵 $\mathbf V_{s,g}=V^*(s,g)$ 近似低秩**——若 $V^*(s,g)=\boldsymbol\phi(s)^\top\boldsymbol\psi(g)$ 用 $d$ 维嵌入可分解则 $\mathrm{rank}(\mathbf V)\le d$,参数从 $O(|S|\cdot|G|)$ 降到 $O(d(|S|+|G|))$,观察 $O(d\log|G|)$ 个目标即可内插出整个矩阵(矩阵补全同构);UVFA 架构 $V(s,g)\approx\sigma(\boldsymbol\phi(s)^\top\boldsymbol\psi(g))$。本文是本篇「目标条件 RL 与通用价值函数」与「UVF 与 successor features」小节 UVF 形式化、低秩结构与泛化性质的直接来源,也是 HER 为何能泛化的理论基础。
+6. Andrychowicz, Wolski, Ray, Schneider, Fong, Welinder, McGrew, Tobin, Abbeel, Zaremba (2017). *Hindsight Experience Replay*. [NeurIPS 2017 / arXiv:1707.01495](https://arxiv.org/abs/1707.01495). —— HER:稀疏二元奖励下,把失败 episode 的 replay 里 goal 替换为实际达到的 state(把失败变成功),产生 $r=1$ 的人造成功转移;implicit curriculum(早期只到近处、自动爬升难度);兼容任意 off-policy(DQN/DDPG);在机器人推动/滑动/抓放上让原本学不会的稀疏奖励任务数次学会,是稀疏奖励 RL 的里程碑。本文是本篇「稀疏奖励与 HER」一节 HER 机制、relabel 策略与适用边界的直接来源。
+7. Barreto, Dabney, Munos, Hunt, Schaul, van Hasselt, Silver (2017). *Successor Features for Transfer in Reinforcement Learning*. [NeurIPS 2017 / arXiv:1606.05312](https://arxiv.org/abs/1606.05312). —— 后继特征(SF):把 Dayan 1993 后继表示(SR,$M_\pi(s,s')$ 期望折扣状态占用,$\mathbf M_\pi=\mathbf I+\gamma\mathbf P_\pi\mathbf M_\pi$)从状态占用推广到特征占用 $\boldsymbol\psi_\pi(s,a)=\mathbb E[\sum\gamma^k\boldsymbol\phi(s_{t+k},a_{t+k})]$;当奖励线性分解 $r(s,a)=\boldsymbol\phi(s,a)^\top\boldsymbol w$ 时,价值函数因式分解 $Q^\pi(s,a)=\boldsymbol\psi_\pi(s,a)^\top\boldsymbol w$;**零样本任务迁移**——动力学不变只奖励变的新任务,拿已有 $\boldsymbol\psi_\pi$ 点乘新 $\boldsymbol w'$ 立刻得新任务 Q,不重学;**广义策略改进(GPI)** 取所有旧策略 $\max_i Q^{\pi_i}$ 的最大动作,比单策略改进严格更强且零额外学习。本文是本篇「UVF 与 successor features」一节 SR/SF 分解、迁移与 GPI 的直接来源。
+8. Hessel, Modayil, van Hasselt, Schaul, Ostrovski, Dabney, Horgan, Piot, Azar, Silver (2018). *Rainbow: Combining Improvements in Deep Reinforcement Learning*. [AAAI 2018 / arXiv:1710.02298](https://arxiv.org/abs/1710.02298). —— Rainbow:把 Double DQN + PER + Dueling + 多步回报 + 分布 RL(C51)+ NoisyNet 六项独立改进集成到一个 agent,在 Atari 2600 上同时取得更高数据效率与更高最终性能,大幅超越各单项改进;消融研究逐个去掉组件,揭示贡献排序(去掉分布 RL 掉分最多、多步次之、Noisy 影响数据效率但不掉最终分),厘清了 DQN 家族各组件的互补关系。本文是本篇「Rainbow:六组件集成」一节的直接来源。
+9. Fortunato, Azar, Piot, Menick, Osband, Graves, Mnih, Munos, Hassabis, Pietquin, Blundell, Legg (2018). *Noisy Networks for Exploration*. [ICLR 2018 / arXiv:1706.10295](https://arxiv.org/abs/1706.10295). —— NoisyNet:在线性层权重上加可学噪声 $\tilde w=\mu+\sigma\odot\epsilon$($\mu,\sigma$ 可训练,$\epsilon$ 零均值随机),把探索从动作空间(ε-greedy)转到参数空间;因式分解噪声 $\epsilon_{ij}=f(\epsilon_i)f(\epsilon_j)$($f(x)=\text{sgn}(x)\sqrt{|x|}$)把噪声参数从 $O(pq)$ 降到 $O(p+q)$;状态条件探索——噪声扰动权重使探索随状态变化,比 ε-greedy 的状态无关随机动作更有的放矢;σ 随训练自动收缩,探索自适应衰减无需手调 schedule;在 Atari 上替代 ε-greedy 普遍涨分。本文是本篇「NoisyNet:参数空间探索」小节的直接来源。
+10. Sutton, R. S., Maei, H. R., Precup, D., Bhatnagar, S., Silver, D., Sutton, C., Wiewiora, E. (2009). *Fast Gradient-Descent Methods for Stochastic Temporal-Difference Learning*. [ICML 2009 / PMLR 38:993-1000](https://proceedings.mlr.press/v38/sutton09.html). —— gradient-TD 奠基:提出 **MSPBE**(均方投影贝尔曼误差)作为半梯度无法对齐的「真目标」,$\mathrm{MSPBE}=\mathbb E[\delta\mathbf x]^\top\mathbb E[\mathbf x\mathbf x^\top]^{-1}\mathbb E[\delta\mathbf x]$,其最小值在投影不动点 $\Pi T\mathbf w=\mathbf w$ 处取 0;给出 **GTD / GTD2 / TDC** 三种只用样本、无需矩阵求逆的 SGD 算法,核心是用辅助向量 $\mathbf v$ 在线估 $\mathbb E[\delta\mathbf x]$,靠**双时间尺度**($\beta\gg\alpha$,$\mathbf v$ 快 $\mathbf w$ 慢)使 $\mathbf w$ 的更新等效为对 MSPBE 的 SGD,从而由随机逼近理论给出离策略下的收敛保证。本文是本篇「gradient-TD:用真梯度治致命三态」一节 MSPBE 目标、TDC 更新式与双时间尺度收敛直觉的直接来源。
+11. Osband, Blundell, Pritzel, Van Roy (2016). *Deep Exploration via Bootstrapped DQN*. [NeurIPS 2016 / arXiv:1602.04621](https://arxiv.org/abs/1602.04621). —— Bootstrapped DQN:Q 网络末层换成 K 个并行 head,每条经验用随机 binary mask 决定哪些 head 学习(bootstrap 子采样),使 K 个 head 拟合略有不同的 Q 函数——数据充分处一致、稀疏处分歧大;每回合随机抽一个 head 用其贪心策略行动,等价于 Thompson 后验采样,实现**连贯多步的深度探索(deep exploration)**,在长程稀疏任务上远超 ε-greedy 的浅探索。本文是本篇「Bootstrapped DQN」小节多 head 分歧量化不确定性、Thompson 采样式深度探索的直接来源。
+12. Badia, Sprechmann, Vitvitskyi, Guo, Piot, Kapturowski, Oliveira, Blundell (2020). *Never Give Up: Learning Directed Exploration Strategies (NGU)*. [ICLR 2020 / arXiv:2002.06038](https://arxiv.org/abs/2002.06038). —— NGU(Never Give Up):用两个时间尺度的内在奖励相乘——短时(回合内)用情景记忆(episodic memory)存状态嵌入,以 k 近邻逆核距离作 novelty,**回合内快速衰减**惩罚本回合重复回访;长时(跨回合)用 RND 预测误差,**慢速衰减**跨回合惩罚反复去同一区域;两者相乘 $r^i_t=r^{\text{episodic}}_t\cdot\mathrm{clip}(\alpha_t,1,L)$,既逼智能体本回合走新路、又防跨回合重蹈同一片局部新奇,攻克**全局长程探索**(入门篇好奇心小节点名的开放难题)。本文是本篇「NGU 与 Agent57」小节 NGU 双时间尺度好奇心的直接来源;其后续 Agent57 见 [13]。
+13. Badia, Piot, Kapturowski, Sprechmann, Vitvitskyi, Guo, Blundell (2020). *Agent57: Outperforming the Atari 2600 Human Benchmark*. [arXiv:2003.13350](https://arxiv.org/abs/2003.13350). —— Agent57(NGU [12] 的后续):在 NGU 之上加**策略族群**(各 $(\beta_j,\gamma_j)$ 不同,有的重探索适合稀疏奖励游戏、有的重利用适合密集奖励游戏)+ **滑窗 UCB 元控制器**调度本回合用哪个策略(把探索-利用权衡本身当 bandit 解)+ **奖励分解** $Q(s,a)=Q^e(s,a)+\beta_j Q^i(s,a)$ 内外奖励分别训练两头再加权。成为**首个在全部 57 款 Atari 游戏上超越人类基准**的 DRL 智能体——此前的方法在稀疏奖励游戏(Montezuma)与密集奖励游戏(Pong)之间总得顾此失彼,Agent57 用自适应策略族群首次两头通吃。本文是本篇「NGU 与 Agent57」小节 Agent57 部分的直接来源。
+14. Ecoffet, Huizinga, Lehman, Stanley, Clune (2020). *First Return, Then Explore*. [arXiv:2004.12919](https://arxiv.org/abs/2004.12919)（前身 arXiv:1901.10995, 2019）. —— Go-Explore:绕过「靠随机性发现远处奖励」的困境,改为**先记住去过的好状态、下次直接回滚到那里接着探索**。第一阶段(找轨迹,无网络)用存档(archive)+ 模拟器回滚 + 随机探索,像图搜索(Dijkstra 式)累积可达状态;第二阶段(鲁棒化)用目标条件策略 + 自模仿学习训练能自主走到存档状态的策略,摆脱 reset 依赖。在 Montezuma's Revenge 上拿当时超高分解,代价是依赖可回滚模拟器。核心洞见:探索的瓶颈不在随机性够不够,而在能否回到有前途的状态继续——把探索从「采样」重构为「搜索」。本文是本篇「Go-Explore」小节的直接来源。
+15. Yang, Zhao, Lin, Qin, Bian, Liu (2019). *Fully Parameterized Quantile Function for Distributional Reinforcement Learning (FQF)*. [NeurIPS 2019 / arXiv:1911.02140](https://arxiv.org/abs/1911.02140). —— FQF:在 QR-DQN(固定均匀 τ 学分位值)与 IQN(采样 τ)之上,**同时参数化分位位置 τ(x 轴)与分位值 θ(y 轴)**。fraction proposal network 学该把分位放在哪里(自适应集中到分布复杂处),quantile value network 学对应分位值,二者联合训练以最小化 1-Wasserstein 距离;用同样的 N 个分位比 QR-DQN/IQN 更精确刻画多模态分布。在 55 款 Atari 游戏上显著超越此前所有分布 RL 算法,刷新非分布式智能体的 ALE 纪录。本文是本篇「FQF:全参数化分位函数」小节的直接来源。
+16. Zhou, Li, Liu, Jiang, Bian (2020). *Non-Crossing Quantile Regression for Distributional Reinforcement Learning (NCQR)*. AAAI 2020. —— NCQR:针对 QR-DQN/IQN 各分位独立回归、无单调约束导致**分位交叉**($\theta_{\tau_i}>\theta_{\tau_{i+1}}$,破坏分位函数单调非降合法性、对应分布密度出现负值、argmax 策略不稳)的问题,给 quantile network 加单调约束/排序修正,保证 $\theta_{\tau_1}\le\cdots\le\theta_{\tau_N}$;以损失部分灵活性换取分布合法性与策略稳定性。本文是本篇「分位交叉与表示谱系」小节 NCQR 部分的直接来源。
+17. Bellemare, Dabney, Rowland (2023). *Distributional Reinforcement Learning*. MIT Press. [官方书页](https://www.distributional-rl.org/). —— 分布 RL 专著:系统梳理返回值分布的理论(分布贝尔曼算子、Wasserstein 收缩性、分布稳定性)与表示谱系——类别分布(C51)、分位数(QR-DQN)、隐式分位(IQN)、全参数化(FQF)、参数化连续分布(混合 Beta/正态等,即 ER-DQN 路线)、非交叉分位(NCQR)。本章「分位交叉与表示谱系」小节的五条表示路线对照表与参数化分布路线(Beta 混合:网络输出 $(\alpha_k,\beta_k)$ + 混合权重、最大化对数似然、无截断无投影但受限于预设分布族)的直接来源。
+18. Houthooft, Chen, Duan, Schulman, De Turck, Abbeel (2016). *VIME: Variational Information Maximizing Exploration*. [NeurIPS 2016 / arXiv:1605.09674](https://arxiv.org/abs/1605.09674). —— VIME:把内在奖励定义为动力学模型参数 $\theta$ 后验的更新幅度——$r^i_t=D_{\mathrm{KL}}[q_{\phi_{t+1}}(\theta)\|q_{\phi_t}(\theta)]$,用贝叶斯神经网络 + 变分推断近似后验(因子化高斯),KL 用二阶泰勒展开 + Fisher 信息矩阵估计。直接量化「这条转移让智能体对模型本身的认知改变了多少」(信息增益),而非预测误差;陌生转移后验大幅更新→高 KL→高 bonus,熟悉转移后验几乎不变→KL≈0。对 noisy-TV 有部分缓解(后验对随机性的不确定性会随观测收敛,即便预测误差永久高)。本文是本篇「不确定性驱动的探索」小节 VIME 部分的直接来源。
+19. Pathak, Gandhi, Gupta (2019). *Self-Supervised Exploration via Disagreement*. [ICML 2019 / arXiv:1906.04161](https://arxiv.org/abs/1906.04161). —— 基于分歧的探索:训练 $K$ 个 forward dynamics model 的集成,用它们预测下一状态的**方差**作内在奖励 $r^i=\mathrm{Var}_{f_1,\dots,f_K}[f_i(\phi(s),a)]$。集成一致=数据充分=低 bonus,集成分歧=数据稀疏=高 bonus。关键优势:方差是各模型输出的连续函数,**可微**可直接对策略参数求梯度端到端优化(不像计数 bonus 只能被动加到奖励上);用随机特征作 $\phi$ 防止学特征时作弊。本文是本篇「不确定性驱动的探索」小节 disagreement 部分的直接来源。
+20. Savinov, Raichuk, Marin, Rybkin, Tanner, Florence, Manfredi, LeCun, Chintala (2019). *Episodic Curiosity through Reachability*. [ICLR 2019 / OpenReview](https://openreview.net/forum?id=S1elVRBKwf). —— 情景好奇心:从转移图可达性而非预测误差/计数衡量新颖度。维护本回合的情景记忆 $M$(状态嵌入),用 siamese 比较器 $C(\phi(s_i),\phi(s_j))\in[0,1]$ 估计两状态几步内可达;当前状态离记忆里所有状态都「远」($C^M$ 低)即新,$r^i=C'-C^M(\phi(s_t))$。新颖度来自图结构而非预测/计数——一个被预测模型见过、被计数器记过的状态,只要在可达性图上离记忆远,仍算新。作者声称可缓解 noisy-TV:电视画面虽不可预测,但已到达、在可达性图上不再触发 novelty。本文是本篇「不确定性驱动的探索」小节 episodic curiosity 部分的直接来源。
+21. Schaul, Quan, Antonoglou, Silver (2016). *Prioritized Experience Replay*. [ICLR 2016 / arXiv:1511.05952](https://arxiv.org/abs/1511.05952). —— 优先经验回放(PER):观察到「TD 误差大的转移藏着还没学会的东西」,按 $p_i=|\delta_i|+\varepsilon$ 给每条转移定优先级,采样概率 $P(i)=p_i^\alpha/\sum_j p_j^\alpha$($\alpha\in[0,1]$ 控制优先强度,$\alpha=0$ 退化均匀);非均匀采样引入偏差,用重要性采样权重 $w_i=(1/(NP(i)))^\beta$ 纠偏,$\beta$ 从 0 退火到 1;工程上用 **sum-tree**(完全二叉树,叶存 $p_i$、内部节点存子树和)把按 $P(i)$ 采样与单条优先级更新都压到 $O(\log N)$,使百万级缓冲区可行;在 49 个 Atari 游戏上 41 个超越 uniform replay、达新 SOTA,是 Rainbow [8] 六组件之一。本文是本篇「优先经验回放(PER)」一节及 sum-tree 数据结构小节的直接来源。
+22. Yu, Kumar, Gupta, Levine, Hausman, Finn (2020). *Gradient Surgery for Multi-Task Learning (PCGrad)*. [NeurIPS 2020 / arXiv:2001.06782](https://arxiv.org/abs/2001.06782). —— 多任务梯度冲突的极简解法:对每对任务梯度 $\boldsymbol g_i,\boldsymbol g_j$,若内积 $\boldsymbol g_i^\top\boldsymbol g_j<0$(方向冲突会互相抵消),就把 $\boldsymbol g_i$ 投影到 $\boldsymbol g_j$ 的法平面($\boldsymbol g_i\leftarrow\boldsymbol g_i-\frac{\boldsymbol g_i^\top\boldsymbol g_j}{\|\boldsymbol g_j\|^2}\boldsymbol g_j$),消除冲突分量后再求和回传;同向梯度原样保留。理论分析:PCGrad 在某些多任务优化landscape 上保证收敛到 Pareto 平稳点。在多任务监督学习与多任务 RL(MuJoCo 多技能)上稳定缓解负迁移,实现近乎零开销。局限:只消冲突分量,不解决任务间真正的表征资源争抢,对完全对称零和冲突只是不再原地卡死。本文是本篇「负迁移:解法一·梯度手术 PCGrad」小节的直接来源。
+23. Teh, Bapst, Czarnecki, Quan, Kirkpatrick, Hadsell, Heess, Pascanu (2017). *Distral: Robust Multitask Reinforcement Learning*. [arXiv:1707.04175](https://arxiv.org/abs/1707.04175). —— 结构化多任务对齐:引入一个共享的蒸馏策略 $\pi_d$,各任务专属策略 $\pi_k$ 在 RL 目标上加 KL 正则 $D_{\mathrm{KL}}(\pi_k\|\pi_d)$(别离共享策略太远,行为正则)与 $D_{\mathrm{KL}}(\pi_d\|\pi_k)$(共享策略追各任务,蒸馏),两正则权重 $\beta,\eta$ 把「共享多少」从硬共享的隐式假设显式成可调旋钮;两步交替训练(各 $\pi_k$ 带正则 → $\pi_d$ 蒸馏更新)。$\pi_d$ 还能直接当零样本迁移策略拿到没训过的新任务上试。在多任务 MuJoCo 上显著优于朴素共享与完全独立训练。本文是本篇「负迁移:解法二·蒸馏对齐 Distral」小节 KL 正则三项损失与交替训练的直接来源。
+24. Srinivas, Laskin, Abbeel (2020). *CURL: Contrastive Unsupervised Representations for Reinforcement Learning*. [arXiv:2004.04136](https://arxiv.org/abs/2004.04136). —— 把自监督对比学习(SimCLR/MoCo 谱系)嫁接到像素 RL:对当前观测做数据增强得两视图,编码器出锚点嵌入 $z$ 与正样本 $z^+$,同 batch 其他状态嵌入当负样本 $\{z_k^-\}$,最小化 InfoNCE 损失 $-\log\frac{\exp(\mathrm{sim}(z,z^+)/\tau)}{\exp(\mathrm{sim}(z,z^+)/\tau)+\sum_k\exp(\mathrm{sim}(z,z_k^-)/\tau)}$ 拉近正样本、推开负样本,表征空间里「同状态近、异状态远」;$Q$ 头在这个判别性表征上做控制。在 DM Control 与 Atari 上相对基线提升 1.9x/1.2x,**首个图像方法接近 state-based 特征的样本效率**。本文是本篇「CURL:对比学习」小节 InfoNCE 公式与对比机制的直接来源。
+25. Schwarzer, Anand, Goel, Hjelm, Courville, Bachman (2021). *Data-Efficient Reinforcement Learning with Self-Predictive Representations (SPR)*. [ICLR 2021 / arXiv:2007.05929](https://arxiv.org/abs/2007.05929). —— 自预测表征:训练 agent 预测自己未来多步的 latent 表征 $\hat z_{t+k}=g^{(k)}(z_t,a_{t:t+k})$,对齐 EMA 目标编码器 $\phi_{\text{EMA}}$ 出的真实未来表征 $z_{t+k}^-=\phi_{\text{EMA}}(s_{t+k})$(余弦距离损失),再加数据增强一致性项。能预测未来表征 $\Rightarrow$ 当前表征必须编码「对预测未来有用的语义信息」(球速、动量、敌人朝向),正是 $Q$ 估回报所需。在 Atari 100k 步上中位人类归一化分 0.415,较此前 SOTA 提升 55%,26 款游戏的 7 款上超专家人类。本文是本篇「SPR:预测未来表征」小节自预测目标与 EMA 目标编码器的直接来源。**注:SPR 是 predictive 路线(非 contrastive),作者列表经 WebFetch 确认(Schwarzer/Anand/Goel/Hjelm/Courville/Bachman,无 Roller/Bacon),per R39 教训不凭印象引**。
+26. Kostrikov, Yarats, Fergus (2020). *Image Augmentation Is All You Need: Regularizing Deep Reinforcement Learning from Pixels (DrQ)*. [arXiv:2004.13649](https://arxiv.org/abs/2004.13649). —— 极简表征正则化:连辅助损失都不用,纯数据增强正则化 $Q$ 网络。对每个观测做 $K$ 次随机增强(随机平移裁剪)得 $K$ 个 view,每个算一次 $Q$ 取平均 $\bar Q(s,a)=\frac1K\sum_k Q(s^{(k)},a)$ 作目标——$K$-view 平均降方差(独立噪声平均方差 $1/K$)+ 强制 $Q$ 对无关像素扰动不变(平滑泛化)。配 SAC 在 DM Control 上 SOTA,**超越 Dreamer/PlaNet/SLAC 等模型法与 CURL 等对比法**,实现极简(几行增强 + 平均)。本文是本篇「DrQ:数据增强一致性」小节 $K$-view 平均与降方差机制的直接来源。**注:第三作者经 WebFetch 确认为 Fergus(非 Arbel),per R39 教训**。
+27. Hessel, Soyer, Espeholt, Czarnecki, Schmitt, van Hasselt (2018). *Multi-task Deep Reinforcement Learning with PopArt*. [arXiv:1809.04474](https://arxiv.org/abs/1809.04474). —— 多任务 RL 价值头自适应归一化:价值分解 $v(s)=\sigma\cdot n(s)+\mu$($n(s)=\boldsymbol w^\top\boldsymbol\phi(s)+b$ 归一化预测,$\mu,\sigma$ 用 EMA 跟踪 return 的均值/标准差,不回传梯度,论文用 $\beta=3\times10^{-4}$)+ 价值头在归一化空间学(目标 $(G_t-\mu)/\sigma$)+ **保留输出**:统计 $(\mu,\sigma)\to(\mu',\sigma')$ 更新时同步调权 $\boldsymbol w'=(\sigma/\sigma')\boldsymbol w$、$b'=(\sigma b+\mu-\mu')/\sigma'$ 使非归一化 $v(s)$ 不变(不引入目标漂移)+ 多任务扩展:每任务独立 $(\mu_i,\sigma_i)$ + 多头价值头,任务 $i$ 统计更新只调第 $i$ 行权重 + 策略网络跨任务共享不条件化任务身份(价值头仅训练时作 baseline)。vs 朴素 reward clipping:clipping 改优化目标(优化奖励频率而非累计),PopArt 只归一化学习更新不改优化目标。**PopArt-IMPALA** 组合 IMPALA 的 actor-learner 解耦 + V-trace + 每任务价值头统计:Atari-57 中位人类归一化分 110.7%(clip)/101.5%(no clip)vs vanilla IMPALA 59.7%/~0%,**首个单智能体在多任务 Atari 上整体超人类**;消融 MultiHead-IMPALA(多头无归一化)略差于 vanilla IMPALA → 提升来自自适应归一化而非多头容量。本文是本篇「解法三:PopArt——自适应归一化价值头」小节机制、保留输出公式、多任务扩展、PopArt-IMPALA 实测的直接来源。arXiv abs + ar5iv HTML 全文双重确认,非 R39 猜测。
+
+28. Yu, Quillen, He, Julian, Narayan, Shively, Bellathur, Hausman, Finn, Levine (2019). *Meta-World: A Benchmark and Evaluation for Multi-Task and Meta Reinforcement Learning*. [CoRL 2019 / arXiv:1910.10897](https://arxiv.org/abs/1910.10897). —— 多任务与元学习 RL 的事实标准基准:50 个 Sawyer 机械臂操作任务(抓取/推送/按压/开抽屉等),每任务有不同物体初始位置变体。填补此前元 RL 基准任务分布过窄(「不同跑步速度算不同任务」)的空白,提供足够宽的任务分布以测出真正的泛化能力。基准矩阵四档:**MT10**(多任务,10 训练任务,无 held-out,测同时学好)、**MT50**(多任务,50 训练任务,无 held-out,负迁移更严重)、**ML10**(元学习,10 训练 + 5 held-out 测试,测快速适应未见任务)、**ML45**(元学习,45 训练 + 5 held-out 测试);MT = Multi-Task(测容量,一个网络同时记住做好多个任务),ML = Meta-Learning(测泛化,训练时没见过的任务能否快速上手)。观测追加 one-hot 任务 ID(多任务设定策略知任务身份;元学习测试时任务未知需 few-shot 适应);指标统一是每任务 success rate(达成判定,二值 episodic 奖励取均值,跨任务 return 量级不可比故不用累计 return),再按 mean / worst / harmonic mean 三个聚合指标汇报(harmonic mean 对短板极度敏感,某任务 sr→0 时 HM→0,推荐聚合)。本文是本篇「评估协议与基准:mean / worst / harmonic,以及 Meta-World」小节基准矩阵、MT/ML 区分、one-hot 任务 ID、success rate 指标、三聚合指标的直接来源。arXiv abs 页 + GitHub README 双重确认(50 任务、MT10/MT50/ML10/ML45 划分、one-hot 任务 ID、success rate 指标),非 R39 猜测。
+
+29. Hausknecht, Stone (2015). *Deep Recurrent Q-Learning for Partially Observable MDPs (DRQN)*. [arXiv:1507.06527](https://arxiv.org/abs/1507.06527). —— 把 DQN 第一个卷积后的全连接层换成 LSTM,得到循环 Q 网络 $h_t=\text{LSTM}(h_{t-1},\text{conv}(\phi(o_t)))\to Q(h_t,a)$,用 BPTT 沿时间反传梯度训练;LSTM 的三门(input/forget/output gate)决定记多少新信息、留多少旧信息,内容由 TD 误差驱动——网络自己学该记什么,取代 DQN 原本的 4 帧堆叠(固定窗口、被动拼接)。在标准 Atari 上 DRQN ≈ DQN(无系统优势,因为 4 帧堆叠已够马尔可夫);在「闪烁 Atari」(屏幕随机闪烁、单帧大量信息丢失的 POMDP 化设定)上 DRQN 显著优于 DQN——循环的价值在观测退化时从历史补信息;且训练用全观测、测试用部分观测时,DRQN 性能退化比 DQN 更少(循环网络对观测质量变化更鲁棒)。本文是本篇「DRQN:把 DQN 的全连接层换成 LSTM」小节的直接来源,也是循环 Q 网络谱系的起点。arXiv abs 页 WebFetch 确认(作者 Hausknecht/Stone、2015、LSTM 替换 FC 层、闪烁 Atari 评估、观测退化鲁棒性),非 R39 猜测。
+
+30. Kapturowski, Ostrovski, Quillen, Doron, McKinney, Colmenarejo, Hessel (2019). *Recurrent Experience Replay in Distributed Reinforcement Learning (R2D2)*. [ICLR 2019 / OpenReview r1lyTjAqYX](https://openreview.net/forum?id=r1lyTjAqYX). —— 解决循环 Q 网络从经验回放训练的核心难题(回放采片段但 LSTM 隐状态沿连续轨迹流动,$h_0$ 从零初始化导致 train/test mismatch)。三件套:① **stored hidden state**——回放缓冲区除存 $(s,a,r,s')$ 还存 actor 当时的隐状态 $h_0$,回放时用真实 $h_0$ 初始化 LSTM 而非零,贴近执行分布;② **burn-in**——抽到片段后先空跑前 $b$ 步不回传梯度,让 LSTM 从 $h_0$ 重建到 $h_b$ 抵消残余 mismatch,在 $h_b$ 处分布对齐后再开始学习;③ **截断 BPTT**——只在 burn-in 后的 $K$ 步回传梯度(典型 $K=20\sim80$),可控内存/算力又学到中等长度时间依赖。配合分布式架构(数百 actor 用不同 $\varepsilon$ 产多样数据 + 单 learner + 优先回放,继承 Ape-X DQN 谱系),R2D2 在 Atari-57 上大幅超越 Ape-X DQN 与 IMPALA,刷新当时离散控制深度 RL 的最好成绩。论文还观察到循环 agent 发展出跨多步的时序策略、隐状态携带当前帧看不到的信息(非正式称作「幻觉/hallucination」:如被遮挡敌人几帧前的位置),这是循环 Q 比帧堆叠强的深层原因。本文是本篇「R2D2 的三件套:让循环 Q 能从回放训练」小节三件套机制、分布式架构、幻觉现象的直接来源,也是 DRQN→R2D2→Agent57 谱系的中间节点。OpenReview 论坛 ID r1lyTjAqYX + ICLR 2019 双重确认(三件套、分布式架构、Atari-57 超越 Ape-X/IMPALA、幻觉现象),非 R39 猜测;精确分数未在可访问页面给出,故正文仅作定性表述不臆造数字。
+
+31. Tsitsiklis, J. N. & Van Roy, B. (1997). *An Analysis of Temporal-Difference Learning with Function Approximation*. IEEE Transactions on Automatic Control, 42(5):674–690. [DOI:10.1109/9.580874](https://doi.org/10.1109/9.580874). —— on-policy + 线性函数逼近 + 自举 TD 学习的收敛性奠基:证明当采样分布 $\mu$ 等于目标策略平稳分布 $\mu_\pi$(即 on-policy)时,投影贝尔曼算子 $\Pi_\pi T^\pi$ 仍是 $\gamma$-压缩(压缩常数 $\le\gamma<1$),故半梯度 TD(0) 收敛到投影不动点 $\Pi_\pi V_\pi$,误差 $\|V_k-V_\pi\|$ 几何衰减;给出了「拆掉致命三元组的『离策略』一角即恢复压缩性」的形式化根据。本文是本篇「形式化发散条件:$\Pi T$ 的谱半径判据」一节 on-policy 谱半径 $\le\gamma$ 结论与 Tsitsiklis-Van Roy 1997 引用的直接来源。IEEE TAC 经典期刊 DOI 确证(卷 42 期 5 页 674-690),非 R39 猜测的 arXiv ID。

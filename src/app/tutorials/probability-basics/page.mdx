@@ -1,0 +1,173 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("probability-basics");
+
+# 🎲 概率论基础
+
+机器学习本质是在**不确定性**下做决策:模型输出「是垃圾邮件的概率 92%」、「明天下雨的概率 30%」。概率论就是描述不确定性的语言。这一篇打好概率地基,后面的[信息论](/tutorials/information-theory)(熵基于概率分布)、[逻辑回归](/tutorials/logistic-regression)(输出概率)、[朴素贝叶斯](/tutorials/naive-bayes)(用贝叶斯定理分类)都建立在它之上。
+
+> 不确定 ≠ 无知。概率论让我们把「说不准」量化成可计算、可比较的数字。
+
+## 概率:量化「有多可能」
+
+一个事件的概率是 0 到 1 之间的数:0 = 不可能,1 = 必然,0.5 = 五五开。所有互斥结果的概率加起来等于 1。
+
+**大数定律**告诉我们:重复试验足够多次,**事件发生的频率会收敛到它的真实概率**。下面拖动真实概率 p,反复点「翻硬币」,看正面频率(绿线)如何逐渐贴近 p(橙虚线)——次数少时剧烈抖动,次数多了就稳了:
+
+<ProbabilityExplorer />
+
+> 💡 这解释了为什么「样本越多,统计越可靠」——也是机器学习需要大量数据的根本原因之一。
+
+## 条件概率与贝叶斯定理
+
+**条件概率** $P(A\mid B)$ 表示「已知 B 发生,A 发生的概率」:
+
+$$
+P(A \mid B) = \frac{P(A \cap B)}{P(B)}
+$$
+
+由它推出机器学习最重要的公式之一 ——**贝叶斯定理**,它教我们**如何根据新证据更新信念**:
+
+$$
+P(A \mid B) = \frac{P(B \mid A)\,P(A)}{P(B)}
+$$
+
+经典例子:某病发病率 1%,检测准确率 99%。你检测阳性,真患病的概率是多少?直觉常以为 99%,实际远低于此:
+
+<CodeRunner defaultCode={`
+# 贝叶斯定理:阳性结果下真正患病的概率
+p_disease = 0.01          # 患病率 P(D)
+p_pos_given_d = 0.99      # 患病时阳性 P(+|D)(灵敏度)
+p_pos_given_nd = 0.01     # 没病时也阳性 P(+|¬D)(假阳性率)
+
+# 全概率公式:P(+) = P(+|D)P(D) + P(+|¬D)P(¬D)
+p_pos = p_pos_given_d * p_disease + p_pos_given_nd * (1 - p_disease)
+
+# 贝叶斯:P(D|+)
+p_d_given_pos = p_pos_given_d * p_disease / p_pos
+print(f"检测阳性时,真正患病的概率仅为 {p_d_given_pos:.1%}")
+print("为什么这么低?因为健康人基数太大,假阳性的绝对数量盖过了真阳性。")
+`} />
+
+> 🔗 这个「用证据更新先验」的思想,正是**朴素贝叶斯分类器**的核心,也是垃圾邮件过滤的经典原理。
+
+## 随机变量:期望与方差
+
+**随机变量**把随机结果映射成数字(如骰子点数)。描述它最常用两个量:
+
+- **期望(均值)** $E[X] = \sum_i x_i\, p_i$:长期平均会落在哪
+- **方差** $\text{Var}(X) = E[(X-E[X])^2]$:数据围绕均值的分散程度(标准差是它的平方根)
+
+<CodeRunner
+  packages={["numpy"]}
+  defaultCode={`
+import numpy as np
+
+# 一个骰子:点数 1-6,均匀分布
+outcomes = np.array([1, 2, 3, 4, 5, 6])
+probs = np.array([1/6] * 6)
+
+expectation = np.sum(outcomes * probs)
+variance = np.sum((outcomes - expectation) ** 2 * probs)
+
+print(f"期望 E[X] = {expectation:.2f}")            # 3.5
+print(f"方差 Var(X) = {variance:.2f}")             # 2.92
+print(f"标准差 = {np.sqrt(variance):.2f}")
+
+# 用模拟验证:掷 10000 次
+rolls = np.random.randint(1, 7, size=10000)
+print(f"\\n模拟 10000 次的平均: {rolls.mean():.3f}(接近 3.5)")
+print(f"模拟的方差: {rolls.var():.3f}(接近 2.92)")
+`} />
+
+## 常见概率分布
+
+机器学习里反复出现的几个分布:
+
+| 分布 | 描述 | ML 中的例子 |
+|---|---|---|
+| **伯努利** | 单次二元试验(0/1) | 逻辑回归的单个标签 |
+| **二项** | n 次伯努利中成功次数 | A/B 测试的转化数 |
+| **正态(高斯)** | 钟形曲线,自然界最常见 | 噪声假设、参数初始化 |
+| **均匀** | 区间内等可能 | 随机初始化、采样 |
+
+**正态分布**尤其重要——由**中心极限定理**,大量独立随机因素叠加会趋于正态,所以它无处不在。下面的图来自一篇 MCMC 教程:把 2 个、3 个均匀分布随机变量的**算术平均**的概率密度画出来——$N=2$ 还是折线(三角形),到 $N=3$ 就已经是光滑的钟形,而且比 $N=2$ 更高更窄(平均把方差压掉了 $1/N$)。均匀分布本身毫无「钟形」可言,但「求平均」这个操作会自动把任何分布磨成高斯:
+
+<figure className="my-6">
+  <img src="./mean-of-uniforms-clt.png" alt="两个与三个均匀分布随机变量算术平均的概率密度曲线:N=2 是三角形折线,N=3 已是光滑钟形且更窄更高,展示中心极限定理的收敛过程" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Berg, <em>Introduction to Markov Chain Monte Carlo Simulations and their Statistical Analysis</em>(arXiv:cond-mat/0410490)Figure 3(按原始 EPS 矢量数据重绘)
+  </figcaption>
+</figure>
+
+<CodeRunner
+  packages={["numpy", "matplotlib"]}
+  defaultCode={`
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 中心极限定理:很多均匀分布的和 → 正态
+np.random.seed(0)
+sums = np.array([np.random.rand(30).sum() for _ in range(5000)])
+
+plt.figure(figsize=(6, 4))
+plt.hist(sums, bins=40, color="#059669", alpha=0.7, edgecolor="white")
+plt.title("Central Limit Theorem: sum of uniforms -> bell curve")
+plt.xlabel("sum of 30 uniform values")
+plt.ylabel("frequency")
+plt.show()
+`} />
+
+> 📝 图中标签用英文,因为浏览器里的 Pyodide 只自带英文字体(中文会显示成方框)。
+
+## 典型应用场景
+
+- **朴素贝叶斯**:用贝叶斯定理做文本/垃圾邮件分类
+- **逻辑回归 / Softmax**:输出的是类别概率
+- **最大似然估计(MLE)**:几乎所有模型的训练都可视为「找让数据最可能出现的参数」
+- **不确定性量化**:贝叶斯神经网络、置信区间
+- **生成模型**:VAE、扩散模型显式建模数据的概率分布
+
+## 常见问题 FAQ
+
+**Q:频率派和贝叶斯派有什么区别?**
+频率派把概率看作「长期频率」(大数定律那套);贝叶斯派把概率看作「信念程度」,可用贝叶斯定理随证据更新。机器学习两种视角都用。
+
+**Q:为什么检测阳性却大概率没病?**
+因为**基础比率**(患病率)很低。健康人基数巨大,即使假阳性率只有 1%,其绝对数量也可能超过真阳性。忽视基础比率是常见的直觉错误(基率谬误)。
+
+**Q:期望和平均值是一回事吗?**
+期望是**理论上**的加权平均(按概率加权);样本平均是**实测**的算术平均。大数定律保证样本平均会收敛到期望。
+
+**Q:方差和标准差用哪个?**
+两者等价(标准差 = 方差的平方根)。标准差和原数据同量纲、更好解释;方差在数学推导里更方便(可加性)。
+
+**Q:为什么正态分布在 ML 里到处都是?**
+中心极限定理:大量独立小因素叠加会趋于正态。所以测量噪声、误差、许多自然变量都近似正态,很多模型也默认这个假设。
+
+## 动手作业
+
+1. **验证大数定律**:用交互组件把 p 设成 0.3,分别翻 10 次、100 次、2000 次,记录频率与 0.3 的偏差如何随次数缩小。
+2. **贝叶斯更新**:把上面医疗例子的患病率从 1% 改成 10%,重新算阳性时的患病概率,观察基础比率的影响。
+3. **模拟期望**:写代码模拟「两个骰子之和」10000 次,画直方图,并验证平均值接近理论期望 7。
+4. **中心极限定理**:把画钟形曲线代码里每次求和的均匀数从 30 改成 2 和 100,观察分布形状如何变化。
+5. **思考题**:为什么机器学习模型的输出常常是「概率」而不是「确定的答案」?这对我们如何使用模型的预测有什么启示?
+
+## 延伸阅读
+
+- **站内教程**:[信息论基础](/tutorials/information-theory)—— 熵就建立在概率分布之上,是不确定性的量化度量;[蒙特卡洛方法](/tutorials/monte-carlo)—— 用随机采样近似计算期望与概率,是本篇「模拟验证」思想的工程化
+- **经典论文**:Berg (2004). *Introduction to Markov Chain Monte Carlo Simulations and their Statistical Analysis*. [arXiv:cond-mat/0410490](https://arxiv.org/abs/cond-mat/0410490) —— 一篇面向物理/统计背景读者的 MCMC 入门讲义,本篇配图(均值随 N 收敛到高斯)出自此文
+- **教材**:Ross (2014). *A First Course in Probability* (9th ed.). Pearson. —— 概率论经典入门教材,本篇所有定义的展开与证明都在其中
+
+## 小结
+
+| 概念 | 含义 |
+|---|---|
+| 概率 | 量化不确定性,[0,1] |
+| 大数定律 | 频率随试验增多收敛到真实概率 |
+| 条件概率 | 已知一事件下另一事件的概率 |
+| 贝叶斯定理 | 用新证据更新信念(先验→后验) |
+| 期望 / 方差 | 分布的中心 / 分散程度 |
+| 正态分布 | 中心极限定理下无处不在的钟形曲线 |
+
+> 🎯 一句话:**概率论是机器学习的母语。** 从逻辑回归输出概率、到朴素贝叶斯更新信念、再到熵度量不确定性——理解了概率,后面的许多公式就都有了根。

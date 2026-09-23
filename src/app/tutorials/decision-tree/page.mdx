@@ -1,0 +1,202 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("decision-tree");
+
+# 🌳 决策树
+
+决策树是最贴近人类直觉的模型 —— 它就像玩「**20 个问题**」猜谜:通过一连串「是/否」提问,一步步把数据分到正确的类别。它还有个杀手锏:**结果完全可解释**,每个预测都能画成一张谁都看得懂的流程图。
+
+> 「年龄 > 30 吗?」→「收入 > 50 万吗?」→「批准贷款」。银行风控、医疗诊断都爱用它,因为能讲清楚「为什么」。
+
+## 核心问题:先问哪个问题最好?
+
+决策树每次分裂都要选一个**特征 + 阈值**。但怎么判断哪个切分「最好」?好的切分应该让分出来的两堆数据**尽可能纯**(同一堆里尽量是同一类)。
+
+衡量「纯度」正是用上[信息论一章](/tutorials/information-theory)的**熵**:一堆数据越混杂,熵越高;越纯,熵越低(全是一类时熵=0)。
+
+**信息增益(Information Gain)** = 切分前的熵 − 切分后的加权熵:
+
+$$
+\text{Gain} = H(\text{父}) - \left( \frac{n_L}{n}H(\text{左}) + \frac{n_R}{n}H(\text{右}) \right)
+$$
+
+增益越大,说明这一刀切得越「干净」。**决策树就是贪心地选信息增益最大的切分。**
+
+## 动手找最佳切分
+
+下面是一排一维数据点(蓝=A 类,橙=B 类)。**拖动红色阈值线**,实时观察左右两子集的熵,以及这一刀带来的**信息增益**。试着找到让增益**最大**的位置:
+
+<SplitGainExplorer />
+
+你会发现:把阈值拖到两类**交界处**时增益最大(左边几乎全蓝、右边几乎全橙);拖到一堆同色点中间则增益很小 —— 因为没把两类分开,熵几乎没下降。
+
+> 💡 除了熵/信息增益,另一个常用的纯度指标是 **基尼不纯度(Gini)**,`scikit-learn` 默认用它,思路完全一样:挑让子节点最纯的切分。
+
+`scikit-learn` 的 `fit()` 背后藏着一段**递归**:选最佳切分 → 把数据一分为二 → 对左右两半各自再建一棵树,直到子集足够纯或到达深度上限。核心逻辑就这几行:
+
+```
+# 决策树递归建树 伪代码 (CART)
+def build(data, depth):
+    if 全同类(data) or depth == 最大深度 or len(data) < 最小样本:
+        return 叶节点(多数类(data))          # 终止:不再切
+    best_feat, best_thr = None, None
+    best_gain = 0
+    for feat in 所有特征:                     # 枚举切分维度
+        for thr in feat 的候选阈值:           # 枚举切分点
+            L, R = split(data, feat, thr)
+            gain = H(data) - 加权熵(L, R)      # 信息增益(或 Gini 下降)
+            if gain > best_gain:
+                best_gain, best_feat, best_thr = gain, feat, thr
+    if best_gain == 0:                        # 再切也不变纯
+        return 叶节点(多数类(data))
+    L, R = split(data, best_feat, best_thr)
+    node = 内部节点(best_feat, best_thr)
+    node.left  = build(L, depth + 1)          # 递归左子树
+    node.right = build(R, depth + 1)          # 递归右子树
+    return node
+```
+
+**预测**时从根出发,按每个内部节点的 `feat < thr` 走左或走右,落到叶节点就返回它的类别。
+
+## 用代码训练一棵树
+
+`scikit-learn` 几行就能训练并**打印出整棵树的规则**。改 `max_depth` 看树的深浅:
+
+<CodeRunner
+  packages={["scikit-learn"]}
+  defaultCode={`
+import numpy as np
+from sklearn.tree import DecisionTreeClassifier, export_text
+
+# 特征:[年龄, 年收入(万)];标签:是否批准贷款(0/1)
+X = np.array([
+    [25, 15], [30, 20], [22, 12], [35, 18],   # 拒绝
+    [40, 60], [50, 80], [45, 55], [38, 70],   # 批准
+])
+y = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+
+tree = DecisionTreeClassifier(max_depth=2, random_state=0)
+tree.fit(X, y)
+
+# 把学到的树打印成可读规则!
+print(export_text(tree, feature_names=["年龄", "收入"]))
+
+print("特征重要性:", dict(zip(["年龄", "收入"], tree.feature_importances_.round(2))))
+print("预测 [33, 50] →", "批准" if tree.predict([[33, 50]])[0] else "拒绝")
+`} />
+
+## 过拟合:树长太深的代价
+
+决策树如果不加限制,会一直分裂到每个叶子只剩一个样本 —— 在训练集上 100% 正确,但其实是**死记硬背**,换新数据就崩。下面对比不同深度的训练 vs 测试表现:
+
+<CodeRunner
+  packages={["scikit-learn"]}
+  defaultCode={`
+import numpy as np
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import make_moons
+from sklearn.model_selection import train_test_split
+
+X, y = make_moons(n_samples=200, noise=0.3, random_state=0)
+Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=0)
+
+print("深度 | 训练准确率 | 测试准确率")
+print("-----|-----------|----------")
+for d in [1, 3, 5, 10, None]:
+    t = DecisionTreeClassifier(max_depth=d, random_state=0).fit(Xtr, ytr)
+    tr = t.score(Xtr, ytr)
+    te = t.score(Xte, yte)
+    flag = "  ← 过拟合!" if tr - te > 0.15 else ""
+    print(f" {str(d):>4} |   {tr:.2f}    |   {te:.2f}{flag}")
+`} />
+
+注意:深度无限(`None`)时训练准确率冲到 1.0,但测试准确率反而下降 —— 典型的**过拟合**。实践中要用 `max_depth`、`min_samples_leaf` 等参数「剪枝」。关于过拟合的系统讲解,见[过拟合与正则化](/tutorials/overfitting-regularization)一章。
+
+## 看见「阶梯」:决策边界长什么样
+
+决策树的边界都**与坐标轴平行**,拼成一格格的「阶梯」。光说不如一看 —— 下面用 matplotlib 把树学到的决策边界画出来,**图形直接显示在下方**。改 `max_depth` 看阶梯变精细:
+
+<CodeRunner
+  packages={["scikit-learn", "matplotlib"]}
+  defaultCode={`
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import make_moons
+
+X, y = make_moons(n_samples=200, noise=0.25, random_state=0)
+clf = DecisionTreeClassifier(max_depth=4, random_state=0).fit(X, y)
+
+# 在网格上预测,画出决策区域
+xx, yy = np.meshgrid(np.linspace(X[:,0].min()-0.5, X[:,0].max()+0.5, 300),
+                     np.linspace(X[:,1].min()-0.5, X[:,1].max()+0.5, 300))
+Z = clf.predict(np.c_[xx.ravel(), yy.ravel()]).reshape(xx.shape)
+
+plt.figure(figsize=(6, 4.5))
+plt.contourf(xx, yy, Z, alpha=0.3, cmap="coolwarm")
+plt.scatter(X[:,0], X[:,1], c=y, cmap="coolwarm", edgecolors="k", s=25)
+plt.title("Decision Tree boundary (axis-aligned steps)")
+plt.show()
+`} />
+
+> 💡 看那些**横平竖直的台阶** —— 树每次只对一个特征切一刀,所以边界永远是水平/垂直线段拼出来的,无法画出斜线。这正是它的固有局限(对比[神经网络](/tutorials/neural-network)平滑的曲线边界)。
+
+同一篇综述论文里给出了对应的参照:左半是一棵学到的树(每层问一个问题),右半是它在二维特征平面上画出的**阶梯形决策函数** —— 每个叶子对应一块矩形区域:
+
+<figure className="my-6">
+  <img src="./tree-rules-boundary.png" alt="二维特征平面上决策树学到的阶梯形决策函数:平面被横平竖直的线切成若干矩形区域,每块区域对应树的一个叶节点,颜色表示该区域的预测类别" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Johann Faouzi &amp; Olivier Colliot, <em>Classic machine learning methods</em>(arXiv:2310.11470)Figure 18
+  </figcaption>
+</figure>
+
+## 典型应用场景
+
+- **信贷审批 / 风控**:规则可解释,监管要求「说清拒贷理由」时尤其重要
+- **医疗辅助诊断**:把症状/指标转成一棵可审查的决策流程
+- **客户流失预测**:找出「哪类用户最可能流失」的关键分裂条件
+- **特征重要性分析**:即使最终用别的模型,也常先用树看哪些特征重要
+- **集成学习基石**:[随机森林、XGBoost](/tutorials/ensemble-learning) 都是成百上千棵树的组合,统治了表格数据竞赛
+
+## 常见问题 FAQ
+
+**Q:信息增益和基尼不纯度选哪个?**
+两者结果通常差别很小。基尼计算更快(不用算对数),是 `scikit-learn` 的默认;信息增益(熵)更贴近信息论直觉。不必纠结,先用默认。
+
+**Q:决策树需要做特征标准化吗?**
+**不需要!** 这是它相比 KNN、逻辑回归的一大优势。树只关心「特征值是否大于某阈值」,不受量纲影响,也不怕特征尺度差异。
+
+**Q:为什么单棵决策树容易过拟合?**
+它能不断分裂直到完美拟合训练集,把噪声也学进去。解决办法:限制深度/叶子样本数(剪枝),或者用**随机森林**——训练很多棵树投票,大幅降低方差。
+
+**Q:决策树能做回归吗?**
+能。`DecisionTreeRegressor` 在叶子节点输出该组样本的均值,分裂标准换成方差减少量,思路一致。
+
+**Q:它能学到「年龄+收入 > 100」这种斜线边界吗?**
+不能直接学。决策树的边界都是**与坐标轴平行**的「阶梯」,要逼近斜线得用很多层小台阶。这是它的固有局限。
+
+## 动手作业
+
+1. **手算信息增益**:用上面交互组件里的数据,把阈值放在 x=4 处,手动按公式算一遍信息增益,再和组件显示的值对比。
+2. **深度与阶梯**:把上面画决策边界的代码里 `max_depth` 依次设为 1、3、8,观察阶梯从粗糙到破碎(过拟合)的变化。
+3. **找最佳深度**:在月亮数据集上用交叉验证遍历 `max_depth=1..12`,找出测试准确率最高的深度。
+4. **随机森林对比**:把 `DecisionTreeClassifier` 换成 `RandomForestClassifier`,对比测试准确率和过拟合程度,体会「众树成林」的威力。
+5. **思考题**:为什么决策树不需要标准化,而 KNN 和逻辑回归需要?从「模型如何使用特征值」的角度解释。
+
+## 延伸阅读
+
+- **站内教程**:[集成学习](/tutorials/ensemble-learning) —— 决策树的最大潜力在「成林」:随机森林与梯度提升把易过拟合的单棵树变成表格数据的最强武器
+- **站内教程**:[过拟合与正则化](/tutorials/overfitting-regularization) —— 单棵树是「过拟合教科书」:深度不限就能完美记住训练集,这一章讲如何系统对付它
+- **经典论文**:Breiman, L. (2001). *Random Forests*. [Machine Learning](https://link.springer.com/article/10.1023/A:1010933404324) —— 把「多棵树 + 随机性 + 投票」推成体系,决策树从脆弱单兵变成最强集成基学习器
+
+## 小结
+
+| 要点 | 说明 |
+|---|---|
+| 思想 | 一连串「是/否」提问,把数据逐步分纯 |
+| 选切分 | 挑**信息增益 / 基尼下降**最大的特征+阈值 |
+| 优点 | **可解释**、免标准化、能处理非线性、给出特征重要性 |
+| 缺点 | 易过拟合、边界只能与坐标轴平行、对数据微小变化敏感 |
+| 进阶 | 随机森林、XGBoost(多树集成)是表格数据的最强武器之一 |
+
+> 🎯 一句话:**决策树用信息增益贪心地选切分,把数据问成一棵可解释的流程图。** 它把信息论的「熵」第一次变成了一个看得见、摸得着的分类工具。

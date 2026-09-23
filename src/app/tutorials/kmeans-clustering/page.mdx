@@ -1,0 +1,196 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("kmeans-clustering");
+
+# 🌀 K-means 聚类
+
+前面的线性回归和 KNN 都是**监督学习** —— 训练数据带有正确答案(标签)。而**聚类**属于**无监督学习**:数据没有标签,我们让算法**自己发现**数据中隐藏的分组。
+
+> 比如:电商想把用户分成几个群体做精准营销,但事先并不知道该分成哪几群。K-means 能自动找出来。
+
+## 算法思想
+
+K-means 要把数据分成 K 个簇,通过不断重复两个步骤来实现:
+
+1. **分配**:把每个数据点归给离它最近的**簇心**(centroid)
+2. **更新**:把每个簇心移动到它所属所有点的**平均位置**
+
+重复这两步,簇心会越移越稳,最终收敛。它优化的目标是让**簇内平方距离之和**最小:
+
+$$
+J = \sum_{i=1}^{K} \sum_{x \in C_i} \lVert x - \mu_i \rVert^2
+$$
+
+其中 $\mu_i$ 是第 $i$ 个簇的中心。
+
+这套「分配—更新」反复迭代的过程叫 **Lloyd 算法**,写成代码只有几行:
+
+```
+# K-means (Lloyd 算法) 伪代码
+初始化 K 个簇心 μ = 随机挑 K 个点(或 k-means++)
+repeat:
+    # 1. 分配:每个点归给最近的簇心
+    for x in 数据:
+        c[x] = argmin_i ‖x - μ_i‖²
+    # 2. 更新:每个簇心移到其成员的均值
+    for i in range(K):
+        μ_i = mean(所有 c[x]==i 的点)
+until 归属 c 不再变化(收敛)
+```
+
+> 💡 结果依赖初始簇心,可能收敛到**局部最优**——实践中用不同初始值多跑几次、取目标 $J$ 最小的一次,`scikit-learn` 的 `n_init` 就是干这个的。
+
+下面的经典示意图展示了「分配—更新」两步迭代:每个点按最近簇心着色(分配),簇心(黑色叉号)随后移到各组成员的均值位置(更新),几轮后簇心稳定、归属不再改变,算法收敛:
+
+<figure className="my-6">
+  <img src="./kmeans-algorithm.png" alt="K-means 迭代过程示意图:二维散点按最近簇心着色分成若干簇,黑色叉号标记簇心位置,展示分配与更新两步交替执行、簇心逐步移动到各簇均值位置直至收敛的多个迭代阶段" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Johann Faouzi &amp; Olivier Colliot, <em>Classic machine learning methods</em>(arXiv:2310.11470)Figure 20
+  </figcaption>
+</figure>
+
+## 逐步观看
+
+下面有 15 个散点(初始为灰色)和 3 个簇心(十字)。反复点击「下一步」,交替执行**分配**(点按颜色归类)和**更新**(簇心移向中心),看它如何一步步收敛:
+
+<KMeansViz />
+
+注意观察:刚开始簇心位置是「乱」的,但每轮更新后都会朝各组中心靠拢,几轮之后就稳定下来 —— 此时再分配也不会有点改变归属,算法**收敛**。
+
+## 用 scikit-learn 实现
+
+修改 `n_clusters` 试试分成不同数量的簇:
+
+<CodeRunner
+  packages={["scikit-learn"]}
+  defaultCode={`
+import numpy as np
+from sklearn.cluster import KMeans
+
+# 三组数据点
+X = np.array([
+    [1.5, 2], [2, 3], [1, 2.5], [2.5, 1.8],      # 左下组
+    [7, 2], [7.5, 3], [6.5, 2.5], [7.2, 1.5],    # 右下组
+    [4, 7], [4.5, 6.5], [3.5, 7], [4.2, 7.5],    # 上方组
+])
+
+model = KMeans(n_clusters=3, random_state=0, n_init=10)
+labels = model.fit_predict(X)
+
+print("每个点所属的簇:", labels)
+print("\\n找到的簇心:")
+for i, c in enumerate(model.cluster_centers_):
+    print(f"  簇 {i}: ({c[0]:.2f}, {c[1]:.2f})")
+`} />
+
+## 如何选 K?
+
+K-means 需要**事先指定簇数 K**,但现实中我们往往不知道该分几类。常用方法:
+
+- **肘部法则(Elbow Method)**:画出不同 K 对应的簇内距离和,找「拐点」
+- **轮廓系数(Silhouette)**:衡量簇内紧密 + 簇间分离的程度
+
+下面用代码实现肘部法则 —— 观察 `inertia`(簇内平方和)在 K=3 处出现明显「拐点」:
+
+<CodeRunner
+  packages={["scikit-learn"]}
+  defaultCode={`
+import numpy as np
+from sklearn.cluster import KMeans
+
+X = np.array([
+    [1.5, 2], [2, 3], [1, 2.5], [2.5, 1.8],
+    [7, 2], [7.5, 3], [6.5, 2.5], [7.2, 1.5],
+    [4, 7], [4.5, 6.5], [3.5, 7], [4.2, 7.5],
+])
+
+print(" K | 簇内平方和(inertia)")
+print("---|--------------------")
+for k in range(1, 6):
+    km = KMeans(n_clusters=k, random_state=0, n_init=10).fit(X)
+    bar = "█" * int(km.inertia_ / 5)
+    print(f" {k} | {km.inertia_:6.1f}  {bar}")
+print("\\n拐点出现在 K=3 —— 再增大 K 收益骤减")
+`} />
+
+文字版的「条形」还不够直观。下面用 **matplotlib** 把 inertia 随 K 画成真正的折线图 —— **图形直接显示在下方**,那个像手肘一样的「拐点」会非常明显:
+
+<CodeRunner
+  packages={["scikit-learn", "matplotlib"]}
+  defaultCode={`
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_blobs
+
+# 造 4 个明显的簇
+X, _ = make_blobs(n_samples=300, centers=4, cluster_std=0.8, random_state=0)
+
+ks = range(1, 9)
+inertias = [KMeans(n_clusters=k, random_state=0, n_init=10).fit(X).inertia_ for k in ks]
+
+plt.figure(figsize=(6, 4))
+plt.plot(list(ks), inertias, "o-", color="#059669", lw=2)
+plt.axvline(4, ls="--", color="#ef4444", alpha=0.7, label="elbow K=4")
+plt.xlabel("number of clusters K")
+plt.ylabel("inertia (within-cluster SSE)")
+plt.title("Elbow Method: find the elbow")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+`} />
+
+> 💡 「手肘」就是曲线从陡峭骤然变平缓的那个 K:再加簇,inertia 也下降不了多少,说明已经分得够细了。
+
+## 典型应用场景
+
+- **用户分群**:电商/游戏按行为把用户分成「高价值」「沉睡」「新手」等群体做精准运营
+- **图像压缩(颜色量化)**:把图片几万种颜色聚成 16/32 个代表色,大幅减小体积
+- **文档主题归类**:把新闻、评论按内容相似度自动归堆
+- **异常检测**:离所有簇心都很远的点,可能是异常样本
+
+## 常见问题 FAQ
+
+**Q:每次运行结果都不一样?**
+K-means 对**初始簇心**敏感,随机初始化可能收敛到不同的局部最优。`scikit-learn` 默认 `n_init=10` 跑多次取最优,并用 **k-means++** 智能初始化缓解这个问题。
+
+初始化为什么这么关键?k-means++(以及它的可扩展版本 k-means||)的思路是:**让初始簇心彼此离得尽量远**,从源头避免「多个簇心挤在一堆、远处数据没人管」的坏起点。下面这张来自 Scalable K-Means++ 论文的图,展示了不同初始化轮数下最终聚类代价的对比 —— 好的初始化能用更少的迭代拿到更低的代价:
+
+<figure className="my-6">
+  <img src="./kmeans-pp-cost.png" alt="GaussMixture 数据集上不同初始化方法的聚类代价对比图:横轴为初始化轮数,纵轴为最终聚类代价,多条曲线分别代表随机初始化与 k-means++ 系列初始化,后者的代价随轮数增加更快下降到更低水平" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Bahman Bahmani et al., <em>Scalable K-Means++</em>(arXiv:1203.6402)Figure 5.2
+  </figcaption>
+</figure>
+
+**Q:K-means 和 KNN 是一回事吗?**
+完全不同!**K-means 是无监督聚类**(数据无标签,找分组);**KNN 是有监督分类**(数据有标签,看邻居投票)。只是名字里都有个 K。
+
+**Q:K-means 为什么对非球形簇效果差?**
+它用「到簇心的欧氏距离」分配点,本质假设簇是各向同性的球形。遇到环形、月牙形分布会切错。这时用 **DBSCAN**(基于密度)或 **GMM**(高斯混合)更合适。
+
+**Q:有离群点会怎样?**
+均值对异常值敏感,一个远点会把簇心拽偏。可改用 **K-medoids**(用实际样本点当中心,更鲁棒)或先剔除离群点。
+
+## 动手作业
+
+1. **散点着色**:用 `matplotlib` 把聚类结果按簇心着色画成散点图(`plt.scatter(X[:,0], X[:,1], c=labels)`),并把簇心用大叉号标出。
+2. **故意选错 K**:把代码里的 `n_clusters` 改成 2 和 5,观察分组结果如何变得不合理。
+3. **轮廓系数**:用 `sklearn.metrics.silhouette_score` 计算 K=2..5 的得分,看哪个 K 最高,是否和肘部法则一致。
+4. **思考题**:如果把所有特征都乘以 1000,K-means 的聚类结果会变吗?为什么标准化对它也很重要?
+
+## 延伸阅读
+
+- **站内教程**:[主成分分析(PCA)](/tutorials/pca-dimensionality-reduction) —— 无监督学习的另一主力:聚类找「分组」,降维找「方向」,常先用 PCA 压维再聚类
+- **经典论文**:Arthur, D. &amp; Vassilvitskii, S. (2007). *k-means++: The Advantages of Careful Seeding*. [SODA '07](https://theory.stanford.edu/~sergei/papers/kMeansPP-soda.pdf) —— k-means++ 初始化的原始出处:证明「小心选种子」能把局部最优的误差从任意坏降到 $O(\log k)$ 近似
+- **经典论文**:Bahmani, B. et al. (2012). *Scalable K-Means++*. [arXiv:1203.6402](https://arxiv.org/abs/1203.6402) —— 把 k-means++ 改造成可并行的 k-means||:几轮采样就接近完整 k-means++ 的效果,大数据下的实用版本
+
+## 小结
+
+- K-means 是最经典的**无监督聚类**算法,通过「分配 → 更新」迭代收敛
+- 需要预先指定 **K**,且对**初始簇心**敏感(故 scikit-learn 默认多次初始化取最优)
+- 假设簇是**球形、大小相近**的;对非球形分布效果差
+
+> 💡 对于形状不规则的簇,可以试试 **DBSCAN** 或**高斯混合模型(GMM)**等其他聚类算法。
+
+学完了监督学习与无监督学习的经典算法,最后一篇我们把视野拉到**深度学习**的起点 —— 看看把逻辑回归「堆成层」会发生什么神奇的事。

@@ -1,0 +1,269 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("deepseek-v3");
+
+<PaperHeader slug="deepseek-v3" />
+
+# 🏗️ DeepSeek-V3:671B MoE 的极致性价比
+
+2024 年 12 月,DeepSeek 发布 V3:一个 671B 参数的 MoE(混合专家)模型,每 token 只激活 37B,却在 14.8T token 上用 **2.788M H800 GPU 小时**(约 $5.58M 租卡成本)完成全部训练——同期 Llama-3.1-405B 用了 **30.84M GPU 小时**,相差 11 倍。这份技术报告的看点不只是「便宜」:MLA 注意力把 KV cache 压掉一个数量级、无辅助损失的负载均衡首次在大规模落地、FP8 混合精度训练首次在超大规模模型上验证成功。争议也随之而来:成本数字只算官方训练、不含前期调研与消融实验;蒸馏 R1 数据的做法也让人追问「V3 的推理能力到底是学来的还是继承来的」。这篇笔记拆解这三件事,并交代 V3-Base 如何成为一个月后震动业界的 R1-Zero 的底座。
+
+> 📌 前置:熟悉 [PPO 与策略梯度](/tutorials/policy-gradient) 和 [知识蒸馏](/tutorials/knowledge-distillation) 会帮助理解后训练部分;MoE 与注意力部分自包含。
+
+## 一、动机:把「性价比」做成架构问题
+
+V3 的设计目标写在标题里:efficient inference + cost-effective training。它把成本拆到三个层面同时下手:
+
+- **推理显存**:自回归解码时,每个 token 的 Key/Value 都要缓存,MHA 下 KV cache 随序列长度线性膨胀,长上下文推理的显存瓶颈主要在这里——MLA 用低秩压缩解决。
+- **训练算力**:MoE 让每个 token 只过一小部分 FFN 参数,V3 是 671B 总参数、37B 激活,「大模型的知识容量、小模型的计算量」。
+- **数值精度**:权重和激活从 BF16 降到 FP8,理论计算吞吐翻倍——但要先解决稳定性和量化误差问题。
+
+值得注意的是,这三件事没有一件是 V3 首创:MLA 和 DeepSeekMoE 在 V2 已验证,FP8 训练在小模型上已有先例。V3 的贡献是**把它们第一次同时推到 671B 规模、14.8T token 的训练上,而且全程没有出现不可恢复的 loss 尖峰、没有回滚**。工程规模本身就是方法学贡献。
+
+## 二、MLA:把 KV cache 压成一个 512 维潜向量
+
+标准 MHA 要为每个 token 缓存全部 $n_h$ 个头的 $k$ 和 $v$。MLA(Multi-head Latent Attention)的洞见是:**K 和 V 不必在头维度上分开存,它们可以联合压缩到一个低秩潜向量里**。
+
+对第 $t$ 个 token,输入 $\mathbf{h}_t \in \mathbb{R}^d$ 先被压成一个 $d_c$ 维的 KV 潜向量:
+
+$$
+\mathbf{c}_t^{KV} = W^{DKV}\,\mathbf{h}_t, \qquad W^{DKV} \in \mathbb{R}^{d_c \times d},\; d_c \ll n_h d_h
+$$
+
+需要用时,再通过上投影分别还原出所有头的 K 和 V:
+
+$$
+\mathbf{k}_t^{C} = W^{UK}\,\mathbf{c}_t^{KV}, \qquad \mathbf{v}_t^{C} = W^{UV}\,\mathbf{c}_t^{KV}, \qquad W^{UK}, W^{UV} \in \mathbb{R}^{n_h d_h \times d_c}
+$$
+
+推理时**只需缓存 $\mathbf{c}_t^{KV}$**,还原矩阵是共享权重、不算 cache。麻烦在于位置编码:RoPE 是位置相关的旋转矩阵,如果 K 在压缩前带 RoPE,「先压缩再还原」在数学上不再等价。MLA 的解法是**解耦**:另造一小段带 RoPE 的共享 key:
+
+$$
+\mathbf{k}_t^R = \operatorname{RoPE}(W^{KR}\,\mathbf{h}_t), \qquad \mathbf{k}_{t,i} = [\mathbf{k}_{t,i}^{C};\, \mathbf{k}_t^R]
+$$
+
+即每个头的 key = 无位置压缩部分(拼接)+ 带 RoPE 的 64 维共享部分。查询侧对称处理($\mathbf{q}$ 也做低秩压缩到 $d_c'=1536$,只为省训练激活内存)。
+
+论文原版架构图——下半是 MLA 的压缩-还原回路,上半是 DeepSeekMoE 的共享专家 + 路由专家:
+
+<figure className="my-6">
+  <img src="./fig-architecture.png" alt="DeepSeek-V3 基础架构:MLA 注意力(h_t 下投影压缩为潜向量 c_KV,上投影还原各头 K/V,另配解耦的 RoPE 共享 key)与 DeepSeekMoE(共享专家 + 门控选择的路由专家)" className="mx-auto h-auto max-w-2xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI et al., <em>DeepSeek-V3 Technical Report</em>(arXiv:2412.19437)Figure 2
+  </figcaption>
+</figure>
+
+V3 的具体配置:$n_h = 128$ 个头、每头 $d_h = 128$、KV 压缩维度 $d_c = 512$、RoPE 维度 $d_h^R = 64$、61 层。算一笔账:
+
+| 注意力机制 | 每 token 每层 KV cache 元素数 |
+|---|---|
+| MHA | $2 n_h d_h = 2 \times 128 \times 128 = 32768$ |
+| GQA($n_g=8$) | $2 n_g d_h = 2048$ |
+| **MLA(V3 配置)** | $d_c + d_h^R = 512 + 64 = \mathbf{576}$ |
+
+**每 token 每层 576 个元素,是 MHA 的 1/57**,约等于只有 2.25 组的 GQA——而 V2 论文报告 MLA 性能比 MHA 还略强。用代码亲手算一遍这些维度:
+
+<CodeRunner defaultCode={String.raw`
+import numpy as np
+
+# DeepSeek-V3 MLA 配置(来自 config.json 与论文 Table)
+n_h, d_h = 128, 128          # 注意力头数、每头维度
+d_c, d_cR = 512, 64          # KV 潜向量维度、解耦 RoPE 维度
+n_layers = 61
+
+# MHA:每层缓存所有头的 K 和 V
+mha_per_token = 2 * n_h * d_h
+# MLA:只缓存压缩潜向量 + RoPE key
+mla_per_token = d_c + d_cR
+
+print(f"MHA  每 token 每层: {mha_per_token} 个元素")
+print(f"MLA  每 token 每层: {mla_per_token} 个元素")
+print(f"压缩比: {mha_per_token / mla_per_token:.1f}x")
+print(f"等价 GQA 组数: {mla_per_token / (2*d_h):.2f} 组")
+
+# 全模型:128K 上下文下,KV cache 总量(BF16 = 2 字节)
+seq = 128 * 1024
+mha_bytes = mha_per_token * n_layers * seq * 2
+mla_bytes = mla_per_token * n_layers * seq * 2
+print(f"\n128K 上下文 KV cache:")
+print(f"  MHA: {mha_bytes/1e9:.1f} GB")
+print(f"  MLA: {mla_bytes/1e9:.1f} GB")
+
+# 模拟压缩-还原:低秩矩阵乘法维度检查
+h = np.random.randn(7168)                # 输入隐藏向量 d=7168
+W_DKV = np.random.randn(d_c, 7168)       # 下投影 d_c x d
+c_kv = W_DKV @ h                         # 潜向量,只有这个需要缓存
+W_UK = np.random.randn(n_h * d_h, d_c)   # 上投影还原所有头的 K
+k_all = W_UK @ c_kv
+print(f"\n压缩: {h.shape} -> 潜向量 {c_kv.shape}(缓存它)")
+print(f"还原: -> 所有头的 K {k_all.shape}")
+`} />
+
+## 三、DeepSeekMoE 与无辅助损失的负载均衡
+
+### 3.1 细粒度专家 + 共享专家
+
+FFN 部分采用 DeepSeekMoE:256 个路由专家 + 1 个共享专家,每 token 激活 top-8 路由专家。两个关键设计:
+
+- **细粒度专家分割**:把大专家切成小专家。同样激活参数量下,专家更小、更多,组合更灵活,知识切分更精确。
+- **共享专家隔离**:总有 1 个专家对所有 token 开放,承载公共知识,避免路由专家重复学习通用模式。
+
+输出为共享专家与被选中路由专家的加权和:
+
+$$
+\mathbf{h}'_t = \mathbf{u}_t + \sum_{i=1}^{N_s}\operatorname{FFN}_i^{(s)}(\mathbf{u}_t) + \sum_{i=1}^{N_r} g_{i,t}\,\operatorname{FFN}_i^{(r)}(\mathbf{u}_t)
+$$
+
+其中 $N_s=1$(共享)、$N_r=256$(路由),亲和度用 **sigmoid** 计算再在被选中的 top-8 内归一化(这一点与 V2 的 softmax 不同):
+
+$$
+s_{i,t} = \operatorname{Sigmoid}(\mathbf{u}_t^T \mathbf{e}_i), \qquad g_{i,t} = \frac{s_{i,t}}{\sum_{j \in \text{TopK}} s_{j,t}}
+$$
+
+### 3.2 无辅助损失的负载均衡
+
+MoE 的经典难题:如果多数 token 都涌向少数专家(路由坍缩),专家并行时负载不均,算力大量闲置。传统解法是加**辅助损失**惩罚不均衡——但辅助损失是在「逼模型匀着用专家」,权重一大就伤害主任务性能。
+
+V3 的替代方案简单到近乎朴素:给每个专家配一个 bias,只参与 top-K **选择**,不参与门控加权:
+
+$$
+g'_{i,t} = \begin{cases} s_{i,t}, & s_{i,t} + b_i \in \operatorname{Topk}(\{s_{j,t} + b_j\}, K_r) \\ 0, & \text{otherwise} \end{cases}
+$$
+
+每个训练步结束后看全批次的专家负载:**过载的专家 $b_i \leftarrow b_i - \gamma$,欠载的 $b_i \leftarrow b_i + \gamma$**。$\gamma$ 是更新速度,V3 前 14.3T token 用 $\gamma = 0.001$,最后 500B 降为 0。因为 bias 只影响「选不选」、不影响「权重多大」,梯度层面完全不干扰主损失——论文称其为 auxiliary-loss-free。另外保留一个极小的序列级辅助损失($\alpha = 10^{-4}$)防单序列内极端失衡。
+
+消融结果(论文 Table 5):在 15.7B 与 228.7B 两个规模上,把纯辅助损失换成这套 bias 机制,GSM8K 从 70.7 → 74.5(大规模组),HumanEval 从 40.2 → 46.3,大多数基准一致变好。**负载均衡从「损失项」变成了「控制回路」**——这是本报告最有迁移价值的一条经验。
+
+论文 Figure 9 的对照也很有说服力:在 Pile 三个域上,**auxiliary-loss-free 模型的专家负载分化更彻底**——即「哪些专家管什么」的分工更清晰,而辅助损失模型为了凑均衡,专家被逼着「什么都懂一点」:
+
+<figure className="my-6">
+  <img src="./fig-expert-load.png" alt="无辅助损失模型与辅助损失模型在 Pile 三个测试域上的专家负载分布对比:前者专家分化(特化)程度更高" className="mx-auto h-auto max-w-2xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI et al., <em>DeepSeek-V3 Technical Report</em>(arXiv:2412.19437)Figure 9
+  </figcaption>
+</figure>
+
+用 numpy 模拟这个 bias 反馈回路,直观看到它如何把失衡的负载拉平:
+
+<CodeRunner defaultCode={String.raw`
+import numpy as np
+
+rng = np.random.default_rng(0)
+n_experts, top_k = 256, 8
+n_tokens = 4096
+
+# 假设专家有一些天然的"受欢迎程度"(模拟路由坍缩的倾向)
+true_affinity = rng.normal(0, 1, n_experts)
+true_affinity[:20] += 2.5   # 前 20 个专家特别有吸引力(公共知识集中)
+
+bias = np.zeros(n_experts)
+gamma = 0.001               # bias 更新速度(V3 前 14.3T token 的设置)
+
+def route(affinities, bias, top_k):
+    """按 s_i + b_i 选 top-k,bias 只影响选择不影响权重"""
+    scores = affinities + bias          # 选择用加了 bias 的分数
+    chosen = np.argsort(-scores)[:top_k]
+    return chosen
+
+loads = np.zeros(n_experts)
+for step in range(500):
+    # 一个批次内所有 token 的路由
+    for _ in range(n_tokens // 64):
+        noise = rng.normal(0, 0.3, n_experts)
+        chosen = route(true_affinity + noise, bias, top_k)
+        loads[chosen] += 1
+    # 步末:过载的降 bias,欠载的升 bias(以均匀负载为参考)
+    expected = loads.sum() * top_k / n_experts
+    bias[loads > expected] -= gamma
+    bias[loads < expected] += gamma
+    loads[:] = 0
+
+# 最终分布(无 bias 对照)
+loads_free = np.zeros(n_experts)
+for _ in range(200):
+    noise = rng.normal(0, 0.3, n_experts)
+    chosen = route(true_affinity + noise, np.zeros(n_experts), top_k)
+    loads_free[chosen] += 1
+
+cv_no = loads_free.std() / loads_free.mean()       # 变异系数:失衡程度
+print(f"无 bias(纯辅助损失也压不平的那种坍缩):变异系数 = {cv_no:.3f}")
+print(f"bias 只动选择、不动梯度,500 步后:前 20 个'热门'专家的 bias = {bias[:20].mean():.4f}")
+print(f"bias 的符号 -> 负:压制热门专家的被选中概率;正:抬冷门专家")
+print("负载被拉平,而主损失的梯度路径从未被触碰")
+`} />
+
+## 四、训练账本:14.8T token,2.788M GPU 小时,FP8
+
+### 4.1 成本明细
+
+论文 Table 1 给出了精确账单(按 H800 租金 $2/小时):
+
+| 阶段 | GPU 小时 | 说明 |
+|---|---|---|
+| 预训练 | 2,664K | 14.8T token,每万亿 token 仅 180K GPU 小时(2048 卡集群 3.7 天) |
+| 上下文扩展 | 119K | 两阶段 YaRN,4K → 32K → 128K |
+| 后训练 | 5K | SFT + RL |
+| **合计** | **2,788K ≈ $5.576M** | |
+
+对照组:Llama-3.1-405B 约 30.84M GPU 小时(约 15T token)。粗算下来,**V3 每万亿美元买到的基准分比 Llama 高出一个数量级**。当然要读注释:这笔账不含架构调研、算法消融、失败实验的成本,也不含数据工程的投入——「$5.58M 训出 V3」是营销口径,严谨的说法是「$5.58M 是最后一次正式训练的算力成本」。
+
+### 4.2 FP8 混合精度:首个超大规模验证
+
+低精度训练的老大难是**离群值**:激活里少数异常大的值会把 FP8 的动态范围撑爆,量化误差淹没信号。V3 的解法是**细粒度分组**:激活按 1×128 的 tile 量化、权重按 128×128 的 block 量化,每个小组独立算缩放因子,离群值只污染自己那一小块。
+
+配套的工程细节:GEMM 用 FP8 输入(理论吞吐较 BF16 翻倍),但 embedding、输出头、MoE 门控、归一化、注意力保持高精度;master weight 与优化器状态存 BF16。验证结果:在两个规模上各训约 1T token,FP8 模型与 BF16 基线的**相对 loss 误差始终低于 0.25%**,在训练随机性的噪声范围内。另外两个训练侧创新:DualPipe 流水线把计算与通信(跨节点专家并行的 all-to-all)重叠掉;MTP(多 token 预测)目标让模型顺带预测下一个 token 的下一个 token($D=1$,损失权重 0.3 降到 0.1),既提升主任务性能,又可在推理时做投机解码。
+
+论文原版的 MTP 结构图——每层多预测一个深度,每条因果链共享主干表示,每层都有完整的因果 mask,顺序推理时这些头可拿来当投机解码的草稿模型:
+
+<figure className="my-6">
+  <img src="./fig-mtp.png" alt="多 Token 预测(MTP)实现:主干之上每层一个因果 Transformer 头,顺序预测后续 token,保持每条因果链完整" className="mx-auto h-auto max-w-2xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:DeepSeek-AI et al., <em>DeepSeek-V3 Technical Report</em>(arXiv:2412.19437)Figure 3
+  </figcaption>
+</figure>
+
+## 五、后训练:蒸馏 R1 + RL,数学代码超一众大模型
+
+### 5.1 SFT:1.5M 样本,推理数据来自 R1
+
+V3 的指令微调共 1.5M 样本。推理类数据(数学、竞赛代码、逻辑)的做法很讲究:R1 生成的答案准但**又长又啰嗦、格式差**;V2.5 生成的简洁但不那么准。他们先训一个领域专家模型(以「问题 + 常规回答」和「系统提示 + 问题 + R1 回答」两种格式混合 SFT,再做 RL 让模型在无系统提示时也自然融合 R1 的反思-验证模式),最后对这个专家模型**拒绝采样**出「既准又短」的数据给 V3 用。论文 Table 9 的消融(V2.5 上):加入 R1 蒸馏数据后 MATH-500 从 74.6 → 83.2,LiveCodeBench 从 31.1 → 37.4——代价是平均回答长度几乎翻倍(769 → 1510 token),他们据此在「准确率 vs 冗长度」之间选了折中配置。这正是[知识蒸馏](/tutorials/knowledge-distillation)在推理时代的新形态:蒸馏的不是 logits,而是**推理模式**。
+
+### 5.2 RL:规则奖励 + 模型奖励 + 自我奖励
+
+RL 阶段沿用 [GRPO](/papers/grpo-deepseek-r1)(去 critic、组内标准化优势)。奖励分三类:可验证任务用**规则 RM**(数学验算、代码跑测试);自由形式答案用**模型 RM**(从 V3 SFT 检查点训练,偏好数据里带 chain-of-thought 以抗 reward hacking);更开放的任务用 **self-rewarding**——宪法 AI 式的投票评估,让 V3 自己给自己打分。GRPO 的细节与偏置批判见 [GRPO 教程](/tutorials/grpo-rlvr)。
+
+### 5.3 结果:37B 激活参数打赢 405B 稠密
+
+最终 V3(8K 输出限制)对比两个开源旗舰:
+
+| 基准 | DeepSeek-V3 | Qwen2.5-72B | Llama-3.1-405B |
+|---|---|---|---|
+| MMLU | 88.5 | 85.3 | 88.6 |
+| MATH-500 | **90.2** | 80.0 | 73.8 |
+| AIME 2024 | **39.2** | 23.3 | 23.3 |
+| CNMO 2024 | **43.2** | 15.9 | 6.8 |
+| LiveCodeBench (CoT) | **40.5** | 31.1 | 28.4 |
+| Codeforces(百分位) | **51.6** | 24.8 | 25.3 |
+| SWE Verified | **42.0** | 23.8 | 24.5 |
+
+数学与代码大幅领先——这直接归因于 R1 蒸馏数据;通用知识类(MMLU)与 Llama 打平。MMLU-Pro 75.9、GPQA-Diamond 59.1 也超过两个开源对手,与 GPT-4o、Claude-3.5-Sonnet 互有胜负。
+
+## 六、与 R1 的关系,及批判性视角
+
+**V3-Base 是 R1-Zero 的底座**。一个月后发布的 R1 论文明确:R1-Zero 直接在 V3-Base 上做纯 RL(无 SFT 冷启动),涌现出反思、验证、策略切换等推理行为,最终 R1 走了「少量冷启动 SFT → 推理 RL → 拒绝采样 SFT → 全场景 RL」的多阶段路线。读这两篇论文是一对:V3 展示了**底座的性价比**(没有 FP8 + MoE + MLA,R1 的训练成本会高一个数量级),R1 展示了**底座之上的推理激发**。而 V3 自己的推理能力又是从 R1 蒸馏来的——R1 训练用的底座是 V3-Base。这个「鸡生蛋」的循环其实是时间线上的接力:V2.5 → 训练早期 R1(用 V3-Base 前身)→ R1 数据反哺 V3 → V3-Base 训 R1-Zero/R1。
+
+值得保留的批判:
+
+1. **成本口径**:2.788M GPU 小时不含前期研究、消融、数据构建。SemiAnalysis 等机构的估算认为含研发摊销的真实投入高得多。「$5.58M」成立,但它是边际成本而非全成本。
+2. **蒸馏依赖**:V3 数学代码的领先与 R1 数据强相关。这引出一个开放问题:推理能力究竟多大程度能从更强的教师迁移,多大程度需要 RL 现场激发?R1 论文的「纯 RL 也能涌现」与 V3 的「蒸馏即可复用」构成有趣的张力,也是后续 [on-policy 蒸馏](/tutorials/on-policy-distillation)研究想回答的问题。
+3. **知识短板**:V3 自己承认 SimpleQA 落后 GPT-4o(24.9 vs 38.2),因为算力预算优先给了中文知识与推理;事实性知识的宽度受总 FLOPs 限制。
+
+## 小结
+
+- **MLA**:K/V 联合低秩压缩到一个 512 维潜向量(+64 维 RoPE key),每 token 每层 576 元素,约为 MHA 的 1/57、GQA(8 组)的 1/3.6,性能反而略强。
+- **DeepSeekMoE + 无辅助损失均衡**:256 路由专家选 8 + 1 共享;bias 只动路由不动梯度,过载减 $\gamma$ 欠载加 $\gamma$,把负载均衡从损失项变成控制回路,消融显示多数基准一致提升。
+- **FP8 + DualPipe**:细粒度分块量化驯服离群值,超大规模 FP8 训练首次跑通(相对 loss 误差低于 0.25%),配合计算通信重叠,14.8T token 只要 2.788M GPU 小时。
+- **后训练**:R1 专家模型 + 拒绝采样造出「准而不啰嗦」的 1.5M SFT 数据,规则 + 模型 + 自我三分奖励做 GRPO,数学代码超 Qwen2.5-72B 与 Llama-3.1-405B。
+- V3-Base 随后成为 R1-Zero 的底座;「V3 性价比 + R1 推理」合起来才是 DeepSeek 这波冲击的完整故事。
+
+V3 技术报告真正的信息量不在某个单点创新,而在于它示范了一条工程路线:**架构(MoE/MLA)、精度(FP8)、系统(流水线重叠)三层协同优化时,成本曲线可以被压到什么程度**。这也是为什么它发表后被大量复现工作当作参考实现。

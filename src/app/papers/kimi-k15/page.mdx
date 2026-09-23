@@ -1,0 +1,187 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("kimi-k15");
+
+<PaperHeader slug="kimi-k15" />
+
+# 🌗 Kimi K1.5:多模态长上下文扩展的 RL 推理
+
+2025 年 1 月,[DeepSeek-R1](/papers/grpo-deepseek-r1) 刷屏的同一周,月之暗面交出了自己的答卷:Kimi k1.5。两家面对同一道题——「纯 RL 能不能教会大模型推理」——给出了不同解法:R1 靠多阶段 SFT 冷启动 + GRPO,k1.5 靠**把 RL 的上下文窗口一路拉到 128k**,让模型在自回归生成里完成隐式搜索。这篇笔记拆解 k1.5 的三个核心件:**在线镜像下降**形式的策略优化、治「越想越长」的**长度惩罚**、按难度组织的**课程采样**,最后与 R1 的路线正面对比。
+
+> 📌 前置:熟悉 [策略梯度](/tutorials/policy-gradient) 与 [GRPO/RLVR](/tutorials/grpo-rlvr) 会很有帮助——k1.5 与 R1 是同一道题的两份答卷。
+
+## 一、动机:把「搜索」搬进上下文里
+
+预训练的 next-token prediction 在 scaling law 下有效,但受制于高质量数据的存量;RL 让模型**用带奖励的探索自己产生训练信号**,理论上打开了新的扩展轴。问题在于:2025 年之前,公开的 LLM+RL 工作都没做出有竞争力的推理成绩——k1.5 的技术报告回答的正是「配方是什么」。
+
+核心观察来自一个算法视角:[MCTS](/tutorials/monte-carlo)、Tree-of-Thoughts 这类规划算法,本质是维护一棵「部分解 + 价值反馈」的搜索树,而**树里的全部信息都可以摊平成上下文里的 token**——问题、已探索的思路、critic 的反馈,本来就是语言序列。既然如此,与其在推理时显式建树、单独训练一个价值模型,不如直接训练模型在长上下文里**自回归地完成探索、回溯与修正**:生成的 token 数,就是分配给搜索的计算预算;上下文越长,等效搜索步数越多。
+
+于是 k1.5 的框架刻意极简:**不用 MCTS、不用价值网络、不用过程奖励模型**,只把 RL 的上下文窗口从常规的几千 token 拉到 **128k**,并实测性能随上下文长度持续上升。配套的工程件是 **partial rollout**:给每条轨迹设固定 token 预算,没写完的部分存入 replay buffer、下一轮迭代接着续写——旧段落直接复用,不必从头重新生成;另加重复检测提前终止打转的轨迹。没有它,128k 长 CoT 的采样成本会把 RL 训练拖垮。
+
+论文原版的大规模 RL 训练系统总览(左)与 partial rollout 示意(右)——注意右图中被长度截断的轨迹如何存入 replay buffer、在下一轮迭代续写:
+
+<figure className="my-6 grid gap-4 sm:grid-cols-2">
+  <img src="./fig-rl-system-overview.png" alt="Kimi k1.5 大规模 RL 训练系统总览:Rollout Workers 采样轨迹,经 Reward Models 打分进入 Replay Buffer,Trainer Workers 拿训练数据更新策略模型,参考模型旁路提供 KL 锚定" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-partial-rollout.png" alt="Partial rollout 示意:rollout worker 给每条轨迹设固定 token 预算,正常结束或重复检测提前终止的轨迹完整保存,被长度截断的轨迹存入 replay buffer 留待下一轮迭代续写" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="sm:col-span-2 mt-1 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Kimi Team, <em>Kimi k1.5: Scaling Reinforcement Learning with LLMs</em>(arXiv:2501.12599)Figure 3
+  </figcaption>
+</figure>
+
+性能随回答长度持续上升的证据(论文 Figure 6,横轴为平均 token 长度,纵轴为各基准准确率,三条基准的拟合斜率均为正):
+
+<figure className="my-6">
+  <img src="./fig-perf-vs-length.png" alt="模型性能随回答长度上升:MathVista、OMNI-MATH500、MATH500 三个基准上准确率均随平均 token 长度线性增长" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Kimi Team, <em>Kimi k1.5: Scaling Reinforcement Learning with LLMs</em>(arXiv:2501.12599)Figure 6
+  </figcaption>
+</figure>
+
+## 二、策略优化:在线镜像下降
+
+k1.5 没有沿用 PPO/GRPO 的裁剪式目标,而是把 RL 形式化为**迭代式的在线镜像下降**(online mirror descent)。第 $i$ 轮迭代以当前模型 $\pi_{\theta_i}$ 为参考,求解带相对熵正则的策略优化问题:
+
+$$
+\max_{\theta}\;\mathbb{E}_{(x,y^*)\sim\mathcal{D}}\Big[\mathbb{E}_{(y,z)\sim\pi_{\theta}}\big[r(x,y,y^*)\big]-\tau\,\mathbb{KL}\big(\pi_{\theta}\,\big\Vert\,\pi_{\theta_i}\big)\Big]
+$$
+
+这个 KL 正则目标有闭式最优解 $\pi^*(y,z\mid x)=\pi_{\theta_i}(y,z\mid x)\exp(r/\tau)/Z$。取对数反解、再做平方逼近,得到替代损失:
+
+$$
+L(\theta)=\mathbb{E}\Big[\big(r-\tau\log Z-\tau\log\tfrac{\pi_{\theta}(y,z\mid x)}{\pi_{\theta_i}(y,z\mid x)}\big)^2\Big],\qquad \tau\log Z\;\approx\;\overline{r}=\operatorname{mean}(r_1,\dots,r_k)
+$$
+
+配分项 $\tau\log Z$ 用同题 $k$ 个采样的**奖励均值** $\overline{r}$ 近似($\tau\to\infty$ 时二者重合,实践上均值就够有效)。对 $\theta$ 求梯度:
+
+$$
+\frac{1}{k}\sum_{j=1}^{k}\Big(\nabla_{\theta}\log\pi_{\theta}(y_j,z_j\mid x)\,\big(r_j-\overline{r}\big)-\frac{\tau}{2}\,\nabla_{\theta}\Big(\log\frac{\pi_{\theta}(y_j,z_j\mid x)}{\pi_{\theta_i}(y_j,z_j\mid x)}\Big)^{\!2}\Big)
+$$
+
+第一项就是「组均值当基线」的 [REINFORCE](/tutorials/policy-gradient),但三个细节不同:① 采样来自参考策略 $\pi_{\theta_i}$ 而非当前策略——迭代内是 **off-policy** 的,样本可以复用;② 拉回参考策略的方式不是 PPO 式比率裁剪,而是 **log-ratio 的 L2 正则**;③ 每轮迭代换了参考策略,优化器也随之重置。
+
+为什么不配 critic?论文给了一个值得记住的论证:模型走到岔路口,$z_{t+1}$ 直通答案,$z'_{t+1}$ 是弯路——oracle 价值函数会给 $z'_{t+1}$ 负优势、把它压掉;但从「学会试错再恢复」的角度,$z'_{t+1}$ 恰恰是最有价值的训练素材。**只用最终答案的 outcome 奖励**,模型才能学会走进弯路再爬出来——这正是长 CoT 里 planning、reflection 行为的来源。
+
+把这个替代损失跑一遍「无参版」——把 log-ratio 当作变量,看它收敛到哪:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 同一道题采样 k=8 个回答,二元可验证奖励:答对=1,答错=0
+r = np.array([1, 1, 0, 1, 0, 0, 0, 1], dtype=float)
+r_bar = r.mean()  # 组均值基线(tau*logZ 的近似)
+
+print("奖励 r:       ", r.astype(int))
+print("组均值 r_bar =", r_bar)
+print("优势 r-r_bar: ", (r - r_bar).round(3))
+
+# 镜像下降:最小化 (r - r_bar - tau*u)^2,其中 u = log(pi_theta / pi_ref)
+# 均衡点 u* = (r - r_bar)/tau —— 奖励偏离组均值越远,策略移动越多
+tau = 0.5
+u = np.zeros(len(r))     # 初始 log-ratio(theta 即参考策略)
+lr = 0.3
+for step in range(30):
+    u += lr * ((r - r_bar) - tau * u)   # 向均衡点收敛
+
+print("\\n30 步后 log(pi_theta/pi_ref):", u.round(3))
+print("理论均衡 (r-r_bar)/tau:      ", ((r - r_bar) / tau).round(3))
+# 答对的拿到正位移、答错的负位移;tau 越小,允许偏离参考策略越远
+`} />
+
+均衡点 $u^*=(r-\overline{r})/\tau$:比组均值好多少,策略概率就按比例移过去多少;$\tau$ 控制离参考策略的距离上限。
+
+## 三、长度惩罚:治「越想越长」
+
+上下文扩到 128k 后,模型迅速学会「overthinking」:回答长度在 RL 训练中显著增长。成绩确实在涨,但训练和推理都贵,人类也不喜欢啰嗦。k1.5 的解法是把长度做进奖励:对同题 $k$ 个回答,记 $\operatorname{len}(i)$ 为第 $i$ 个的 token 长度,
+
+$$
+r_{\text{len}}(i)=\begin{cases}\lambda & r_i=1\\[2pt] \min(0,\lambda) & r_i=0\end{cases}\,,\qquad \lambda=0.5-\frac{\operatorname{len}(i)-\min_j\operatorname{len}(j)}{\max_j\operatorname{len}(j)-\min_j\operatorname{len}(j)}
+$$
+
+设计得相当精细:**答对**的回答按相对长度拿到 $[-0.5,+0.5]$——短而对加分、长而对减分;**答错**的回答取 $\min(0,\lambda)$——短而错不再额外罚(错误本身已罚)、长而错双重罚。长度奖励加权后并入原奖励。论文还发现早期加长度惩罚会拖慢训练,于是先正常训练、再切换到恒定长度惩罚做 warm-up。
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 同一道题采样 6 个回答:correct=1 表示答对,lengths 为 token 长度
+correct = np.array([1, 1, 1, 0, 0, 0])
+lengths = np.array([3200, 5100, 8400, 2900, 6000, 9800])
+
+min_len, max_len = lengths.min(), lengths.max()
+lam = 0.5 - (lengths - min_len) / (max_len - min_len)   # 越短越大
+len_reward = np.where(correct == 1, lam, np.minimum(0.0, lam))
+
+print(f"{'对错':<3}{'len':>6}{'lambda':>8}{'len_reward':>12}")
+for i in range(len(lengths)):
+    tag = "对" if correct[i] else "错"
+    print(f"{tag:<3}{lengths[i]:>6}{lam[i]:>+8.3f}{len_reward[i]:>+12.3f}")
+
+# 合成奖励 = 正确性奖励 + w * 长度奖励
+w = 0.5
+total = correct + w * len_reward
+print("\\n合成奖励:", total.round(3))
+# 答对且短 -> 加成;答对但长 -> 正确性奖励被削减;
+# 答错且短 -> 不额外罚;答错且长 -> 双重惩罚
+`} />
+
+## 四、课程采样与多模态奖励
+
+**采样策略**用了两个先验。课程采样(curriculum):先易后难——初期模型弱,把预算花在难题上采不到正样本、梯度近乎为零;难度标签一部分来自数据天然标注(小学题 vs 竞赛题),一部分来自让 SFT 模型高温采样 10 次统计通过率。优先级采样(prioritized):跟踪每题的成功率 $s_i$,按 $1-s_i$ 加权采样,把火力集中在弱项。消融显示课程采样显著优于均匀采样;另一个消融则表明,与不用负梯度的 ReST 相比,带负梯度的 RL 样本效率高得多——「惩罚错误」在这一 setting 里不可省。
+
+课程采样的消融曲线(论文 Figure 9):均匀采样混采易/难题为基线,课程采样先均匀再在第 24 轮迭代切换到难题,准确率显著抬升——
+
+<figure className="my-6">
+  <img src="./fig-curriculum.png" alt="课程学习消融:横轴为训练迭代轮数,纵轴为准确率;先均匀采样易题、第 24 轮切换到难题的课程学习曲线明显高于混合易难题的均匀采样基线" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Kimi Team, <em>Kimi k1.5: Scaling Reinforcement Learning with LLMs</em>(arXiv:2501.12599)Figure 9
+  </figcaption>
+</figure>
+
+**奖励侧**的工程经验同样值得抄:数学答案的不同写法($a^2-4$ 与 $(a+2)(a-2)$)难住规则判分,经典 value-head 奖励模型抽检准确率只有 84.4%,而**先写 CoT 再给判断**的 CoT RM 达到 98.5%——RL 训练最终采用后者。代码题用 CYaRon 自动生成测试用例,再拿 10 份人类提交交叉验证测试有效性,1000 道线上赛题这样筛出 323 道进训练集。防 reward hacking 的招数:让模型**不带 CoT 直接猜答案**,8 次内猜对即判定「易被黑」,整题剔除;选择题、判断题、证明题这类易蒙对的题型直接排除。
+
+**多模态**是 k1.5 与 R1 最大的表面差异:视觉 RL 数据分三类——真实世界(图表理解、科普题)、程序合成(几何与空间关系)、**文本渲染**(把文档/代码渲染成图片,保证同一内容跨模态回答一致)——与文本联合训练。最终 MathVista 74.9、MMMU 70.0,是当时开源可视推理的最好成绩。
+
+## 五、关键数字,以及与 R1 的对比
+
+Long-CoT 模型的头部成绩(摘自论文 Table 2):
+
+| 基准 | QwQ-32B | OpenAI o1 | Kimi k1.5 |
+|---|---|---|---|
+| AIME 2024(Pass@1) | 50.0 | 74.4 | **77.5** |
+| MATH-500(EM) | 90.6 | 94.8 | **96.2** |
+| Codeforces(百分位) | 62 | **94** | **94** |
+| LiveCodeBench(Pass@1) | 40.6 | **67.2** | 62.5 |
+| MathVista(Pass@1) | — | 71.0 | **74.9** |
+
+更实用的是 **long2short**:把长 CoT 模型的「思考先验」压回短 CoT 模型,共四招——模型合并(权重直接平均)、最短拒绝采样(同题 8 采样取最短正确回答做 [SFT](/tutorials/imitation-learning))、[DPO](/papers/dpo-rafailov)(最短正确为正样本,错误回答与 1.5 倍以上长度的正确回答为负样本)、long2short RL(长度惩罚 + 大幅砍小最大 rollout 长度)。其中 long2short RL 的 token 效率最好:k1.5-short 在 AIME 拿 60.8,平均只花 **3,272 个 token**;对比 GPT-4o-0513 的 9.3——论文摘要里「up to +550%」的出处就在这里。
+
+与 R1 的路线对比(同期独立工作,同与不同都值得看):
+
+| | DeepSeek-R1 | Kimi k1.5 |
+|---|---|---|
+| 策略优化 | GRPO:组内均值 + std 归一化,PPO 式裁剪 | 在线镜像下降:组均值基线,log-ratio 的 L2 正则 |
+| 基线归一化 | 除以组内 std | 只减均值,不除 std |
+| 采样 | 每轮迭代后 on-policy 重采 | 迭代内 off-policy,样本可复用 |
+| RL 上下文 | 数千 token 级 CoT | **128k + partial rollout** |
+| 冷启动 | 多阶段:冷启动 SFT → RL → 大规模拒绝采样 SFT → RL | 小规模 long-CoT 热身 SFT,然后直接长上下文 RL |
+| 模态 | 纯文本 | 文本 + 视觉联合 RL |
+| 长度控制 | 论文未处理 | 长度惩罚 + long2short |
+| 开源 | 权重开放 | 仅技术报告 |
+
+一个耐人寻味的细节:GRPO 的 std 归一化后来被 Dr.GRPO 指出会制造长度偏置、建议去掉——k1.5 的「只减均值」从一开始就是这么做的。两家在同一个月里独立得出「REINFORCE + 组基线、不要 critic」的结论,这条线随后被 DAPO 等继续推进。
+
+## 六、局限与后续
+
+- **没有开源**:k1.5 只发布了技术报告,权重未放出——与 R1 的开放权重形成鲜明对比,也是它社区声量远小于 R1 的直接原因。
+- **成本**:128k 上下文 RL 的训练与推理都贵。消融显示:小模型加更长上下文可追平大模型的成绩,但 token 效率更差;若追求上限,「大模型 + 长上下文」的性价比更高。
+- **overthinking 未根治**:长度惩罚只是压制症状;论文自己承认回答长度持续增长「带来性能但代价高」,long2short 是下游补丁而非治疗。
+- **奖励噪声**:CoT RM 98.5% 的抽检准确率仍留 1.5% 错判,而 RL 会放大系统性的奖励误差。
+- 后续:K2 直接继承了这套 policy optimization 与 partial rollout 基建,把战场从「数学题」换到「agentic 任务」——见 [Kimi K2](/papers/kimi-k2)。
+
+## 小结
+
+- k1.5 的主张:**上下文长度是 RL 扩展的关键维度**——长上下文 + 简单算法,不需要 MCTS、价值网络、过程奖励模型。
+- 算法件:在线镜像下降(组均值基线 + log-ratio L2 正则 + off-policy 样本复用)、精细分段的长度惩罚、课程/优先级采样。
+- long2short 把长 CoT 能力压回短 CoT:AIME 60.8,平均 3.3k token。
+- 与 R1 同题异解:R1 靠蒸馏冷启动 + std 归一化 GRPO,k1.5 靠 128k 长上下文 RL + 更干净的均值基线;两家的共识(不要 critic、组相对基线)定义了 2025 年 RLVR 的主流形态。
+
+这篇报告的价值不在某个单点技巧,而在它用工程实践回答了「o1 式推理能否用最简单的 RL 组件复现」——能,但你要舍得把上下文当算力花。

@@ -1,0 +1,174 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("svm");
+
+# 🛣️ 支持向量机(SVM)
+
+能把两类分开的直线有无数条,哪条最好?[逻辑回归](/tutorials/logistic-regression)找的是「概率上最合理」的那条,而 **支持向量机(SVM)** 的答案更几何、更优雅:**找那条能留出「最宽街道」的分隔线** —— 让两类离边界都尽可能远。它曾是深度学习兴起前最强的分类器之一。
+
+> 与其在两类中间随便画条线,不如画一条「街道」最宽的线:街道越宽,对新样本越有容错,泛化越好。
+
+## 核心思想:最大间隔
+
+SVM 要找的分隔线(高维里叫**超平面**)满足:到两类最近样本的距离(**间隔 margin**)最大。而**决定这条线的,只有那几个「贴着街道边」的点** —— 它们叫**支持向量(Support Vectors)**,其余点再多、离得再远,挪动也不影响边界。
+
+下面**拖动分隔线的角度**,观察间隔宽度的变化,以及哪些点成为支持向量(带黑边)。试着找到让间隔**最大**的方向:
+
+<SVMMarginExplorer />
+
+你会发现:
+
+- 大多数角度根本**分不开**两类(线变红)
+- 只有某个方向附近能分开,且存在一个让**间隔最宽**的最优角度
+- 撑住街道两边的,永远是那两三个**支持向量**;把内部的点删掉,边界纹丝不动
+
+拖滑块是「手动试」,SVM 则把「最大间隔」写成一个**优化问题**去解:最大化间隔等价于在「每个点都分对且离边界够远」的约束下,最小化 $\tfrac12\lVert w\rVert^2$。软间隔用 hinge 损失容忍少量越界,可以直接用次梯度下降来解:
+
+```
+# 线性 SVM (软间隔, 次梯度下降) 伪代码
+# 目标: min  ½‖w‖²  + C·Σ max(0, 1 - yᵢ(w·xᵢ + b))
+#            └ 最大化间隔 ┘   └──── hinge 损失: 惩罚越界样本 ────┘
+w, b = 0, 0
+for epoch in range(轮数):
+    for (xᵢ, yᵢ) in 数据:            # yᵢ ∈ {-1, +1}
+        if yᵢ * (w·xᵢ + b) >= 1:      # 分对且在间隔外 → 只收缩 w
+            w -= lr * (λ * w)
+        else:                          # 越界/分错 → 同时被样本拉动
+            w -= lr * (λ * w - yᵢ * xᵢ)
+            b -= lr * (-yᵢ)
+# 收敛后 yᵢ(w·xᵢ+b) ≈ 1 的那几个点就是支持向量
+```
+
+这正是 Cortes & Vapnik 在 1995 年那篇奠基论文里给出的核心图景 —— 分隔超平面两侧的「街道」由少数支持向量撑起:
+
+<figure className="my-6">
+  <img src="./optimal-hyperplane.png" alt="二维空间中的可分问题:两类样本点(叉与圆圈)被最优分隔超平面分开,两侧斜线标出最大间隔边界,灰色方块标记出撑起间隔的支持向量" className="mx-auto h-auto max-w-sm rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Corinna Cortes &amp; Vladimir Vapnik, <em>Support-Vector Networks</em>(Machine Learning, 1995)Figure 2
+  </figcaption>
+</figure>
+
+> 💡 `scikit-learn` 的 `SVC` 解的是对偶问题(SMO 算法),还能通过**核技巧**处理非线性——但「最大间隔 = 最小化 ‖w‖² + hinge 惩罚」这个核心目标是一致的。
+
+## 用 scikit-learn 实现
+
+`sklearn` 里 SVM 就是 `SVC`。训练后能直接读出支持向量:
+
+<CodeRunner
+  packages={["scikit-learn"]}
+  defaultCode={`
+import numpy as np
+from sklearn.svm import SVC
+
+# 两类线性可分的点
+X = np.array([
+    [2, 3], [3, 2], [2.5, 4.5], [1.5, 2],      # A 类 (0)
+    [7, 7], [8, 6], [6.5, 8], [8.5, 7.5],       # B 类 (1)
+])
+y = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+
+clf = SVC(kernel="linear", C=1.0).fit(X, y)
+
+print("支持向量(撑住间隔的点):")
+print(clf.support_vectors_)
+print("\\n支持向量个数:", len(clf.support_vectors_), "/ 总样本", len(X))
+print("预测 [5, 5]:", "B 类" if clf.predict([[5, 5]])[0] else "A 类")
+`} />
+
+## 核技巧:搞定非线性
+
+如果数据像[神经网络](/tutorials/neural-network)那篇的月牙一样**线性不可分**呢?SVM 的杀手锏是**核技巧(Kernel Trick)**:把数据映射到更高维空间,在那里用超平面切开,回到原空间就成了曲线边界 —— 而且**不用真的算高维坐标**,核函数直接给出内积。
+
+最常用的是 **RBF(高斯)核**。下面画出线性核与 RBF 核在月牙数据上的决策边界对比(**图形直接显示在下方**):
+
+<CodeRunner
+  packages={["scikit-learn", "matplotlib"]}
+  defaultCode={`
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.svm import SVC
+from sklearn.datasets import make_moons
+
+X, y = make_moons(n_samples=200, noise=0.2, random_state=0)
+xx, yy = np.meshgrid(np.linspace(X[:,0].min()-.5, X[:,0].max()+.5, 300),
+                     np.linspace(X[:,1].min()-.5, X[:,1].max()+.5, 300))
+
+fig, axes = plt.subplots(1, 2, figsize=(9, 4))
+for ax, kernel in zip(axes, ["linear", "rbf"]):
+    clf = SVC(kernel=kernel, C=1.0, gamma="scale").fit(X, y)
+    Z = clf.predict(np.c_[xx.ravel(), yy.ravel()]).reshape(xx.shape)
+    ax.contourf(xx, yy, Z, alpha=0.3, cmap="coolwarm")
+    ax.scatter(X[:,0], X[:,1], c=y, cmap="coolwarm", edgecolors="k", s=20)
+    ax.set_title(f"{kernel} kernel (acc={clf.score(X,y):.2f})")
+plt.tight_layout()
+plt.show()
+`} />
+
+> 💡 线性核只能画直线(在月牙上力不从心),RBF 核则能画出贴合月牙的**曲线边界** —— 这就是核技巧的威力。
+
+核技巧并非凭空而来。Cortes & Vapnik 的原始论文里就演示了:用二阶多项式核 $(u \cdot v + 1)^2$ 在平面上学出的决策规则,能灵活地贴住黑白两类点组成的复杂形状(双圈标记的是支持向量):
+
+<figure className="my-6">
+  <img src="./kernel-boundaries.png" alt="多个平面上的图案分类示例:黑白两类点组成不同形状,二阶多项式核的支持向量机在每个图案上学出贴合类边界的曲线决策规则,支持向量用双圈标出,错误用叉标出" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Corinna Cortes &amp; Vladimir Vapnik, <em>Support-Vector Networks</em>(Machine Learning, 1995)Figure 5
+  </figcaption>
+</figure>
+
+## 关键超参数:C 与 gamma
+
+- **C(惩罚强度)**:容忍多少分类错误。C 大 → 尽量不犯错(间隔窄,易过拟合);C 小 → 允许一些错(间隔宽,更稳健)。本质是[正则化](/tutorials/overfitting-regularization)
+- **gamma(仅 RBF 核)**:单个样本影响范围。gamma 大 → 边界更弯曲、更贴数据(易过拟合);gamma 小 → 更平滑
+- 二者通常用[交叉验证](/tutorials/cross-validation) + 网格搜索一起调
+
+## 典型应用场景
+
+- **文本分类 / 情感分析**:高维稀疏特征下 SVM 表现优异(曾是垃圾邮件、新闻分类的主力)
+- **图像分类(中小规模)**:深度学习普及前,SVM + 手工特征是主流
+- **生物信息学**:基因表达数据「特征多、样本少」,正是 SVM 擅长的场景
+- **人脸检测**:早期经典人脸检测器用 SVM 做分类
+
+## 常见问题 FAQ
+
+**Q:SVM 和逻辑回归怎么选?**
+都学线性边界。SVM 关注**间隔最大化**、只由支持向量决定,对高维/小样本更稳健;逻辑回归给出**概率**、更易解释、大数据下更快。特征多样本少偏 SVM,要概率或超大数据偏逻辑回归。
+
+**Q:什么是「核技巧」,为什么不用真的升维?**
+核函数直接计算「两个样本在高维空间的内积」,而无需显式算出高维坐标 —— 省下巨大计算量。这让 SVM 能在无穷维空间里(RBF 核)找线性边界,等价于原空间的复杂曲线。
+
+**Q:为什么叫「支持向量」?**
+因为只有那几个贴着间隔边界的样本「支撑」起了整条决策边界。删掉其他点,解不变;而移动一个支持向量,边界就会变。
+
+**Q:SVM 能输出概率吗?**
+原生不能(它给的是到边界的距离/符号)。`SVC(probability=True)` 可通过额外的交叉验证拟合出概率,但更慢,且不总是很好校准。
+
+**Q:SVM 适合超大数据集吗?**
+不太适合。训练复杂度大致在样本数的平方到立方之间,几十万样本以上会很慢。这类场景常改用线性 SVM(`LinearSVC`)、逻辑回归 + SGD,或直接上深度学习。
+
+## 动手作业
+
+1. **验证支持向量**:训练线性 SVM 后,把一个**非支持向量**的点坐标改一改重新训练,确认决策边界几乎不变;再挪一个支持向量,看边界如何变化。
+2. **调 C**:在月牙数据上把 `C` 从 `0.01` 调到 `100`,用 matplotlib 观察决策边界从平滑到过拟合的变化。
+3. **调 gamma**:固定 RBF 核,把 `gamma` 从 `0.1` 调到 `10`,观察边界如何越来越「贴」每个点。
+4. **网格搜索**:用 `GridSearchCV` 同时搜索 `C` 和 `gamma` 的最佳组合(呼应交叉验证一章)。
+5. **思考题**:为什么「最大化间隔」有助于泛化?从「街道越宽,新样本越不容易落到错误一侧」的角度解释。
+
+## 延伸阅读
+
+- **站内教程**:[逻辑回归](/tutorials/logistic-regression) —— 同为线性分类器:一个最大化间隔、一个最大化似然,目标函数不同,边界都是直线
+- **站内教程**:[决策树](/tutorials/decision-tree) —— 与 SVM 相对的另一极:无需标准化、边界是阶梯而非直线/曲面
+- **经典论文**:Cortes, C. &amp; Vapnik, V. (1995). *Support-Vector Networks*. [Springer](https://link.springer.com/article/10.1007/BF00994018) —— SVM 的奠基论文:最大间隔 + 核技巧 + 支持向量,一举奠定了此后二十年的统计学习理论路线
+- **经典书目**:Schölkopf, B. &amp; Smola, A. J. (2002). *Learning with Kernels: Support Vector Machines, Regularization, Optimization, and Beyond*. [MIT Press](https://mitpress.mit.edu/9780262194754/learning-with-kernels/) —— 核方法的系统化教材:把「在特征空间里做线性代数」推广成一整套方法论
+
+## 小结
+
+| 要点 | 说明 |
+|---|---|
+| 目标 | 找**最大间隔**的分隔超平面 |
+| 支持向量 | 只有贴着间隔边的点决定边界,其余无关 |
+| 核技巧 | 隐式升维,用 RBF 等核搞定非线性边界 |
+| C | 容错/正则强度:大易过拟合,小更稳健 |
+| gamma | RBF 核的弯曲程度:大易过拟合 |
+| 优劣 | 高维小样本强、边界清晰;大数据慢、原生无概率 |
+
+> 🎯 一句话:**SVM 找的是那条「街道最宽」的分隔线,只由少数支持向量撑起;配上核技巧,直线也能变曲线。** 它把「最大间隔」这个几何直觉,变成了深度学习之前最锋利的分类武器。

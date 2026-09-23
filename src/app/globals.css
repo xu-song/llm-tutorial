@@ -1,0 +1,176 @@
+@import "tailwindcss";
+
+/* 暗色模式改为「class 策略」:由 <html class="dark"> 控制,支持手动切换。
+   覆盖 Tailwind 4 默认的 prefers-color-scheme 行为。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  /* SVG 图表用的主题感知颜色:浅色默认值 */
+  --chart-surface: #ffffff;
+  --chart-axis: #d4d4d8;
+  --chart-grid: #e4e4e7;
+  --chart-muted: #71717a;
+  --chart-fg: #27272a; /* SVG 内高对比正文/数字(浅色底,近黑) */
+  --chart-accent: #b45309; /* amber-700:浅色底上对比度达标(5:1) */
+  /* 代码块语法高亮(highlight.js token)配色:浅色 */
+  --hljs-text: #24292e;
+  --hljs-keyword: #d73a49;   /* 红:关键字、控制流 */
+  --hljs-string: #032f62;    /* 深蓝:字符串 */
+  --hljs-comment: #6a737d;   /* 灰:注释 */
+  --hljs-number: #005cc5;    /* 蓝:数字 */
+  --hljs-fn: #6f42c1;        /* 紫:函数名 */
+  --hljs-title: #6f42c1;     /* 紫:类名/标题 */
+  --hljs-attr: #005cc5;      /* 蓝:属性 */
+  --hljs-builtin: #005cc5;   /* 蓝:内置 */
+  --hljs-meta: #6a737d;      /* 灰:meta、装饰器 */
+}
+
+.dark {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+  --chart-surface: #18181b;
+  --chart-axis: #3f3f46;
+  --chart-grid: #27272a;
+  --chart-muted: #a1a1aa;
+  --chart-fg: #f4f4f5; /* SVG 内高对比正文/数字(深色底,近白) */
+  --chart-accent: #f59e0b; /* amber-500:深色底上明亮(8:1) */
+  /* 代码块语法高亮(highlight.js token)配色:深色 */
+  --hljs-text: #e4e4e7;
+  --hljs-keyword: #f87171;   /* 红-400 */
+  --hljs-string: #93c5fd;    /* 蓝-300 */
+  --hljs-comment: #71717a;   /* 锌-500 */
+  --hljs-number: #60a5fa;    /* 蓝-400 */
+  --hljs-fn: #c084fc;        /* 紫-400 */
+  --hljs-title: #c084fc;     /* 紫-400 */
+  --hljs-attr: #60a5fa;      /* 蓝-400 */
+  --hljs-builtin: #60a5fa;   /* 蓝-400 */
+  --hljs-meta: #71717a;      /* 锌-500 */
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-chart-surface: var(--chart-surface);
+  --color-chart-axis: var(--chart-axis);
+  --color-chart-grid: var(--chart-grid);
+  --color-chart-muted: var(--chart-muted);
+  --color-chart-fg: var(--chart-fg);
+  --color-chart-accent: var(--chart-accent);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* 尊重用户的「减少动态效果」偏好:晕动症用户降级为瞬时切换。
+   所有 viz 的过渡/动画在此统一关闭,无需逐组件处理。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* viz SVG 的平滑过渡:拖动滑块或迭代更新时几何/颜色 200ms ease-out,
+   不至于生硬跳变。path[d] 过渡 d 与 transform;[data-smooth] 过渡 fill/stroke/stroke-width/opacity/transform。
+   注意:d 属性的 CSS transition 需浏览器支持(Chromium/Safari/Firefox 现代版均支持);
+   不支持的浏览器自动退化为瞬时切换,无功能影响。
+   限制:SVG 几何属性(x/y/width/height/cx/cy/r)在多数浏览器中不能 CSS transition
+   (仅 Chrome 77+ 部分支持)。需平滑形变的 rect/line 优先用 transform: translate/scale
+   而非改 x/y/width/height;color/opacity/stroke 类属性则可直接平滑。 */
+.viz-smooth path[d],
+.viz-smooth [data-smooth] {
+  transition: d 0.2s ease-out, transform 0.2s ease-out,
+    fill 0.2s ease-out, stroke 0.2s ease-out, stroke-width 0.2s ease-out,
+    opacity 0.2s ease-out;
+}
+
+/* viz 曲线/标签切换时的淡入:挂在挂载即出现的 SVG 子元素上,
+   300ms ease-out;prefers-reduced-motion 下由上面的全局规则降级为瞬时。 */
+@keyframes rl-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 可点击 viz 节点的 hover 反馈:放大 + 提亮,让「可点」一眼可感知。
+   仅作用于挂了 .es-node class 的 <g>,不影响纯展示型节点。 */
+.es-node:hover circle[data-smooth] {
+  transform: scale(1.25);
+  opacity: 1;
+}
+
+/* 代码块语法高亮 token 配色(rehype-highlight 输出 .hljs-* class)。
+   颜色用上面的 --hljs-* 变量,自动跟随 light/dark 主题切换。
+   只作用于 <pre><code> 代码块;行内 code 的粉色 chip 样式由 layout.tsx 的
+   [&_:not(pre)>code] 提供,二者不冲突。 */
+.hljs {
+  color: var(--hljs-text);
+  background: transparent;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-name,
+.hljs-section,
+.hljs-type,
+.hljs-selector-pseudo,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: var(--hljs-keyword);
+}
+.hljs-string,
+.hljs-attr,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-meta-string,
+.hljs-regexp,
+.hljs-addition {
+  color: var(--hljs-string);
+}
+.hljs-comment,
+.hljs-quote,
+.hljs-deletion {
+  color: var(--hljs-comment);
+  font-style: italic;
+}
+.hljs-number,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-variable,
+.hljs-params,
+.hljs-constant,
+.hljs-attribute {
+  color: var(--hljs-number);
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-title.class_,
+.hljs-function .hljs-title,
+.hljs-class .hljs-title {
+  color: var(--hljs-fn);
+}
+.hljs-meta,
+.hljs-meta .hljs-keyword,
+.hljs-tag {
+  color: var(--hljs-meta);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 700;
+}

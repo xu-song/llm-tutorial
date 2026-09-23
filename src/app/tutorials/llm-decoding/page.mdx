@@ -1,0 +1,233 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("llm-decoding");
+
+# ✍️ 大模型解码:如何生成文字
+
+[实战损失](/tutorials/ml-losses)一篇讲了 GPT **训练**时怎么学——最小化下一个词的交叉熵。但训练好的模型每一步只是吐出一个**概率分布**(词表上每个词的概率),它**本身不会「写字」**。把这个分布变成一个真正被选中的词、再一步步接成句子,靠的是**解码(decoding)**。同一个模型,换一种解码策略,输出可以从「刻板严谨」到「天马行空」——这一篇讲清这几种策略。
+
+## 起点:模型每一步给的是一个概率分布
+
+回忆 GPT 的工作方式:给定上文,模型输出词表上的一组 **logits**,经 softmax 变成概率分布 $q$。比如上文是「今天天气很」,模型可能给出:
+
+`好 42% · 热 31% · 冷 12% · 糟 8% · 香蕉 0.001% · …`
+
+**解码要回答的问题是:面对这个分布,下一个词到底选哪个?** 不同答案就是不同策略。
+
+## 策略一:贪心解码(greedy)—— 永远选最大
+
+最简单:每步都选概率最高的那个词。
+
+$$
+w_t = \arg\max_i \; q_t[i]
+$$
+
+**优点**:确定、可复现、稳妥。**缺点**:太死板,容易陷入重复(「我很好我很好我很好…」),而且「每步局部最优」不等于「整句最优」。适合要求准确唯一的任务(如翻译、抽取)。
+
+## 策略二:温度采样(temperature)—— 调节随机性
+
+不总选最大,而是**按概率随机抽**——概率高的词更可能被抽中,但低概率词也有机会。关键旋钮是**温度 $T$**(和[知识蒸馏](/tutorials/knowledge-distillation)里同一个 $T$):
+
+$$
+q_i = \frac{\exp(z_i / T)}{\sum_j \exp(z_j / T)}
+$$
+
+- $T\to 0$:分布变尖,退化成**贪心**(几乎只选最大);
+- $T = 1$:用模型原本的分布;
+- $T > 1$:分布变平,更随机、更有「创意」,但也更容易胡说。
+
+## 策略三 & 四:top-k 与 top-p —— 砍掉长尾
+
+纯温度采样有个风险:词表几万个词,那条**长尾**里的怪词概率虽小,但累加起来偶尔会蹦出一个离谱的词。解决办法是先**缩小采样池**,只在靠谱的候选里抽:
+
+- **top-k**:只保留概率最高的 $k$ 个词,其余丢弃,重新归一化后再抽。
+- **top-p(核采样 nucleus)**:按概率从高到低累加,凑够累计概率 $p$(如 0.9)就停,只在这批词里抽。**它比 top-k 聪明**:分布尖锐时自动只留几个,分布平坦时自动多留一些。
+
+**拖动下面三个旋钮**,看候选词的概率如何变化、哪些词被留进「采样池」(彩色)、哪些被踢出(灰色):
+
+<DecodingSampler />
+
+## 亲手实现四种策略
+
+下面对同一组 logits 跑四种解码,直观对比它们各留下哪些候选、以及采样结果:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(0)
+
+def softmax(z, T=1.0):
+    z = np.array(z, float) / max(T, 1e-6)
+    z = z - z.max()
+    e = np.exp(z); return e / e.sum()
+
+vocab  = ["好", "热", "冷", "糟", "香", "。"]
+logits = np.array([3.0, 2.6, 1.2, 0.6, -2.0, -3.0])   # 模型对"今天天气很_"的打分
+
+# ① 贪心:直接取最大
+print("① 贪心 ->", vocab[int(logits.argmax())])
+
+# ② 温度采样:按 softmax(T) 概率随机抽
+def temp_sample(T):
+    p = softmax(logits, T)
+    return vocab[rng.choice(len(vocab), p=p)]
+print("② 温度 T=0.7 ->", temp_sample(0.7), " | T=1.5 ->", temp_sample(1.5))
+
+# ③ top-k:只留概率最高的 k 个,重新归一化后抽
+def topk_sample(k, T=1.0):
+    p = softmax(logits, T)
+    idx = p.argsort()[::-1][:k]          # 概率最高的 k 个下标
+    q = p[idx] / p[idx].sum()            # 池内重新归一化
+    return vocab[idx[rng.choice(len(idx), p=q)]]
+print("③ top-k=2 保留:", [vocab[i] for i in softmax(logits).argsort()[::-1][:2]],
+      "-> 抽到", topk_sample(2))
+
+# ④ top-p(核采样):累计概率凑够 p 就停
+def topp_sample(p_thresh, T=1.0):
+    p = softmax(logits, T)
+    order = p.argsort()[::-1]
+    cum = np.cumsum(p[order])
+    cut = np.searchsorted(cum, p_thresh) + 1   # 需要几个词才凑够 p
+    idx = order[:cut]
+    q = p[idx] / p[idx].sum()
+    return [vocab[i] for i in idx], vocab[idx[rng.choice(len(idx), p=q)]]
+kept, pick = topp_sample(0.9)
+print("④ top-p=0.9 保留:", kept, "-> 抽到", pick)
+`} />
+
+## 把它接成一句话:自回归循环
+
+真正的生成是**自回归**的——选出一个词,拼回上文,再预测下一个,直到遇到结束符。下面用一个玩具「语言模型」(手工写死的转移打分)跑完整循环,多跑几次能看到**同样的模型生成不同的句子**:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(7)
+
+def softmax(z, T=1.0):
+    z = np.array(z, float) / max(T, 1e-6); z = z - z.max()
+    e = np.exp(z); return e / e.sum()
+
+vocab = ["<s>", "猫", "狗", "在", "睡觉", "跑", "。"]
+
+# 玩具"语言模型":给定上一个词,返回下一个词的 logits(-9 表示几乎不可能)
+def next_logits(prev):
+    table = {
+        "<s>":  [-9, 3.0, 2.5, 0.0, -1, -1, -9],   # 开头多半接"猫"或"狗"
+        "猫":   [-9, -9, -9, 3.0, 1.0, 0.5, -1],   # "猫"后多半接"在"
+        "狗":   [-9, -9, -9, 3.0, 0.5, 1.5, -1],
+        "在":   [-9, -9, -9, -9, 3.0, 2.0, -1],    # "在"后接"睡觉"或"跑"
+        "睡觉": [-9, -9, -9, -9, -9, -9, 3.0],      # 之后接句号
+        "跑":   [-9, -9, -9, -9, -9, -9, 3.0],
+    }
+    return np.array(table.get(prev, [0]*7), float)
+
+def sample(logits, T, topk, topp):
+    p = softmax(logits, T)
+    order = p.argsort()[::-1]
+    keep = set(order[:topk])                 # top-k
+    ps, cum = set(), 0.0                      # top-p
+    for i in order:
+        ps.add(i); cum += p[i]
+        if cum >= topp: break
+    idx = [i for i in order if i in keep and i in ps]   # 两个条件都满足
+    q = np.array([p[i] for i in idx]); q /= q.sum()
+    return idx[rng.choice(len(idx), p=q)]
+
+# 自回归:每次用上一个词预测下一个,拼接,直到句号
+for trial in range(4):
+    seq = ["<s>"]
+    for _ in range(8):
+        nxt = vocab[sample(next_logits(seq[-1]), T=0.9, topk=3, topp=0.95)]
+        seq.append(nxt)
+        if nxt == "。": break
+    print(f"第 {trial+1} 次生成:", "".join(w for w in seq if w != "<s>"))
+
+print("\\n同一个模型、同样的解码设置,每次却生成不同句子 —— 这就是采样的随机性")
+print("把 T 调到接近 0(贪心),4 次会输出完全一样的句子;试试改 T / topk / topp")
+`} />
+
+## 延伸话题:投机解码——让「小模型草拟、大模型校验」
+
+自回归循环还有一个绕不开的矛盾:**模型越大、生成越慢**,而大模型每步只为了确认一个 token。**投机解码(speculative decoding)** 的思路是:先让一个小的草稿模型(draft model)一口气猜出 $\gamma$ 个 token,再把这段草稿**一次性**喂给大模型并行校验——哪些 token 大模型也认可就白赚,从第一个分歧点起由大模型重写。草稿准,一次前向产出多个 token,生成就加速;草稿不准,回退重算,正确性不打折。论文 Figure 1 画出了这个交错循环:
+
+<figure className="my-6">
+  <img src="./specdec-loop.png" alt="投机解码示意图:小草稿模型连续生成若干候选 token,大目标模型一次性并行校验这段草稿,认可的 token 直接采纳,从第一个被拒绝的位置起由大模型重新采样并接管,如此交替循环加速自回归生成" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Leviathan et al., <em>Fast Inference from Transformers via Speculative Decoding</em>(arXiv:2211.17192)Figure 1
+  </figcaption>
+</figure>
+
+这招如今是大模型推理的标配:[Kimi K3](/papers/kimi-k3) 用 EAGLE-3 做草稿头,[DeepSeek-V3](/papers/deepseek-v3) 的 MTP(多 token 预测)则把「草稿模型」直接内建成主模型的一个额外预测头——同一个思想,两种工程化。
+
+## 怎么选?一张速查表
+
+| 策略 | 随机性 | 适合场景 |
+|---|---|---|
+| **贪心 / beam search** | 无(确定) | 翻译、摘要、抽取——要唯一准确答案 |
+| **温度 $T$** | $T$ 越大越随机 | 创意写作调「脑洞大小」的总旋钮 |
+| **top-k** | 中 | 砍长尾的简单办法,$k$ 固定 |
+| **top-p(核采样)** | 中,自适应 | **聊天/写作最常用**,兼顾质量与多样性 |
+
+> 💡 实际系统(ChatGPT、Claude 等)通常**组合使用**:先用 top-p(如 0.9~0.95)砍掉长尾,再配一个温度(如 0.7~1.0)。「temperature」「top_p」这些正是 API 里能调的采样参数。
+
+## 常见问题 FAQ
+
+**Q:温度和知识蒸馏里的温度是一回事吗?**
+公式完全一样($z/T$ 再 softmax),作用也都是「调分布的尖锐程度」。区别只在用途:[蒸馏](/tutorials/knowledge-distillation)用高温**软化老师标签**来暴露暗知识;解码用温度**调生成的随机性**。
+
+**Q:为什么不永远用贪心?最大概率不是最靠谱吗?**
+「每步选最大」是**局部贪心**,不保证整句最优,还极易陷入重复循环。而且很多任务(闲聊、写作)本来就没有唯一正确答案,一点随机性反而更自然、更多样。
+
+**Q:beam search 是什么?**
+贪心的加强版:每步保留概率最高的若干条「候选句子」(beam)一起往下扩展,最后选整句概率最高的。比贪心更接近「全局最优」,常用于翻译;但计算更贵,且在开放式生成里仍偏刻板。核心循环就是「每步扩展所有 beam、再砍回 top-N」:
+
+```
+# beam search 伪代码 (beam 宽度 = N)
+beams = [([], 0.0)]                       # 每个 beam = (已生成 token 序列, 累计 log 概率)
+for step in range(最大长度):
+    cand = []
+    for (seq, score) in beams:            # 扩展每一条候选
+        if seq 以 <eos> 结尾:
+            cand.append((seq, score))      # 已完成的直接保留
+            continue
+        logp = log_softmax(model(seq))     # 下一个 token 的对数概率分布
+        for tok in 所有 token:
+            cand.append((seq + [tok], score + logp[tok]))   # 累加 log 概率
+    beams = top_N(cand, key=score)         # ★ 只保留分数最高的 N 条(剪枝)
+    if 所有 beam 都以 <eos> 结尾: break
+return argmax(beams, key=score)            # 选整句 log 概率最高的
+```
+
+用**对数概率相加**而非概率相乘,是为了避免连乘下溢;宽度 $N=1$ 时 beam search 就退化成贪心解码。实践中还会对长句做长度归一化(除以序列长度),否则短句总因连乘项少而占便宜。
+
+**Q:temperature=0 会怎样?**
+数学上除以 0 没定义,工程实现里一般把它**特判成贪心**(直接取 argmax)。所以「T=0」在多数 API 里等价于「确定性输出」。
+
+## 动手作业
+
+1. **温度扫描**:把第一个代码框的 `temp_sample` 在 T=0.3、1.0、2.0 各多抽几次,统计每个词被抽到的频率,体会 T 如何改变随机性。
+2. **贪心 = 低温极限**:把自回归循环的 `T` 调到 0.05,连跑 4 次,确认输出变得几乎完全一样。
+3. **top-p 的自适应**:构造一个很尖锐的 logits(如 `[8,1,0,0,0,0]`)和一个很平的(如 `[1,1,1,1,1,1]`),对同一个 `top-p=0.9` 看保留的词数如何自动变化。
+4. **组合**:在自回归循环里把 `topk` 设得很小(如 1),观察它是否退化成贪心。
+
+## 延伸阅读
+
+- **站内论文笔记**:[Kimi K3](/papers/kimi-k3) —— 投机解码的工业级落地:EAGLE-3 草稿头怎么把 K3 的长输出加速到可商用
+- **站内论文笔记**:[DeepSeek-V3](/papers/deepseek-v3) —— MTP(多 token 预测):把草稿模型内建成主模型的额外预测头,训练推理两用
+- **经典论文**:Leviathan, Kalman, Matias (2023). *Fast Inference from Transformers via Speculative Decoding*. [arXiv:2211.17192](https://arxiv.org/abs/2211.17192) —— 投机解码奠基:小模型草拟 + 大模型并行校验,数学上证明输出分布与直接用大模型采样完全一致
+- **经典论文**:Holtzman et al. (2020). *The Curious Case of Neural Text Degeneration*. [arXiv:1904.09751](https://arxiv.org/abs/1904.09751) —— top-p(核采样)的出处:为什么贪心/beam search 会生成重复刻板的文本
+
+## 小结
+
+| 概念 | 一句话 |
+|---|---|
+| 解码 | 把模型每步的概率分布变成一个真正选中的词 |
+| 贪心 | 永远选最大,确定但死板 |
+| 温度 $T$ | 调随机性:低→稳妥,高→有创意 |
+| top-k / top-p | 砍掉低概率长尾,防止蹦出离谱的词 |
+| 自回归 | 选词→拼接→再预测,循环生成整句 |
+
+> 🎯 一句话记住:**训练决定模型「知道什么」,解码决定它「怎么说出来」。** 温度调随机性、top-k/top-p 砍长尾、自回归接成句——这就是每一次和大模型对话时,文字背后正在发生的事。
+
+---
+
+🎉 **恭喜你走完了整套教程!** 从 Python 基础、信息论,到回归、分类、聚类、神经网络,再到强化学习、大模型对齐、蒸馏与解码,你已经掌握了机器学习从经典到前沿的核心脉络。下一步,挑一个真实数据集(如 [Kaggle](https://www.kaggle.com/datasets) 上的入门竞赛),把这些工具用起来 —— **真正的学习从动手做项目开始。**

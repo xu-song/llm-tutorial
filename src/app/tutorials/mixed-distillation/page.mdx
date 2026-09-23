@@ -1,0 +1,246 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("mixed-distillation");
+
+# 🌀 混合蒸馏:off-policy 的成本 + on-policy 的覆盖
+
+[在线蒸馏](/tutorials/on-policy-distillation)解决了离线蒸馏的[暴露偏差](/tutorials/on-policy-distillation#离线蒸馏的病暴露偏差),但代价是老师要全程在线给学生自采样的每一步打分——大模型上这是一笔显著的推理开销。**纯离线便宜但有偏差,纯在线无偏差但太贵。** 能不能各取所长?
+
+**混合蒸馏(mixed / interleaved distillation)** 的思路出奇直接:**按比例 λ 把老师样本和学生样本掺在一起训练**。λ=0 退化成纯离线 SFT,λ=1 退化成纯 on-policy 蒸馏,中间任意比例都是两者的插值。工业流水线里,这是当前最实际的折中——**用 off-policy 的成本买 on-policy 的覆盖**。
+
+> 💡 **关键洞察**:混合蒸馏在[在线蒸馏](/tutorials/on-policy-distillation)的三段式定义上只多加一个旋钮——**数据来自谁**(老师 off-policy / 学生 on-policy / 混合,比例 λ)。损失仍是逐 token 反向 KL,GKD[1] 把它统一成框架里的一个特例。一句话:**比例 λ 是混合蒸馏唯一的新自由度,其余都继承自在线蒸馏**。
+
+## 为什么需要混合:两个极端的代价
+
+先把两个极端摆清楚,混合的动机就自然浮现:
+
+| | 纯离线 SFT (λ=0) | 纯 on-policy 蒸馏 (λ=1) |
+|---|---|---|
+| 数据来自 | 老师(可预缓存) | 学生(每步新鲜采样) |
+| 老师在线开销 | ❌ 几乎为 0(打分可预计算好) | ✅ 高(要跟学生每步打分) |
+| 暴露偏差 | ❌ 严重(训练分布 ≠ 生成分布) | ✅ 无(就在学生自己的轨迹上学) |
+| 信号密度 | ✅ 稠密(逐 token) | ✅ 稠密(逐 token) |
+| 训练稳定性 | ✅ 稳(交叉熵式) | ❌ 噪声大(反向 KL 策略梯度估计) |
+| 适用 | 短输出/判别任务 | 长思维链/推理任务 |
+
+回忆[暴露偏差](/tutorials/on-policy-distillation#离线蒸馏的病暴露偏差)的根源:训练数据来自老师 $p_{\text{train}}(x)=p_{\text{teacher}}(x)$,但生成时数据来自学生 $p_{\text{test}}(x)=p_{\text{student}}(x)$,两者对不上,长序列下 $(1-\varepsilon)^N\to 0$。纯 on-policy 把训练分布拉到学生自己身上,消除偏差,但代价是老师要全程在线。
+
+**混合就是在这两极之间插值**:用一部分老师样本保住「便宜 + 稳定」,用一部分学生样本补上「覆盖学生真实状态」。关键问题是——**比例 λ 怎么定?**
+
+## GKD 的 mixed 模式
+
+GKD(Generalized Knowledge Distillation)[1] 把所有「用老师指导学生」的方法统一成两个旋钮:
+
+- **数据来自谁**:off-policy(老师)/ on-policy(学生)/ mixed(比例 λ 混合两者)
+- **用什么损失**:前向 KL / 反向 KL / 两者自适应混合(AKL)
+
+混合蒸馏就是 GKD 框架里「数据 = mixed」的那一格。具体做法:每个训练 batch 里,**一部分样本从老师预生成的池子里取(off-policy,便宜、可缓存),一部分让学生当场自采样(on-policy,补暴露偏差)**,两池按比例 λ 混合后一起算反向 KL 损失、一起反传更新学生。
+
+拖动下面的 λ,看「老师在线开销」「暴露偏差残留」「有效覆盖」三条如何此消彼长——这就是混合蒸馏唯一要调的旋钮:
+
+<MixedDistillDial />
+
+> 💡 注意三条曲线的形状:**老师开销**和**暴露偏差**对 λ 都是线性的(一个涨一个降),但**有效覆盖**是饱和的(从 0.2 涨到 1.0 后不再涨)。这意味着 λ 越接近 1,覆盖的边际收益越小、但老师开销还在线性涨——所以 λ=1 通常不是最优,中间某个折中点才是。
+
+## Speculative Knowledge Distillation:交错采样
+
+GKD 的 mixed 是**batch 级混合**(一个 batch 内两个池子并存)。Yang et al.[3] 的 **Speculative Knowledge Distillation** 换了个粒度:**sequence 级混合**(一条序列内 on/off-policy 数据天然交错)。
+
+做法分四步:
+
+1. **学生先草拟**:学生模型自己生成一段序列(或前缀);
+2. **老师续写并打分**:老师在此基础上续写剩余部分,并对学生草拟的每个 token 给出概率;
+3. **逐 token 算损失**:学生草拟的 token 上算 on-policy 反向 KL(数据来自学生),老师续写的 token 上算 off-policy 前向 KL(数据来自老师)——**同一条序列里两段数据天然交错**;
+4. **更新学生**:整条序列的混合损失一起反传。
+
+> 📝 **Speculative KD 训练循环(伪代码)**
+>
+> ```python
+> for step in range(N_steps):
+>     # 1. 学生先草拟前 k 个 token(on-policy 段)
+>     prefix = sample_from_student(theta, length=k)
+>     # 2. 老师在此前缀上续写剩余 n-k 个 token(off-policy 段)
+>     teacher_completion = teacher.generate(prefix)
+>     # 3. 老师对全序列逐 token 打分
+>     logp_T = teacher.logprobs(prefix + teacher_completion)
+>     logp_s = student.logprobs(prefix + teacher_completion)
+>     # 4. 前 k 个 token:on-policy 反向 KL(学生采样段)
+>     #    后 n-k 个 token:off-policy 前向 KL(老师采样段)
+>     loss = mixed_kl_loss(logp_s, logp_T, split_at=k)
+>     loss.backward(); optimizer.step()
+> ```
+
+**和 GKD mixed 的区别**:GKD 是「一池老师样本 + 一池学生样本」按比例掺,batch 内两条独立轨迹;Speculative KD 是「一条轨迹上前半段学生、后半段老师」,序列内交错。后者更自然地利用了老师续写的上下文,老师只需对一段序列打分(摊销了 KV-cache),在线开销比纯 on-policy 低。
+
+## DistiLLM:样本复用
+
+Ko et al.[2] 的 **DistiLLM** 走第三条路:**复用历史学生样本**。核心观察是——学生参数 θ 每步只更新一点点,所以**几步之前学生采样的样本,对当前 θ 来说「略微 off-policy 但不算太远」**。直接复用能省下大量新鲜采样的开销,只需做一步**重要性采样(IS)修正**把分布偏差校正回来:
+
+$$
+\mathcal{L}_{\text{skew}} = \mathbb{E}_{x\sim\pi_{\theta_{\text{old}}}}\!\left[\rho(x)\cdot\text{skewKL}\big(\pi_\theta(\cdot|x)\,\|\,\pi_T(\cdot|x)\big)\right],\quad \rho(x)=\min\!\left(\frac{\pi_\theta(x)}{\pi_{\theta_{\text{old}}}(x)},\,1+\epsilon\right)
+$$
+
+- $\pi_{\theta_{\text{old}}}$ 是采样时(几步前)的学生分布,$\pi_\theta$ 是当前学生分布;
+- $\rho$ 是重要性采样比,带 PPO 式 clipping(上限 $1+\epsilon$)防爆炸——这正是[策略梯度教程](/tutorials/policy-gradient)里 PPO 裁剪的同一套工具;
+- **skew KL** 是 DistiLLM 提出的有偏反向 KL 变体,梯度方差比标准反向 KL 更低。
+
+> 💡 **直觉**:DistiLLM 不是「老师样本 + 学生样本」混合,而是「新鲜学生样本 + 稍陈旧学生样本」混合——后者便宜(不用重新采样)但要 IS 修正。它和 GKD mixed 互补:GKD mixed 用老师样本补覆盖,DistiLLM 用历史学生样本省采样。
+
+## 比例 λ 怎么调
+
+实践里 λ 没有原理性最优值,但有经验区间。决策主要看**任务对暴露偏差的敏感度**和**老师在线开销的承受力**:
+
+| 任务类型 | 推荐 λ | 理由 |
+|---|---|---|
+| 短输出 / 判别任务(分类、抽取) | 0 ~ 0.2 | 序列短,$(1-\varepsilon)^N$ 衰减慢,暴露偏差几乎无感,纯 SFT 已够 |
+| 中等长度生成(翻译、摘要) | 0.3 ~ 0.5 | 有一定偏差但不主导,小比例 on-policy 补一下 |
+| 长思维链 / 数学推理 | 0.5 ~ 0.7 | 长序列暴露偏差主导,需较大 on-policy 比例;但全 on-policy 太贵 |
+| 老师极大(数千亿参数) | 0.2 ~ 0.4 + 样本复用 | 老师前向贵,压低 λ,靠 DistiLLM 式 IS 修正补覆盖 |
+
+下面用代码扫一遍 λ∈[0,1],看「老师前向次数」和「覆盖学生状态比例」两条曲线怎么变化——前者线性涨、后者饱和,折中点就在曲线拐弯处:
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 玩具模型:假设纯 on-policy 需要的老师前向次数 = 100(基准),
+# 纯离线 = 0(老师打分可预缓存)。
+# 覆盖学生状态比例:λ=0 时只覆盖老师状态(设为 0.2),λ=1 时覆盖 1.0,中间饱和。
+
+def teacher_forwards(lam):
+    return 100 * lam              # 线性
+
+def coverage(lam):
+    return 1 - 0.8 * (1 - lam)    # 饱和:0.2 -> 1.0
+
+print(f"{'λ':>5} {'老师前向':>10} {'覆盖':>8}  {'性价比(覆盖/前向)':>20}")
+for lam in np.arange(0, 1.01, 0.1):
+    fwd = teacher_forwards(lam)
+    cov = coverage(lam)
+    ratio = cov / (fwd + 1e-9)    # 加 epsilon 防除零
+    print(f"{lam:>5.1f} {fwd:>10.1f} {cov:>8.2f}  {ratio:>20.4f}")
+
+print()
+print("观察:覆盖在 λ≈0.5 后增长明显变慢,但老师前向还在线性涨")
+print("     -> 性价比(覆盖/前向)在 λ≈0.3-0.5 最高,这就是折中点的来源")
+`} />
+
+## 实现细节
+
+真正动手训混合蒸馏时,这些细节决定成败:
+
+- **两个数据池对齐**:batch 内老师样本和学生样本的序列长度可能不同,需按 batch 内最长 padding,attention mask 区分两段。老师样本的 padding 段不参与 KL 计算。
+- **IS 修正的 clipping 阈值**:复用历史学生样本时,$\rho$ 的上限 $1+\epsilon$ 常取 $\epsilon=0.1\sim0.3$(和 PPO 同量级)。太小浪费样本,太大估计不稳。
+- **老师样本预缓存**:off-policy 段的老师 logits 可预先算好缓存(学生参数变化时老师分布不变),把老师在线开销压到只有 on-policy 段承担。这是混合比纯 on-policy 便宜的关键。
+- **混合损失加权**:两段损失可加权 $\mathcal{L}=\alpha\cdot\mathcal{L}_{\text{off}}+(1-\alpha)\cdot\mathcal{L}_{\text{on}}$,这里的 $\alpha$ 和数据比例 λ 是两件事——前者是损失权重,后者是采样比例。实践中常令 $\alpha=1-\lambda$ 保持一致,但也可独立调。
+- **KL 稳定技巧**:[在线蒸馏的实践细节](/tutorials/on-policy-distillation#-实践细节--实现注意)(length normalization、单步裁剪、基线减除)对混合蒸馏的 on-policy 段同样必需——直接沿用,不重写。
+
+> ⚠️ **注意**:混合蒸馏的 on-policy 段继承反向 KL 的梯度方差问题。稳定化技巧(length norm / 裁剪 / baseline)对 on-policy 段是必需品,off-policy 段因为是交叉熵式损失反而稳定。两段混合后,整体方差介于纯离线和纯在线之间。
+
+## 选型决策树
+
+把整个「知识蒸馏」topic 三篇的选型逻辑画成决策树:
+
+> 📝 **蒸馏方法选型决策树**
+>
+> ```text
+> 有强老师吗?
+> ├─ 否 ──→ RL / 自对弈(老师也得从零训出来)
+> └─ 是 ──→ 老师贵吗(前向开销大)?
+>           ├─ 不贵(小模型老师) ──→ 长序列?
+>           │                       ├─ 是 ──→ 纯 on-policy 蒸馏(λ=1)
+>           │                       └─ 否 ──→ 离线 SFT(λ=0)
+>           └─ 贵(大模型老师) ──→ 长序列?
+>                                   ├─ 是 ──→ 混合蒸馏(λ≈0.3-0.5)+ 老师预缓存
+>                                   │        或 Speculative KD(序列级交错)
+>                                   │        或 DistiLLM(历史样本复用 + IS 修正)
+>                                   └─ 否 ──→ 离线 SFT(λ=0,老师 logits 全预缓存)
+> ```
+
+> 💡 **经验法则**:**「SFT 打底 → 混合蒸馏收尾」** 是最常见的工业流水线。先用纯离线 SFT 让学生学到基本语法和常识(便宜、稳),再用小比例 on-policy 蒸馏补长序列上的暴露偏差。全 on-policy 从头训很少见——太贵且不稳定。
+
+## 三种范式总览
+
+把整个「知识蒸馏」topic 三篇合龙成一张表:
+
+| 方法 | 采样源 | 损失 | 老师在线开销 | 暴露偏差 | 适用场景 |
+|---|---|---|---|---|---|
+| **[离线 SFT](/tutorials/knowledge-distillation)** | 老师(预缓存) | 前向 KL / 交叉熵 | ❌ 几乎 0 | ❌ 严重 | 短输出、判别任务 |
+| **[on-policy 蒸馏](/tutorials/on-policy-distillation)** | 学生(每步新鲜) | 反向 KL | ✅ 高 | ✅ 无 | 长思维链、推理 |
+| **GKD mixed** | 老师 + 学生(比例 λ) | 反向 KL / AKL | 🟡 中(λ 部分) | 🟡 残留(1-λ) | 通用折中 |
+| **Speculative KD** | 序列内交错(学生前缀 + 老师续写) | 混合(前向 + 反向) | 🟡 中(摊销) | 🟡 部分 | 长序列、老师贵 |
+| **DistiLLM** | 新鲜学生 + 历史学生(IS 修正) | skew KL | 🟡 中(复用省采样) | 🟡 轻微 | 老师贵、要省采样 |
+
+> 🔗 三篇教程串成一条线:[知识蒸馏](/tutorials/knowledge-distillation)(离线,暗知识)→ [在线蒸馏](/tutorials/on-policy-distillation)(on-policy,反向 KL,补暴露偏差)→ 本篇混合蒸馏(按比例掺,折中)。GKD[1] 是把它们统一的框架。
+
+## ❓ 常见问题 FAQ
+
+**Q:λ 怎么选初值?**
+常见起点 λ=0.3~0.5。任务对暴露偏差敏感(长序列)就往大调,老师贵就往小调。先从 0.3 起步,看验证集效果微调。没有原理性最优值,靠验证集扫。
+
+**Q:混合蒸馏和自蒸馏是一回事吗?**
+不是。混合蒸馏讲「数据来自老师还是学生、按比例掺」;自蒸馏讲「老师 = 学生自己(或早期快照)」。两者正交:自蒸馏也可以混合(用学生当前样本 + 学生早期快照样本),但通常说的「混合蒸馏」默认老师 ≠ 学生。
+
+**Q:off-policy 段的老师样本要不要重新打分?**
+不用。老师参数固定,老师 logits 可预缓存。学生参数更新不影响老师分布,所以 off-policy 段的老师打分是一次性算好缓存复用的——这正是混合比纯 on-policy 便宜的关键。
+
+**Q:重要性采样修正的 clipping 阈值怎么定?**
+和 PPO 同量级,$\epsilon\approx0.1\sim0.3$。太小会浪费历史样本(几乎全被裁掉),太大估计方差爆炸。DistiLLM[2] 默认 0.2。可以监控被裁剪的样本比例,健康区间是 5%~20%。
+
+## ✏️ 动手作业
+
+1. **扫 λ 看曲线**:运行上面 §6 的代码,把 λ 步长改到 0.05,观察「性价比」峰值落在哪。改 `coverage` 函数的饱和速度(如 `1-0.95*(1-lam)`),看峰值怎么移动。
+2. **实现 batch 内混合**:写一段伪代码/代码,从一个老师样本池和一个学生采样器各取 N 条,拼成一个混合 batch,注意 padding 和 attention mask 的处理。
+3. **推导 IS 修正**:设学生旧分布 $\pi_{\theta_{\text{old}}}$ 和当前 $\pi_\theta$ 在某个 token 上概率分别是 0.3 和 0.6,算重要性采样比 $\rho$,带 $\epsilon=0.2$ 的 clipping 后 $\rho$ 变成多少?理解为什么需要 clip。
+4. **思考 λ=0.5**:为什么 λ=0.5 时「有效覆盖」已接近 0.6,但「老师开销」才一半?这种「边际收益递减」对选型有什么启示?
+
+## 🔭 讨论与展望
+
+混合蒸馏已是工业大模型蒸馏流水线的主力配置,但它远非定局。这一节先把当前方法的真实局限摆清楚,再看几条正在收尾的研究方向,最后回到几个更根本的问题。
+
+### ⚠️ 当前方法的局限
+
+- **λ 是个手调旋钮,缺乏原理性选择准则**。最优 λ 随老师大小、学生容量、任务序列长度、数据量变,实践中靠验证集扫。没有理论告诉你「这个任务该用 0.3 还是 0.6」——和[知识蒸馏](/tutorials/knowledge-distillation)的温度 $T$ 一样,是经验工程。
+- **两段损失的方差量级不一致**。off-policy 段是交叉熵式损失,方差小、稳定;on-policy 段是反向 KL 策略梯度估计,方差大、noisy。直接加权求和,梯度方向易被高方差段主导,需配合 length normalization / 基线减除才稳。
+- **IS 修正只对小偏差有效**。DistiLLM 的样本复用假设 $\pi_\theta\approx\pi_{\theta_{\text{old}}}$,一旦学生更新步子大(学习率高、batch 小),$\rho$ 会爆炸或被大面积裁剪,样本利用率反而下降。它只适合「慢更新」场景。
+- **off-policy 段的暴露偏差仍在**。混合只稀释、没消除偏差——λ 再小,off-policy 段的学生一旦跑到老师没见过的状态照样抓瞎。混合是折中,不是根治。
+- **老师样本陈旧问题**。off-policy 段若用很久以前老师生成的样本,而老师本身在迭代(比如老师也在持续训练),老师分布变了,旧样本就成了「过时老师」的产物,引入新的偏差。
+
+### 🚀 前沿进展
+
+1. **自适应 λ 调度**。不再固定 λ,而是按训练阶段动态调:早期学生弱、偏差大,λ 调高多补覆盖;后期学生接近老师,λ 调低省开销。类似学习率 warmup + decay 的课程。
+2. **Speculative KD 的并行化**。学生草拟 + 老师续写的串行流程正在被 speculative decoding 式的并行化改造——学生先猜多个分支,老师批量校验,把序列级交错的开销进一步摊薄。
+3. **统一损失框架**。GKD[1] 的 AKL(前向 + 反向自适应混合)+ DistiLLM[2] 的 skew KL 正在融合:一个损失同时支持 off/on-policy 数据、自适应调权、低方差估计。目标是把「数据比例 λ」和「损失方向比例」两个旋钮都自动化。
+4. **老师-学生协同更新**。突破「老师固定」假设:老师也在学生反馈下微调(在线老师),形成师生协同训练。难点是防止「老师迁就学生」导致信号退化。
+5. **混合 + 自蒸馏**。把混合蒸馏和自蒸馏结合:用学生早期快照当「便宜老师」补 off-policy 段,当前学生当 on-policy 段——既省老师开销,又补暴露偏差。
+
+### 🤔 反思
+
+1. **混合是工程妥协,还是原理最优?** 混合蒸馏在实践中效果最好,但「最好」是因为它真的接近最优,还是只因为纯离线和纯 on-policy 都太极端?有没有可能存在一个原理性的「最优 λ」,而我们只是还没找到它的计算公式?
+2. **两段损失的方差差距,是本质的还是可消除的?** off-policy 段稳定、on-policy 段 noisy,这是反向 KL 策略梯度的固有性质,还是估计方法的局限?如果有一天反向 KL 能像交叉熵一样低方差,混合蒸馏还有存在的必要吗——还是直接全 on-policy?
+3. **混合蒸馏会一直存在,还是会被更优雅的方案取代?** 它现在是工业主力,但「按比例掺两个数据池」听起来就像一个过渡方案——未来会不会出现一种统一损失,自然地退化成离线或在线,而无需手动调 λ?GKD 的 AKL 是这个方向的雏形,但它够吗?
+
+> 🎯 **一句话**:混合蒸馏把「离线的便宜」和「在线的覆盖」按比例 λ 揉在一起,是工业流水线最实际的折中;但 λ 是手调旋钮、两段方差不一致、暴露偏差只稀释未消除——它是当下的主力,不是终点。
+
+## 📌 小结
+
+| 概念 | 含义 |
+|---|---|
+| 比例 λ | on-policy(学生)样本占比;λ=0 纯离线,λ=1 纯在线 |
+| GKD mixed | batch 级混合:一池老师样本 + 一池学生样本按 λ 掺 |
+| Speculative KD | sequence 级交错:学生草拟前缀 + 老师续写,序列内 on/off 交错 |
+| DistiLLM | 新鲜学生样本 + 历史学生样本(IS 修正)复用,省采样 |
+| 选型口诀 | SFT 打底 → 混合蒸馏收尾;老师贵就压低 λ + 样本复用 |
+
+> 🎯 一句话记住:**混合蒸馏 = 按比例 λ 把老师样本和学生样本掺在一起,用 off-policy 的成本买 on-policy 的覆盖——工业流水线最实际的折中,GKD[1]/Speculative KD[3]/DistiLLM[2] 是它的三种形态。**
+
+> ✍️ 「知识蒸馏」topic 的收官之问留给下一篇:讲了这么多「怎么蒸馏」,那 student 到底[能不能超越 teacher](/tutorials/student-beats-teacher)?——同架构、同数据下 Born-Again 的反直觉证据、自蒸馏的正则化理论、弱到强泛化的 misfit 定理,会颠覆「搬运永远到不了源头之上」的直觉。此后再回到最日常的问题:训练好的模型是[如何一个字一个字生成文字的](/tutorials/llm-decoding)——贪心、温度、top-k/top-p 采样。
+
+## 延伸阅读
+
+- **站内论文笔记**:[Kimi K3](/papers/kimi-k3) —— 混合思想的工业放大版:MOPD 多教师在线蒸馏,按域与推理强度切换教师,把 9 个 RL 专家蒸回单个模型
+
+## 📚 参考文献
+
+1. Agarwal, Vieillard, Zhou, Stanczyk, Ramos, Geist, Bachem (2024). *On-Policy Distillation of Language Models: Learning from Self-Generated Mistakes* (GKD). arXiv: [2306.13649](https://arxiv.org/abs/2306.13649). —— on-policy 蒸馏 + GKD 统一框架(数据源 × 损失方向两个旋钮);mixed 模式即「数据 = 老师+学生按比例混合」,本篇「GKD 的 mixed 模式」的直接来源。
+2. Ko, Kim, Chen, Yun (2024). *DistiLLM: Towards Streamlined Distillation for Large Language Models*. arXiv: [2402.03898](https://arxiv.org/abs/2402.03898). —— 提出 skew KL(有偏反向 KL 变体,梯度方差更低)+ 自适应 off-policy 复用历史学生样本(带 IS 修正),比纯 on-policy 更省采样。本篇「DistiLLM / 样本复用」的来源。
+3. Yang, Wang, Liu, Wu, Li, Zhang, Wang, Feng, Qin, Chen (2024). *Speculative Knowledge Distillation: Bridging the Teacher-Student Gap Through Interleaved Sampling*. arXiv: [2410.11325](https://arxiv.org/abs/2410.11325). —— 交错采样:学生先草拟一段、老师在此基础上续写并打分,序列内 on/off-policy 数据天然交错;在保持质量的同时降低老师在线开销。本篇「Speculative KD / 交错采样」的来源。

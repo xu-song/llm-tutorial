@@ -1,0 +1,1640 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("model-based-rl");
+
+# 🗺️ 基于模型的强化学习:学会规划
+
+前面所有方法——[DQN](/tutorials/dqn)、[策略梯度](/tutorials/policy-gradient)、[连续控制](/tutorials/continuous-control)——都是**免模型(model-free)**的:智能体把环境当一个黑箱,只从真实交互里学价值或策略,不试图理解「状态之间怎么转移」。这条路省心,代价是**样本效率低**:Atari 上一个 DQN 要几千万步真实交互才能玩好一个游戏,真机机器人根本耗不起。
+
+**基于模型的强化学习(model-based RL)** 换个思路:**顺便把环境本身也学下来**。一旦有了环境模型 $\hat P(s'\mid s,a)$ 与 $\hat R(s,a)$,智能体就能在「脑子里」模拟经验、向前规划几步——相当于不花真实交互就做了大量试验。这节课讲三条主线:**Dyna-Q**(边学 Q 边学模型、规划加速)、**蒙特卡洛树搜索 MCTS**(用 UCT 在博弈树上「选-展-滚-传」)、**世界模型 / AlphaZero**(神经网络当环境或当评估器)。
+
+## 免模型 vs 基于模型:拿什么换什么
+
+| | 免模型(model-free) | 基于模型(model-based) |
+|---|---|---|
+| 学什么 | 价值 $Q$ / 策略 $\pi$ | 额外学环境模型 $\hat P, \hat R$ |
+| 用数据 | 真实交互一步 → 一次更新 | 真实交互一步 → 模型回放生成**大量**模拟更新 |
+| 样本效率 | 低(几千万步) | 高(可能少几个量级) |
+| 计算开销 | 低 | 高(要拟合模型 + 规划) |
+| 致命风险 | — | **模型偏差**:模型错了,智能体会「钻空子」学出在模型里好、现实里糟的策略 [1] |
+
+> 💡 核心权衡:**用计算换数据**。模型学得越准,省的真实交互越多;但模型一旦有偏差,规划出来的策略就被带歪——这是 model-based RL 的头号难题。
+
+## 模型是什么:转移 + 奖励
+
+一个完整的环境模型是两个函数:
+
+$$
+\hat P(s'\mid s,a):\text{在状态 } s \text{ 执行 } a \text{ 后,转到 } s' \text{ 的概率}\qquad
+\hat R(s,a):\text{该步的期望奖励}
+$$
+
+确定性问题里(如下面的网格世界),$\hat P$ 退化成确定性映射 $s'=\hat f(s,a)$,模型就是一个查找表 `Model(s,a) → (s', r)`。学好模型后,智能体可以**查询任意 (s,a)** 得到模拟的 $(s', r)$,而不必真的去环境里执行那一步——这就是「想象」的来源。
+
+## Dyna-Q:边学边规划,一石二鸟
+
+**Dyna-Q**(Sutton, 1990 [2])是最经典的 model-based 入门算法,它把「真实学习」和「模型规划」交织在一起。算法骨架只有四步,每一步真实交互后:
+
+1. **真实交互**:用 ε-greedy 选动作 $A$,执行后观察到 $S', R$;
+2. **直接 RL(Direct RL)**:用真实经验做一次 Q-learning 更新;
+3. **模型更新**:把 `Model(S,A) ← (S', R)` 存下来(确定性环境);
+4. **规划(Planning)**:重复 $n$ 次——随机抽一个**之前见过的** $(\tilde S, \tilde A)$,查模型得到 $(\tilde S', \tilde R)$,再做一次 Q-learning 更新。
+
+Q-learning 的更新对真实与模拟经验**完全相同**:
+
+$$
+Q(S,A) \leftarrow Q(S,A) + \alpha\big[R + \gamma\,\max_{a'} Q(S', a') - Q(S,A)\big]
+$$
+
+妙处在于第 4 步:每步真实交互只产生 1 次 Q 更新,但 $n$ 步规划又白嫖了 $n$ 次更新——而且这 $n$ 次不用碰环境。$n=0$ 时 Dyna-Q 就退化成普通 Q-learning;$n$ 越大,样本效率越高(但计算也更贵)。
+
+<CodeRunner title="Dyna-Q:模型 + 规划用计算换样本效率" language="python" defaultCode={`# Dyna-Q:在一条 4 状态的链上 s0→s1→s2→s3(终点,+1 后重置)
+import numpy as np
+rng = np.random.default_rng(0)
+
+NS, NA = 4, 2                      # 动作 0=left, 1=right
+def step(s, a):
+    s2 = max(0, s-1) if a == 0 else min(NS-1, s+1)
+    r = 1.0 if (a == 1 and s == NS-2) else 0.0
+    if s2 == NS-1: s2 = 0          # 到终点,重置
+    return s2, r
+
+Q = np.zeros((NS, NA))
+Model = {}                          # (s,a) -> (s2, r)
+seen = []
+alpha, gamma, eps, n_plan = 0.1, 0.95, 0.1, 5
+
+def egreedy(s):
+    if rng.random() < eps: return rng.integers(NA)
+    return int(np.argmax(Q[s]))
+
+for ep in range(300):
+    s = 0
+    for t in range(50):
+        a = egreedy(s); s2, r = step(s, a)
+        Q[s, a] += alpha * (r + gamma*Q[s2].max() - Q[s, a])   # 直接 RL
+        Model[(s, a)] = (s2, r)                                # 模型更新
+        if (s, a) not in seen: seen.append((s, a))
+        for _ in range(n_plan):                                # 规划:n 步回放
+            ps, pa = seen[rng.integers(len(seen))]
+            ps2, pr = Model[(ps, pa)]
+            Q[ps, pa] += alpha * (pr + gamma*Q[ps2].max() - Q[ps, pa])
+        s = s2
+        if r > 0: break
+
+print("最优动作:", np.argmax(Q, 1).tolist(), " ← 期望 [1,1,1,·](全向右)")
+`} />
+
+跑一下,你会看到最优动作很快收敛到「全向右」——从 $s_0$ 出发 `right→right→right` 三步拿到奖励。关键对比:把 `n_plan` 改成 0(纯 Q-learning),同样回合数下策略学得明显更慢——**规划用计算换来了样本效率**。
+
+> 💡 Dyna-Q 的模型是**确定性查找表** `Model(s,a)→(s',r)`,只存见过的转移。这有两个局限:(1) 随机环境里同一 $(s,a)$ 可能转到不同 $s'$,需要存分布;(2) 只能回放**见过**的 $(s,a)$,没法泛化到没见过的状态。深度 RL 里把模型换成神经网络 $\hat f_\phi(s,a)→s'$,就能泛化——这就是世界模型的雏形。
+
+### 规划步数 n 的权衡:用计算换样本
+
+$n$ 是 Dyna-Q 的核心旋钮:它决定每步真实交互后做多少次**模拟**更新。下图在 4 状态链上跨 20 个种子平均,画四条「回合步数 vs 训练回合数」曲线:
+
+<DynaQPlanningViz />
+
+看清楚三件事:
+
+1. **两端分明,中间有反直觉**——红色 $n=50$ 在 60 回合内就降到 27 步附近,灰色 $n=0$(纯 Q-learning)60 回合后仍停在 45 步:每步真实交互只值 1 次 Q 更新,但 $n=50$ 把它放大成 51 次,等效样本效率提升 50 倍——这正是 model-based RL 的核心卖点。
+2. **$n$ 大不一定处处更快**——注意紫色 $n=20$ 在前 40 回合反而一直卡在 50 步(满步数),比 $n=5$ 还慢。原因:规划回放只能重放**已经见过的** $(s,a)$,在链上前若干回合智能体还没摸到终点、模型里只有「原地打转」的转移,$n$ 越大越把这些无用的转移反复回放、把 Q 往「别往前走」的方向推,反而推迟了第一次发现目标。一旦偶发的 $\varepsilon$-探索撞到终点、模型里有了「向右有奖励」的转移,大 $n$ 立刻把它放大、曲线骤降。**所以「用计算换样本」的前提是模型已经覆盖到有价值的转移**——这是 Dyna-Q 表格模型只存见过转移的固有局限 [2]。
+3. **收敛后步数不会到 3**——即使策略已最优,$\varepsilon=0.1$ 的随机探索每步有 10% 概率走错方向、要绕回来,所以步数停在一个「探索下限」(虚线 ≈26)而非真值 3。这不是没学到位,是 on-policy 评估的固有噪声;把 $\varepsilon$ 衰减下去就能逼近 3。
+
+> ⚠️ $n$ 不是越大越好。第一,$n$ 越大**计算越贵**(每步要做 $n$ 次模型查询 + Q 更新);第二,模型有偏差时,$n$ 越大偏差被放大越严重——回放的模拟经验全带着模型的系统性误差,$n=50$ 比 $n=5$ 更容易把策略带歪。Sutton 教材里常取 $n=5\sim 50$ [2],实践中的取舍是「模型越准,$n$ 可以越大」。
+
+## Dyna 的两个升级:优先扫描与 Dyna-Q+
+
+Dyna-Q 的规划步用的是**随机抽样**——从见过的 $(s,a)$ 里均匀抽一个回放。这在稀疏奖励的网格世界里有明显浪费:绝大部分状态的价值早就收敛了,反复回放它们等于做无用功;真正需要更新的,是那些**价值刚发生变动、并会沿着转移图向回传播**的状态。Moore & Atkeson (1993) [10] 提出的**优先扫描(Prioritized Sweeping)** 正是瞄准这一点:把规划的计算预算**集中到价值变动最大的状态**上。
+
+### 优先扫描:用一个优先队列调度规划
+
+核心机制是一个**优先队列(PQueue)**,存的是「值得回放」的 $(s,a)$ 对及其优先级:
+
+1. **真实交互**后做直接 RL 更新 $Q(S,A)$,得到 TD 误差 $\Delta=R+\gamma\max_{a'}Q(S',a')-Q(S,A)$;
+2. **入队**:若 $|\alpha\Delta|$ 大于阈值 $\theta$,把 $(S,A)$ 以**优先级** $P=|\alpha\Delta|$ 压入 PQueue——价值变动越大、越值得回放;
+3. **规划**:从 PQueue 弹出**优先级最高**的 $(s,a)$,查模型得 $(s',r)$,做一次 Q-learning 更新;
+4. **回传给前驱**:维护一张「**前驱表**」——哪些 $(\tilde s,\tilde a)$ 的模型预测下一状态是 $s$。更新完 $(s,a)$ 后,把它的前驱们也按各自的新 TD 误差入队,**让价值变动沿着转移图向后级联传播**。
+
+与 Dyna-Q 的随机回放对比,优先扫描有两点质变:
+
+- **按优先级而非随机**:计算预算给价值变动大的状态,而不是均匀撒在所有见过的 $(s,a)$ 上;
+- **前驱级联**:一次更新会触发其前驱入队、前驱的前驱再入队……价值从目标处**像波一样向后扩散**,而不是等随机抽样碰巧撞到。
+
+> 💡 直觉:**随机回放是「盲目打扫整个状态空间」,优先扫描是「从目标处点燃、让价值变动沿转移图定向传播」**。在奖励稀疏的迷宫里(只有终点有奖励),随机回放要把大量预算浪费在永远没奖励的角落;优先扫描则从终点那一笔 +1 更新开始,沿前驱链一路把价值传回起点,每一步更新都「有的放矢」。状态空间越大、奖励越稀疏,优先扫描的效率优势越明显 [10]。
+
+下面把随机回放 Dyna-Q 和优先扫描放在同一条 6 状态链上对比,数**到达贪心最优策略所需的 Q 更新次数**:
+
+<CodeRunner defaultCode={`
+import numpy as np, heapq
+
+# 6 状态链 s0..s5, s5=终点(+1 后重置)。每回合从随机状态出发(覆盖全链)。
+NS, NA = 6, 2                      # 0=left, 1=right
+GAMMA, ALPHA, EPS = 0.95, 0.1, 0.5
+def step(s, a):
+    if s == NS-1: return 0, 1.0    # 终点: +1, 重置到 0
+    s2 = max(0, s-1) if a == 0 else min(NS-1, s+1)
+    r = 1.0 if (a == 1 and s == NS-2) else 0.0
+    return s2, r
+def egreedy(Q, s, rng):
+    if rng.random() < EPS: return int(rng.integers(NA))
+    return int(np.argmax(Q[s]))
+def greedy_ok(Q):                   # 全链(除终点)都选 right=1 即最优
+    return all(int(np.argmax(Q[s])) == 1 for s in range(NS-1))
+
+# --- Dyna-Q: 随机抽样回放 ---
+def dyna(seed, n_plan=5, max_ep=3000):
+    rng = np.random.default_rng(seed); Q = np.zeros((NS, NA))
+    Model = {}; seen = []; backups = 0
+    for ep in range(max_ep):
+        s = int(rng.integers(NS)); done = False; steps = 0
+        while not done and steps < 100:
+            a = egreedy(Q, s, rng); s2, r = step(s, a)
+            td = r + (0 if s==NS-1 else GAMMA*Q[s2].max()) - Q[s,a]
+            Q[s,a] += ALPHA*td; backups += 1
+            Model[(s,a)] = (s2, r)
+            if (s,a) not in seen: seen.append((s,a))
+            for _ in range(n_plan):                       # 随机抽见过 (s,a) 回放
+                ps, pa = seen[rng.integers(len(seen))]
+                ps2, pr = Model[(ps,pa)]
+                td = pr + (0 if ps==NS-1 else GAMMA*Q[ps2].max()) - Q[ps,pa]
+                Q[ps,pa] += ALPHA*td; backups += 1
+            s = s2; steps += 1; done = (s==0 and steps>1 and r>0)
+        if greedy_ok(Q): return Q, backups, ep+1
+    return Q, backups, max_ep
+
+# --- 优先扫描: 优先队列 + 前驱级联 ---
+def prio_sweep(seed, n_plan=5, theta=1e-4, max_ep=3000):
+    rng = np.random.default_rng(seed); Q = np.zeros((NS, NA))
+    Model = {}; preds = {i: set() for i in range(NS)}; pq = []; backups = 0
+    for ep in range(max_ep):
+        s = int(rng.integers(NS)); done = False; steps = 0
+        while not done and steps < 100:
+            a = egreedy(Q, s, rng); s2, r = step(s, a)
+            Model[(s,a)] = (s2, r); preds[s2].add((s,a))   # 记前驱
+            td = r + (0 if s==NS-1 else GAMMA*Q[s2].max()) - Q[s,a]
+            P = abs(ALPHA*td)
+            if P > theta: heapq.heappush(pq, (-P, (s,a)))  # 优先级入队
+            for _ in range(n_plan):                        # 弹最高优先级回放
+                if not pq: break
+                _, (ps, pa) = heapq.heappop(pq)
+                if (ps,pa) not in Model: continue
+                ps2, pr = Model[(ps,pa)]
+                td = pr + (0 if ps==NS-1 else GAMMA*Q[ps2].max()) - Q[ps,pa]
+                Q[ps,pa] += ALPHA*td; backups += 1
+                for (pp, ap) in preds[ps]:                 # 级联给前驱
+                    if (pp,ap) not in Model: continue
+                    pp2, prp = Model[(pp,ap)]
+                    td_p = prp + (0 if pp==NS-1 else GAMMA*Q[pp2].max()) - Q[pp,ap]
+                    if abs(ALPHA*td_p) > theta:
+                        heapq.heappush(pq, (-abs(ALPHA*td_p), (pp,ap)))
+            s = s2; steps += 1; done = (s==0 and steps>1 and r>0)
+        if greedy_ok(Q): return Q, backups, ep+1
+    return Q, backups, max_ep
+
+bd, bp = [], []
+for seed in range(15):
+    _, d, _ = dyna(seed); _, p, _ = prio_sweep(seed)
+    bd.append(d); bp.append(p)
+print(f"Dyna-Q 随机回放 : 平均 Q 更新次数 = {np.mean(bd):>6.0f}")
+print(f"优先扫描        : 平均 Q 更新次数 = {np.mean(bp):>6.0f}")
+print(f"更新减少倍数    : {np.mean(bd)/np.mean(bp):.1f}x  (优先扫描用更少更新达到同样的贪心最优)")
+print(f"两种方法最终贪心策略一致: {[int(np.argmax(prio_sweep(0)[0][s])) for s in range(NS-1)]} (全 1=right)")
+`} />
+
+跑一下会看到:**优先扫描用约 20× 更少的 Q 更新就达到了和随机回放 Dyna-Q 一样的贪心最优策略**。两种方法最终学到的策略完全相同(全向右),差别只在「**多少次更新才收敛**」——这就是「把计算预算花在刀刃上」的威力。状态空间越大、奖励越稀疏,这个倍数越大:在 6 状态链上是 20×,到了百状态迷宫会到上百倍 [10]。
+
+> ⚠️ 优先扫描的代价是**维护前驱表与优先队列**:每条转移要记「谁会走到我」,每次更新要遍历前驱入队。在表格法里这是常数开销,可接受;但在深度 RL 的大状态空间里,「前驱」难以显式维护(同一个状态可能被无穷多个 $(\tilde s,\tilde a)$ 转入),所以优先扫描主要在表格 / 小状态空间场景发力。深度 RL 时代,「把规划预算集中到关键状态」的思想演变成了**优先经验回放(prioritized experience replay, PER)**——用 TD 误差给经验回放池里的转移加权,是同一思想在神经网络时代的接班人。
+
+### Dyna-Q+:给老动作加探索奖励,应对环境变化
+
+Dyna-Q 假设环境**静止**——模型学好就一劳永逸。但真实环境会变:迷宫里原来通的路被堵了、机械臂的关节阻尼变了。这时**模型过时了**,智能体却还在用过时模型规划、在已经「不通」的转移上反复回放,卡死在旧路径上。
+
+**Dyna-Q+**(Sutton & Barto [2])的修补是给「**很久没试过的动作**」加一个**探索奖励(exploration bonus)**:若某 $(s,a)$ 距上次尝试已过了 $\tau$ 步,就把模型里它的奖励改成
+
+$$
+R^+ = R + \kappa\sqrt{\tau}
+$$
+
+$\kappa$ 是一个小常数(如 0.01)。直觉:**$\sqrt{\tau}$ 随时间增长但增速放缓**——一个动作越久没试、越值得重新试一下(万一环境变了呢),但用 $\sqrt{}$ 而非线性增长,保证探索强度不会无限放大、淹没真实奖励。这与 [多臂老虎机](/tutorials/multi-armed-bandit) 里 UCB1 的 $\sqrt{\ln t/N}$ 探索项同源:**「久未访问」就该加 bonus**。
+
+经典实验是 **blocking maze(阻塞迷宫)** [2]:智能体先学会一条最短路;中途把墙挪位置堵住原路、并在别处开新口。普通 Dyna-Q 仍按旧模型规划、撞墙出不去;Dyna-Q+ 因为 $\sqrt{\tau}$ bonus 不断驱使它重试「老路」,很快发现老路已堵,转而探索出新口、学到新最短路。$\sqrt{\tau}$ 的妙处在于:**它让智能体对「环境可能已变」保持警觉**,在不静止世界里持续再探索。
+
+| 升级 | 解决的问题 | 关键机制 |
+|---|---|---|
+| **优先扫描** [10] | 随机回放浪费在已收敛状态 | 优先队列 + 前驱级联,集中预算到价值变动处 |
+| **Dyna-Q+** [2] | 环境变化后模型过时、卡死旧路 | $R^+=R+\kappa\sqrt{\tau}$ 探索奖励,驱动再探索 |
+
+## MCTS:在博弈树上「选-展-滚-传」
+
+**蒙特卡洛树搜索(Monte Carlo Tree Search,MCTS)** 是另一条思路:不维护全局 Q 表,而是**从当前状态出发,边搜索边长一棵局部博弈树**。每次迭代四步 [3]:
+
+1. **选择(Selection)**:从根沿树下行,在每个节点用 **UCT** 公式挑一个子节点,直到到达一个「未充分展开」的节点;
+2. **扩展(Expansion)**:给该节点加一个新子节点(对应一个未试过的动作);
+3. **模拟(Simulation / Rollout)**:从新节点用**默认策略**(通常是均匀随机)一路走到终局,得到一个胜负结果;
+4. **回传(Backpropagation)**:把结果沿路径**向上回传**,更新路径上每个节点的访问次数 $N$ 与累计价值 $V$。
+
+UCT(UCB applied to Trees,Kocsis & Szepesvári, 2006 [4])是选择的灵魂——它把多臂老虎机的 UCB1 [5] 搬到树上:
+
+$$
+\text{UCT}_i = \underbrace{\frac{V_i}{N_i}}_{\text{利用:平均价值高}} + \underbrace{c\,\sqrt{\frac{\ln N_{\text{parent}}}{N_i}}}_{\text{探索:访问次数少}}
+$$
+
+$V_i/N_i$ 是子节点 $i$ 的平均价值(利用项),探索项 $c\sqrt{\ln N_p/N_i}$ 让访问少的节点被优先尝试(和 [多臂老虎机](/tutorials/multi-armed-bandit) 的 UCB1 同源)。$c$ 是探索参数,理论值 $\sqrt 2$,实践中经验调。
+
+**点「运行一次」执行一整轮 选-展-滚-传,拖 $c$ 看 UCT 选择路径如何变化**:
+
+<MCTSExplorer />
+
+跑几十次后你会观察到:节点访问次数 $N$ 集中在价值高的分支上(利用),但价值低的分支也会被偶尔访问(探索),这正是 UCT 在「利用与探索」间的平衡。最终从根选**访问次数最多**的子节点作为落子——因为搜得最多 = 统计上最被看好。
+
+上面的交互组件把四步演示出来了,写成代码就是一个「跑够预算次数」的循环,每次迭代都做一遍选-展-滚-传:
+
+```
+# 蒙特卡洛树搜索 MCTS 伪代码 (UCT)
+def mcts(root, 预算):
+    for _ in range(预算):
+        # ① 选择:从根沿树下行,每步按 UCT 挑子节点,直到叶子
+        node = root
+        while node 已全展开 and 非终局:
+            node = argmax_子  子.V/子.N + c*sqrt(ln(node.N)/子.N)
+        # ② 扩展:给该叶子添加一个未试过的子节点
+        if 非终局:
+            node = node.添加一个新子节点()
+        # ③ 模拟(rollout):从新节点随机走到终局,得回报 r
+        r = 随机策略走到底(node.state)
+        # ④ 回传:沿刚才的路径往上,每个祖先 N+=1, V+=r
+        while node 非空:
+            node.N += 1;  node.V += r;  node = node.parent
+    return argmax_子  子.N   # 落子:选访问次数最多的子节点(最被看好)
+```
+
+## AlphaZero:self-play + MCTS + 神经网络的专家迭代
+
+MCTS 的弱点是 **rollout 太浅**:随机走到终局噪声大、深度深。**AlphaZero**(Silver et al., 2018 [6])用三件套——**MCTS + 深度神经网络 + 自我对弈(self-play)**——把它推向超人类棋力,而且全程**白板(tabula rasa)学习**:除规则外零领域知识、零人类棋谱,数小时内从随机下法练到超人类(国际象棋 4 小时超 Stockfish、将棋 2 小时超 Elmo、围棋 34 小时胜 AlphaGo Zero 60-40)[6]。
+
+### 三件套:网络替 rollout + self-play 产数据 + MCTS 搜索
+
+两个关键改造:
+
+1. **神经网络替掉 rollout**:不再随机走到终局,而是用一个深度网络 $f_\theta(s)$ 直接输出「这个状态的胜负价值 $v$」和「策略概率 $\pi$」——一步评估代替一长串 rollout,搜索深度骤降、质量骤升;
+2. **self-play 产训练数据**:智能体**自己跟自己对弈**——当前最强版本的策略两边都用,每局走完得到一条「局面序列 + 胜负」的轨迹。这些轨迹就是训练数据,无需任何人类棋谱[6]。
+
+$$
+(v, \pi) = f_\theta(s),\qquad \text{MCTS 用 } \pi \text{ 先验偏置选择、用 } v \text{ 评估叶节点}
+$$
+
+注意 AlphaZero 搜索量远小于传统引擎:国际象棋每秒仅搜约 8 万个局面(Stockfish 约 7000 万),靠神经网络引导「**更挑剔地**搜有希望的变化」补回——**搜得更少但搜得更准**[6]。
+
+### 专家迭代:网络提议 → MCTS 精炼 → 精炼结果训网络
+
+AlphaZero 的训练循环是**专家迭代(expert iteration, exIt)** 框架 [1][6]:
+
+1. **网络提议**:用当前网络 $f_\theta$ 引导 MCTS,对每个根局面搜出一条「更优的走子分布」$\pi_{\text{MCTS}}$(比网络原始 $\pi$ 更强,因为搜过了);
+2. **自对弈产局**:用 $\pi_{\text{MCTS}}$ 下完一整局,沿途记录每个局面的 $(s, \pi_{\text{MCTS}}, z)$——$z$ 是终局胜负(自对弈的真实结果);
+3. **网络学习**:拿这批数据训练 $f_\theta$,目标是**模仿 MCTS 的更强分布** + **预测终局胜负**:
+   $$\mathcal L(\theta) = \underbrace{(z - v)^2}_{\text{价值头:MSE}} \;-\; \underbrace{\pi_{\text{MCTS}}^\top \log \pi_\theta(\cdot\mid s)}_{\text{策略头:交叉熵}}$$
+4. **网络变强 → MCTS 更强 → 新数据更好 → 循环自举**。
+
+<ExpertIterationViz />
+
+关键直觉:**MCTS 是「专家」、网络是「学生」**:学生模仿专家,专家又靠学生变强。这个「搜索即策略提升」的循环让 AlphaZero 在没有任何外部老师的情况下越练越强——AlphaGo/AlphaZero/MuZero 都是这个框架的实例 [1]。
+
+把这个循环写成代码,就是「自对弈产数据 → 训网络 → 更强的网络再自对弈」的三步自举:
+
+```
+# AlphaZero 专家迭代 (expert iteration) 伪代码
+初始化网络 f_θ  (输出 策略 p、价值 v)
+loop:
+    # --- 自对弈:用 MCTS(被 f_θ 引导)下若干整局,收集训练数据 ---
+    data = []
+    for game in range(N):
+        s = 初始局面
+        while 非终局:
+            π_mcts = MCTS(s, f_θ)         # 搜索精炼出比 f_θ 更强的走子分布
+            data.append((s, π_mcts))       # 记录局面与"专家"分布
+            s = 按 π_mcts 采样落子
+        z = 终局胜负(+1/-1)                # 回填这一整局每个局面的最终结果
+        给 data 里这局的样本都标上 z
+    # --- 训练:让网络模仿 MCTS 分布 + 预测终局胜负 ---
+    for (s, π_mcts, z) in data:
+        p, v = f_θ(s)
+        loss = (z - v)² - π_mcts·log p     # 价值头 MSE + 策略头交叉熵
+        minimize(loss)
+    # 网络变强 → 下轮 MCTS 更强 → 数据更好 → 继续自举
+```
+
+MCTS 搜索这一步注入了「向前看几步」的新信息,所以训练目标 $\pi_{\text{MCTS}}$ 始终比网络当前水平高一截——这就是自举不塌缩、能稳定提升的原因。
+
+### 谱系:AlphaGo → AlphaGo Zero → AlphaZero → MuZero
+
+| 系统 | 用人类棋谱? | 范围 | 关键差别 |
+|---|---|---|---|
+| **AlphaGo**(2016) | 是(SL 预训练 + RL) | 仅围棋 | 先用人类棋谱监督学策略网络,再做 RL 微调 |
+| **AlphaGo Zero**(2017) | 否(纯 self-play) | 仅围棋 | 白板学习,但围棋专用 + 利用棋盘对称性 |
+| **AlphaZero**(2018) | 否(纯 self-play) | 棋/将棋/围棋 | 泛化三棋、不用对称、处理和棋(棋/将棋可和棋)[6] |
+| **MuZero**(2020) | 否(纯 self-play) | 棋/将棋/围棋/**Atari** | 进一步**学游戏动力学本身**(不预置规则),统一规划框架 |
+
+AlphaGo → AlphaGo Zero 的飞跃是「甩掉人类棋谱、纯 self-play 反而更强」(人类棋谱是天花板);AlphaGo Zero → AlphaZero 是「泛化」;AlphaZero → MuZero 是「连规则都不给,自己学环境模型」——MuZero 把本篇「学世界模型」与「专家迭代」两条线统一了 [1][6]。
+
+> 💡 **为何 self-play 行得通?** 关键是**自举不塌缩**:MCTS 搜索给网络提供的不是「网络的输出」(那会原地打转),而是「网络输出经搜索精炼后的更强分布」——搜索这一步注入了新信息(规则允许的向前看几步),所以训练目标始终比网络当前水平高一截,形成稳定的提升梯度。这和 GAN 的「生成器-判别器」对抗、与 Actor-Critic 的「Actor 跟 Critic 学」异曲同工:一个比网络稍强的「老师」在循环里不断把学生往上推。
+
+## MuZero:不学规则,学规划的「价值等价」模型
+
+AlphaZero 的 MCTS 能向前看,是因为它**手里有棋盘规则**——可以从真实状态 $s$ 出发,用规则模拟 $s \to s'$。但 Atari 的「规则」是什么?是像素级的前向物理仿真,智能体既不知道也建模不动。**MuZero**(Schrittwieser et al., 2020 [12])的破局点是:**学一个模型,但学的不是「重建观测」**,而是「**在隐空间里直接预测规划要用的那三个量**」——奖励 $r$、策略 $\pi$、价值 $v$。这叫**价值等价模型(value-equivalent model)**:模型不必捕捉环境的全部信息,只需捕捉**与决策相关的信息**。
+
+### 三函数:表示 / 动力学 / 预测
+
+MuZero 把学到的模型拆成三个函数,全部在隐空间 $z$ 里运作,不碰真实观测 $o$:
+
+$$
+\underbrace{h(o_t) \to z_t}_{\text{表示}}\quad
+\underbrace{g(z_t, a_t) \to (z_{t+1}, r_t)}_{\text{动力学}}\quad
+\underbrace{f(z_t) \to (\mathbf p_t, v_t)}_{\text{预测}}
+$$
+
+- **表示函数 $h$**:把真实观测 $o_t$(棋盘 / 像素)编码成隐状态 $z_t$。注意 $z_t$ **不是**「$o_t$ 的重建」,而是「$o_t$ 里与规划相关的压缩」;
+- **动力学函数 $g$**:在隐空间里递推转移,$(z_t, a_t) \to (z_{t+1}, r_t)$——**直接预测奖励**,不经过「先预测 $o_{t+1}$ 再读出 $r$」;
+- **预测函数 $f$**:从隐状态读出策略先验 $\mathbf p_t$ 与价值 $v_t$,$(z_t) \to (\mathbf p_t, v_t)$。
+
+三函数都不预测观测本身。规划时,MCTS 在隐空间里用 $g$ 向前推演若干步、用 $f$ 给叶子打分,选动作——**整个过程不碰真实环境规则**,只靠学到的 $g/h/f$。训练时,用真实轨迹 $(o_0,a_0,r_0,o_1,\dots)$ 监督:对齐 $r_t$ 的预测、对齐 MCTS 搜索结果的策略 $\mathbf p_t$、对齐真实回报的价值 $v_t$。
+
+### 价值等价:不重建观测,只抓决策相关信息
+
+「价值等价」是 MuZero 区别于 Dreamer(下一篇)的核心。Dreamer 的世界模型**重建观测**(RSSM 解码像素),潜状态要承载「能还原 $o$」的全部信息;MuZero 的潜状态只承载「能预测 $r/V/\pi$」的信息——后者更紧凑,因为**很多观测差异对决策无关**。下面这个 toy 把这点算清楚:两个状态 $s_1$、$s_2$ 对规划完全等价(相同 $V^*$、相同奖励、相同最优动作),重建模型被迫区分它们(白白多一个潜 slot),价值等价模型把它们合并到同一 $z$——规划效果完全相同,潜空间更省。
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# MuZero value-equivalent toy: 3 状态 s0/s1/s2, 2 动作
+# 真实 MDP(规划者看不到,只能学):
+#   s0: a0 -> s1 (r=0), a1 -> s2 (r=0)
+#   s1: 终端 r=+1    s2: 终端 r=+1
+#   s1 与 s2 对规划「等价」:同 V*=1、同奖励、最优动作相同
+gamma = 0.9
+
+# === 重建模型(reconstruct):必须区分 s1 与 s2,one-hot 3 维 ===
+rc_slots = 3  # s0/s1/s2 各一个独有 slot
+rc_V = {0: gamma, 1: 1.0, 2: 1.0}  # 正确的 V
+
+# === 价值等价模型(MuZero):只预测 r 与 V, s1/s2 合并 ===
+ve_slots = 2  # z0(=s0) + z1(=s1∪s2)
+ve_V = {0: gamma, 1: 1.0}  # z0=gamma, z1=1.0
+
+print("=== 真值 ===")
+print("  V*(s0)=%.4f  V*(s1)=%.4f  V*(s2)=%.4f  (gamma=%.2f)" % (gamma, 1.0, 1.0, gamma))
+print()
+print("=== 重建模型(one-hot %d 维)===" % rc_slots)
+print("  V(s0)=%.4f  V(s1)=%.4f  V(s2)=%.4f  (规划正确)" % (rc_V[0], rc_V[1], rc_V[2]))
+print("  但被迫区分 s1/s2 —— 它们对规划完全等价")
+print()
+print("=== 价值等价模型(MuZero: s1/s2 合并, %d 维)===" % ve_slots)
+print("  V(z0=s0)=%.4f  V(z1=s1∪s2)=%.4f  (规划同样正确)" % (ve_V[0], ve_V[1]))
+print("  不预测 one-hot, 只预测 r 与 V")
+print()
+
+# 规划效果对比:从 s0 出发的动作价值 Q*
+print("=== 规划效果(s0 出发, 动作价值 Q*)===")
+print("  真值:     Q*(s0,a0)=%.4f  Q*(s0,a1)=%.4f" % (gamma*1.0, gamma*1.0))
+print("  重建:     Q(s0,a0)=%.4f  Q(s0,a1)=%.4f  (区分 s1/s2)" % (gamma*rc_V[1], gamma*rc_V[2]))
+print("  价值等价: Q(z0,a0)=%.4f  Q(z0,a1)=%.4f  (不区分 s1/s2)" % (gamma*ve_V[1], gamma*ve_V[1]))
+print()
+print("=== 结论 ===")
+print("  价值等价用 %d 维达成重建 %d 维的规划效果" % (ve_slots, rc_slots))
+print("  不重建观测、只预测规划相关量(r/V/pi), 潜空间更紧凑且对规划无损")
+print("  这是 MuZero value-equivalent 的核心: 模型只需抓住决策相关信息")
+print()
+print("=== MuZero 三函数 ===")
+print("  representation:  h(o) -> z          (观测 -> 潜状态)")
+print("  dynamics:        g(z, a) -> (z', r) (潜状态 + 动作 -> 下一潜状态 + 奖励)")
+print("  prediction:      f(z) -> (pi, v)    (潜状态 -> 策略 + 价值)")
+print("  三函数都不预测观测本身, 只预测 r / V / pi = value-equivalent")
+`}/>
+
+> 💡 **看图要点**:$s_1$、$s_2$ 的 $V^*$、奖励、最优动作全相同,对规划是「一个状态」。重建模型必须给它们不同的 one-hot(3 维潜空间),价值等价模型合并到同一 $z$(2 维)——从 $s_0$ 出发的 $Q^*$ 三者完全一致(都 0.9)。**MuZero 的潜状态 $z$ 不是「观测的压缩重建」,而是「决策相关信息的压缩」**,所以能比重建模型更紧凑、且在 Atari 这种观测高维但决策相关维度低的环境上学得更省。这与下一篇 Dreamer 形成对照:Dreamer 重建观测(潜状态承载全部信息)、MuZero 价值等价(潜状态只承载决策信息)——两条 model-based 路线的分歧点就在「模型该预测什么」。
+
+### MuZero vs AlphaZero vs Dreamer
+
+| | AlphaZero | MuZero | Dreamer |
+|---|---|---|---|
+| 模型来源 | **已知规则**(棋盘) | **学到的隐模型** | **学到的隐模型** |
+| 模型预测什么 | 真实状态转移(规则给) | $r$ / $\pi$ / $v$(**价值等价**) | 像素重建 + $r$ + $V$(**观测重建**) |
+| 规划在哪做 | 真实状态空间 | 隐空间 MCTS | 隐空间想象轨迹 |
+| 规划方式 | MCTS | MCTS | actor-critic 直接在想象轨迹上训 |
+| 适用环境 | 棋类(规则已知) | 棋类 + Atari | Atari + DM Control + Minecraft |
+| 潜状态紧凑度 | —(无潜空间) | 最紧凑(只抓决策信息) | 较胖(要能解码观测) |
+
+MuZero 把 AlphaZero 的「搜索即策略提升」搬到**没有规则的环境**:用学到的 $g$ 替代规则做 MCTS 前向推演,用 $f$ 替代「规则 rollout 到终局」给叶子估值。它和 Dreamer 都「学隐模型 + 在隐空间规划」,但 MuZero 用 MCTS 显式搜索、Dreamer 用可微想象轨迹直接训 actor-critic;MuZero 的模型价值等价、Dreamer 的模型重建观测。三者递进:AlphaZero(规则已知)→ MuZero(规则未知,学价值等价模型,显式 MCTS)→ Dreamer(规则未知,学重建模型,可微想象)。
+
+> 📌 **MuZero 的代价**:价值等价模型更紧凑,但**不透明**——隐空间 $z$ 没有可解释含义(不像重建模型能解码回像素检查「学对没有」),训练失败时难诊断;且 MCTS 在隐空间里推演,搜索深度受 $g$ 的递推误差累积制约(与 MBPO 的「短 rollout」教训同源 [11])。所以 MuZero 在棋类 + Atari 这种「规划深度浅、决策相关维度低」的环境统治,但在长 horizon、高维连续控制上 Dreamer 的可微想象 + 重建正则往往更稳。
+
+## 世界模型:在潜空间里「做梦」训练
+
+Dyna-Q 的模型是表格、AlphaZero 的模型是**已知的棋类规则**。但真实世界(像素、物理)规则未知且高维——能不能**学一个世界模型**,在它生成的模拟经验里直接训练策略?这就是 **World Models**(Ha & Schmidhuber, 2018 [7])与 **Dreamer**(Hafner et al., 2020 [8])的路线,也是 model-based RL 在深度学习时代的现代主流。
+
+### 三步:编码 → 学潜动力学 → 在想象里训策略
+
+1. **编码**:用 VAE 或递归网络把高维观测 $o_t$(像素)编码到紧凑的潜状态 $s_t$;
+2. **学潜动力学模型**:在潜空间里学转移 $\hat P(s_{t+1}\mid s_t, a_t)$ 与奖励 $\hat R(s_t, a_t)$——潜空间紧凑、噪声少,比像素空间好学得多;
+3. **在想象轨迹里训策略**:用学到的模型** rollout 一条潜轨迹** $s_0\to s_1\to\cdots\to s_H$,在这条「梦里的轨迹」上跑 actor-critic 训练策略,不再(或很少)碰真实环境。
+
+$$
+\text{真实数据}\xrightarrow{\text{编码}}\text{潜状态}\xrightarrow{\text{想象 rollout}}\text{策略训练}
+$$
+
+写成训练循环,Dreamer 是三个阶段轮流跑——学世界模型、在想象里训 actor-critic、拿新策略去真实环境收集数据:
+
+```
+# Dreamer 主循环 伪代码 (Hafner et al.)
+buffer = 少量随机交互数据
+loop:
+    # ① 学世界模型:在真实数据上拟合 RSSM
+    batch = buffer.sample_序列()
+    训练 RSSM(编码器 + 潜动力学 + 奖励头 + 解码器)
+        最大化 ELBO(重建 o、预测 r + KL 正则, 常配 free-bits)
+
+    # ② 想象里训 actor-critic:完全不碰真实环境
+    s0 = 从 batch 的潜状态里取起点
+    在世界模型里 rollout H 步: s_t → a_t~actor → s_{t+1}(全在潜空间, 可微)
+    对想象轨迹算 λ-return V_λ
+    actor:  max Σ_t V_λ(s_t)         # 让想象回报最大(梯度穿过可微模型)
+    critic: 回归 V(s_t) → V_λ(s_t)   # 学价值估计
+
+    # ③ 收集数据:用当前 actor 在真实环境走一段, 存进 buffer
+    真实 rollout(actor) → buffer
+```
+
+关键在于 actor 的梯度可以**直接穿过可微的世界模型**——不像无模型方法要靠采样估策略梯度,Dreamer 在想象轨迹上做反向传播,样本效率高得多。
+
+### RSSM:循环状态空间模型(Dreamer 的世界模型)
+
+Dreamer 的世界模型叫 **RSSM(Recurrent State-Space Model)**[8],把「循环」与「概率潜状态」结合,核心是区分两类潜状态:
+
+- **确定性路径** $h_t$:一个 RNN 循环状态,把过去所有 $(o,a)$ 压缩进一个确定性向量——保证长程记忆不掉链;
+- **随机路径** $s_t$:在 $h_t$ 基础上加一个随机潜变量——建模环境的内在随机性(同一个 $(s,a)$ 可能转到不同 $s'$)。
+
+RSSM 由三个组件学成 [8]:
+
+| 组件 | 学什么 | 作用 |
+|---|---|---|
+| **表示模型** | $s_t \sim q(s_t\mid h_t, o_t)$ | 从真实观测 $o_t$ 推断当前随机潜状态(编码) |
+| **转移模型** | $s_{t+1}\sim p(s_{t+1}\mid h_{t+1})$,$h_{t+1}=f(h_t,s_t,a_t)$ | 在潜空间预测下一步(不看点观测就能往前走) |
+| **解码器/奖励** | $\hat o_t=p_o(o_t\mid h_t,s_t)$,$\hat r_t=p_r(r_t\mid h_t,s_t)$ | 从潜状态重建观测、预测奖励(训练信号) |
+
+关键巧思:**表示模型只在「学世界模型」时用真实观测 $o_t$;一旦模型学好,「想象」阶段只用转移模型 $p(s_{t+1}\mid h_{t+1})$ 向前走**——完全脱离真实观测与像素,纯在潜空间 rollout。这就是「做梦」:梦里的物理由学到的 RSSM 决定。
+
+### 可微想象:价值梯度沿轨迹反传(BPTT)
+
+Dyna-Q 的规划是「用模型生成模拟经验,再做 Q-learning 更新」——模型与策略是**分开**的两步,Q-learning 更新里模型只是产数据。Dreamer 的飞跃是**把想象 rollout 做成全可微的**:潜状态转移、奖励、价值都是可微神经网络,$H$ 步想象轨迹的总价值 $\sum_{t} V(s_t)$ 对策略参数 $\theta$ 的梯度,可以沿轨迹**反传(backprop through time, BPTT)**一次性求出 [8]:
+
+$$
+\nabla_\theta J \;=\; \nabla_\theta\,\mathbb E\Big[\sum_{t=0}^{H} V(s_t)\Big],\qquad s_{t+1}=f_\phi(s_t,a_t),\;\; a_t\sim\pi_\theta(\cdot\mid s_t)
+$$
+
+梯度穿过 $f_\phi$(转移模型)、穿过 $\pi_\theta$(策略)、穿过 $V$(价值),一路反传到 $\theta$。**策略训练时完全不碰真实环境、不生成一个像素**——只对「梦里的轨迹」求梯度。下面用 numpy 跑一个极简版,验证想象 rollout 的价值梯度能沿轨迹反传:
+
+<CodeRunner defaultCode={`
+import numpy as np
+rng = np.random.default_rng(0)
+
+# 极简 Dreamer 式"可微想象":潜空间 rollout + 价值梯度沿轨迹反传 (BPTT)
+# 潜状态 s in R^2, 动作 a = mu * s[0] (确定性 actor, 参数 mu), 价值 V = s[0]
+# 潜动力学 s_{t+1} = W_s @ s + W_a * a (固定, 不学); 想象 H 步, 目标 = sum V(s_t)
+
+W_s = np.eye(2) + 0.1 * rng.normal(size=(2,2))
+W_a = np.array([0.5, 0.0])              # 动作只影响 s[0]
+w_v = np.array([1.0, 0.0])
+H = 5
+
+def imagine(mu, s0):
+    s = s0.copy(); total_V = 0.0; s_list = [s.copy()]
+    for _ in range(H):
+        a = mu * s[0]
+        s = W_s @ s + W_a * a
+        total_V += w_v @ s; s_list.append(s.copy())
+    return total_V, s_list
+
+# 手算 dV/dmu: 价值梯度沿想象轨迹反传 (BPTT)
+def grad_mu(mu, s0):
+    _, s_list = imagine(mu, s0)
+    dV_dmu = 0.0; ds_dmu = np.zeros(2)         # ds_t/dmu 累积
+    for t in range(H):
+        da_dmu = s_list[t][0] + mu * ds_dmu[0] # d(mu*s[0])/dmu
+        ds_dmu = W_s @ ds_dmu + W_a * da_dmu   # 链式法则传到下一步
+        dV_dmu += w_v @ ds_dmu
+    return dV_dmu
+
+s0 = np.array([0.3, 0.0]); mu = 0.4
+V, _ = imagine(mu, s0)
+g_ana = grad_mu(mu, s0)
+eps = 1e-6; Vp, _ = imagine(mu + eps, s0)
+g_num = (Vp - V) / eps
+
+print(f"想象 {H} 步, 总价值 V = {V:.4f}")
+print(f"解析梯度 dV/dmu (BPTT 反传) = {g_ana:.6f}")
+print(f"数值梯度 dV/dmu (有限差分) = {g_num:.6f}")
+print(f"误差 {abs(g_ana - g_num):.2e}  (两者吻合 -> BPTT 梯度穿过整条想象轨迹)")
+# 双行柱状:每个 # ≈ 0.25 的梯度幅值, 直观看解析 vs 数值是否一致
+bar = lambda v: "#" * max(0, int(v / 0.25))
+print()
+print("梯度幅值(每个 # ≈ 0.25, 两行等高 = BPTT 正确):")
+print(f"解析 |{bar(g_ana)}")
+print(f"数值 |{bar(g_num)}")
+print()
+print("机制: 潜空间想象 rollout 全可微, 价值梯度沿轨迹反传到策略参数 mu")
+print("      Dreamer 杀手锏: 不碰真实环境/不生成像素, 在'梦'里对策略求梯度")
+`} />
+
+> 💡 **对比 Dyna-Q**:Dyna-Q 的规划与策略更新是**两步**(模型产数据 → Q-learning 更新,模型只是数据源,梯度不穿过模型);Dreamer 的想象是**一步**(梯度直接穿过可微的潜动力学模型反传到策略)。这就是为什么 Dreamer 能用 actor-critic 的解析梯度高效优化策略,而 Dyna-Q 只能靠 Q-learning 的半梯度——可微想象是深度 model-based RL 的核心引擎。
+
+### RSSM 训练循环:动力学学习 + 行为学习 + 环境交互
+
+上一节讲了「可微想象」的梯度机制——价值梯度沿想象轨迹 BPTT 反传到策略。但 Dreamer[8] 的完整训练不是只跑想象,而是**三步交替**的循环:先学世界模型,再在世界模型里训 actor-critic,最后回真实环境采数据。这三步对应算法的三个模块,各自优化不同参数,互不干扰。
+
+#### 世界模型:ELBO 目标与 free bits
+
+世界模型的学习目标是**变分下界(ELBO)**——让潜状态 $s_t$ 既能重建观察、预测奖励,又不过度偏离转移模型的预测(保持潜空间紧凑)。总目标三项之和:
+
+$$
+J_{\mathrm{REC}}(\theta)=\mathbb E\!\left[\sum_t\bigl(\underbrace{J_O^t}_{\text{重建}}+\underbrace{J_R^t}_{\text{奖励}}+\underbrace{J_D^t}_{\text{KL 正则}}\bigr)\right]
+$$
+
+- **观察重建** $J_O^t=\ln q_\theta(o_t\mid s_t)$:解码器从潜状态重建图像(或观察),提供学习信号让潜状态承载视觉信息;
+- **奖励预测** $J_R^t=\ln q_\theta(r_t\mid s_t)$:从潜状态预测标量奖励;
+- **KL 正则** $J_D^t=-\beta\,\mathrm{KL}\bigl(p_\theta(s_t\mid s_{t-1},a_{t-1},o_t)\,\|\,q_\theta(s_t\mid s_{t-1},a_{t-1})\bigr)$:惩罚**后验**(看了观察的表示模型)偏离**先验**(没看观察的转移模型)。
+
+KL 项的作用是让转移模型学会「不看观察也能预测下一步潜状态」——这样想象时(只用转移模型,不看观察)轨迹才可靠。但 KL 太强会把后验压塌成先验、丢失观察信息,所以 Dreamer 用 **free bits** 钳位:每时间步 KL 低于阈值(3 nats)时梯度置零,允许后验保留至少这么多信息不被先验吞:
+
+$$
+J_D^t=-\beta\,\max\!\bigl(3,\;\mathrm{KL}(p\|q)\bigr)
+$$
+
+#### 想象 actor-critic:λ-return 三估计器
+
+行为学习阶段**世界模型冻结**(θ 固定),只训动作模型 φ 和价值模型 ψ。从真实数据算出的潜状态 $s_t$ 出发,只用**转移模型**(不看观察)unroll $H$ 步想象轨迹($H=15$ 连续控制 / $H=10$ 离散控制),时间索引用 $\tau$ 区分想象步:
+
+$$
+s_{\tau+1}\sim q(s_{\tau+1}\mid s_\tau,a_\tau),\quad r_\tau\sim q(r_\tau\mid s_\tau),\quad a_\tau=\tanh\!\bigl(\mu_\phi(s_\tau)+\sigma_\phi(s_\tau)\epsilon\bigr),\;\epsilon\sim\mathcal N(0,I)
+$$
+
+动作模型用 **tanh-squashed 高斯 + 重参数化**:把采样看成网络输出的确定性函数,梯度能穿过采样反传到 φ。想象轨迹上用三种价值估计器算回报,对应不同偏差-方差取舍:
+
+$$
+V_R(s_\tau)=\mathbb E\!\left[\sum_{n=\tau}^{t+H} r_n\right]\quad\text{(纯奖励累加,无 bootstrap)}
+$$
+
+$$
+V_N^k(s_\tau)=\mathbb E\!\left[\sum_{n=\tau}^{h-1}\gamma^{n-\tau}r_n+\gamma^{h-\tau}v_\psi(s_h)\right],\quad h=\min(\tau+k,\,t+H)
+$$
+
+$$
+V_\lambda(s_\tau)=(1-\lambda)\sum_{n=1}^{H-1}\lambda^{n-1}V_N^n(s_\tau)+\lambda^{H-1}V_N^H(s_\tau)
+$$
+
+$V_R$ 无 bootstrap(纯蒙特卡洛,方差大但无 critic 偏差);$V_N^k$ 是 k-step return(走 k 步后用价值模型 bootstrap,方差小但依赖 critic 准不准);$V_\lambda$ 把所有 k-step return **指数加权平均**——$\lambda=0$ 退化为 $V_N^1$(一步 bootstrap,偏差大),$\lambda=1$ 退化为 $V_R$(纯 MC,方差大),中间值平衡偏差-方差。Dreamer 用 $\gamma=0.99$、$\lambda=0.95$(偏向长视野但留 bootstrap 稳定性)。
+
+动作模型和价值模型的目标:
+
+$$
+\max_\phi\;\mathbb E\!\left[\sum_{\tau=t}^{t+H}V_\lambda(s_\tau)\right]\quad\text{(动作模型,梯度穿过想象轨迹 BPTT 反传)}
+$$
+
+$$
+\min_\psi\;\mathbb E\!\left[\sum_{\tau=t}^{t+H}\tfrac12\bigl\|v_\psi(s_\tau)-\mathrm{sg}(V_\lambda(s_\tau))\bigr\|^2\right]\quad\text{(价值模型,回归到停止梯度的 }V_\lambda\text{)}
+$$
+
+关键是 $V_\lambda$ 目标对价值模型**停止梯度**(`sg`),且**世界模型 θ 冻结**——行为学习只更新 φ/ψ,不碰 θ。梯度路径:价值估计 → 奖励/价值预测 → 想象状态 → 想象动作 → 策略参数 φ,整条链可微所以能解析反传。
+
+#### 算法三步循环
+
+<CodeRunner defaultCode={`
+import numpy as np
+
+# 简化 RSSM toy: 1-D 潜状态, 演示 Dreamer 训练循环两大件
+# (1) 世界模型 ELBO: 重建 + 奖励 + KL(posterior||prior), free bits 3 nats 钳位
+# (2) 想象 actor-critic: 从真实 s_t 用转移模型 unroll H 步, 三价值估计器 V_R / V_N^k / V_lambda
+
+np.random.seed(0)
+H, gamma, lam = 8, 0.99, 0.95
+
+# 简化世界模型 (固定, 不学): 转移 s_{t+1}=0.9*s+0.5*a, 奖励 r=s, critic v_psi(s)=s
+def transition(s, a): return 0.9*s + 0.5*a
+def reward(s): return s
+def value_model(s): return 1.0*s
+
+# 动作模型: tanh-squashed Gaussian reparam
+def action_model(s, mu_w=0.8, sigma=0.3):
+    return np.tanh(mu_w*s + np.random.randn()*sigma)
+
+def imagine_rollout(s0, H=8):
+    s_list, r_list = [s0], []
+    s = s0
+    for _ in range(H):
+        a = action_model(s); s = transition(s, a); r_list.append(reward(s)); s_list.append(s)
+    return np.array(s_list), np.array(r_list)
+
+# 三价值估计器 (Dreamer Eq 4-6)
+def V_R(r_list, gamma=0.99):
+    return sum(gamma**t * r_list[t] for t in range(len(r_list)))
+
+def V_Nk(s_list, r_list, k, gamma=0.99):
+    h = min(k, len(r_list))
+    ret = sum(gamma**t * r_list[t] for t in range(h))
+    if h < len(r_list): ret += gamma**h * value_model(s_list[h])
+    return ret
+
+def V_lambda(s_list, r_list, lam=0.95, gamma=0.99):
+    H = len(r_list)
+    total = sum((1-lam) * lam**(n-1) * V_Nk(s_list, r_list, n, gamma) for n in range(1, H))
+    total += lam**(H-1) * V_Nk(s_list, r_list, H, gamma)
+    return total
+
+# === (1) 世界模型 ELBO 演示 ===
+print("=== 世界模型 ELBO 损失 (1-D 潜状态) ===")
+mu_post, sigma_post = 2.0, 0.5      # 后验: 看了观测, 较确定
+mu_prior, sigma_prior = 1.8, 0.8    # 先验: 没看观测, 较不确定
+kl = np.log(sigma_prior/sigma_post) + (sigma_post**2 + (mu_post-mu_prior)**2)/(2*sigma_prior**2) - 0.5
+free_bits = 3.0
+kl_clipped = max(kl, free_bits)
+print(f"posterior N({mu_post}, {sigma_post})  prior N({mu_prior}, {sigma_prior})")
+print(f"KL(posterior || prior) = {kl:.4f} nats")
+print(f"free bits = {free_bits} nats -> 钳位后 KL = {kl_clipped:.4f} (低于阈值梯度置零防塌缩)")
+recon_ll, reward_ll = -0.8, -0.3   # 演示值 (需解码器/奖励头)
+elbo = recon_ll + reward_ll - kl_clipped
+print(f"ELBO = 重建({recon_ll}) + 奖励({reward_ll}) - KL_clipped({kl_clipped:.4f}) = {elbo:.4f} (最大化)\\n")
+
+# === (2) 想象 actor-critic: 三价值估计器 ===
+print("=== 想象 actor-critic (从真实 s0=2.0 出发 unroll H=8 步) ===")
+s0 = 2.0
+s_list, r_list = imagine_rollout(s0, H)
+print(f"想象轨迹奖励 r_t = {np.round(r_list, 3).tolist()}")
+vr = V_R(r_list, gamma)
+vlam = V_lambda(s_list, r_list, lam, gamma)
+print(f"V_R     (纯奖励累加, 无 bootstrap) = {vr:.4f}")
+for k in [1, 2, 4, 8]:
+    print(f"V_N^{k}    (k={k}-step return, bootstrap)  = {V_Nk(s_list, r_list, k, gamma):.4f}")
+print(f"V_lambda (指数加权 k-step, λ={lam})   = {vlam:.4f}\\n")
+
+# 偏差-方差: N 次想象 rollout
+N = 200
+vr_s, vn1_s, vlam_s = [], [], []
+for _ in range(N):
+    s_l, r_l = imagine_rollout(s0, H)
+    vr_s.append(V_R(r_l, gamma)); vn1_s.append(V_Nk(s_l, r_l, 1, gamma)); vlam_s.append(V_lambda(s_l, r_l, lam, gamma))
+print(f"=== 偏差-方差权衡 (N={N} 次想象 rollout) ===")
+print(f"{'估计器':>10} {'均值':>10} {'标准差':>10}  说明")
+print(f"{'V_R':>10} {np.mean(vr_s):>10.4f} {np.std(vr_s):>10.4f}  无bootstrap, 方差大, 无critic偏差")
+print(f"{'V_N^1':>10} {np.mean(vn1_s):>10.4f} {np.std(vn1_s):>10.4f}  1步bootstrap, 方差小, critic偏差大")
+print(f"{'V_lambda':>10} {np.mean(vlam_s):>10.4f} {np.std(vlam_s):>10.4f}  λ加权折中, 偏差方差平衡")
+print()
+print("机制: V_R 无 bootstrap 方差大; V_N^1 一步 bootstrap 方差小但依赖 critic 偏差大;")
+print("      V_lambda 用 λ 在两者间指数加权插值, λ=0->V_N^1, λ=1->V_R, 0.95 偏向长视野但留 bootstrap 稳定性")
+print()
+print("=== Dreamer 训练循环三步交替 (算法 1) ===")
+print("1. 动力学学习: 抽 B=50 条 L=50 序列, 更新世界模型 θ (最大化 ELBO: 重建+奖励-KL)")
+print("2. 行为学习: 从每个 s_t 想象 H 步, 算 V_lambda, 更新动作 φ (max ΣV_lambda) + 价值 ψ (min ||v-V_lambda||²), 世界模型冻结")
+print("3. 环境交互: 每 100 训练步执行 1 episode (加探索噪声) 加入数据集")
+`} title="Dreamer 训练循环: 世界模型 ELBO + 想象 actor-critic λ-return" />
+
+跑一下关注两件事:① **世界模型 ELBO**——KL 低于 free bits 阈值(3 nats)时被钳位,这正是防止后验被先验压塌、保留观察信息的机制;② **三价值估计器的偏差-方差**——$V_R$ 无 bootstrap 方差最大(标准差最大)但无 critic 偏差,$V_N^1$ 方差最小但均值偏离真值最多(critic 不准引入偏差),$V_\lambda$ 在两者间折中。$\lambda=0.95$ 偏向长视野(接近 $V_R$)但保留 bootstrap 的稳定性,这是 Dreamer 在想象轨迹上平衡偏差-方差的标准选择。
+
+> 💡 **三步为何交替而非端到端**:世界模型 θ 和 actor-critic φ/ψ **分开优化**——动力学学习用真实观察序列(需解码器重建像素),行为学习在想象轨迹上(只需转移+奖励模型,不碰像素)。若端到端联合训练,想象轨迹的梯度会污染世界模型、且像素重建梯度会被策略目标带偏。冻结 θ 再训 φ/ψ,让世界模型专注「学准动力学」、actor-critic 专注「在准动力学上优化策略」,各司其职。环境交互每 100 步才采一 episode,是因为 model-based 方法样本效率高——大部分「训练」发生在想象里,不消耗真实环境步数。
+
+### DreamerV3:单一配置跨 150+ 任务
+
+**DreamerV3**(Hafner et al., 2023 [9])把 Dreamer 推到新高度:**一套超参配置横跨 150+ 多样任务**(Atari 55 游戏、DM Control、Crafter、DMLab、Minecraft),不再需要逐域调参。最瞩目的里程碑是**首个从零开始、无人类数据/课程在 Minecraft 采到钻石**——需要长视野策略、像素观测、稀疏奖励的开放世界任务 [9]。跨域稳定靠的不是某一项银弹,而是**一组针对不同失败模式的工程化技术**,每项治一个此前需要逐域调参的痛点:
+
+#### symlog 预测:把跨尺度信号压到稳定区间
+
+不同域的奖励量级差异巨大:DM Control 连续控制奖励常在 0.01 量级,Atari 单步得分从 1 到几百,Minecraft 采钻石的奖励可达 1024。若直接用 MSE 预测这些奖励,大奖励的梯度幅度远大于小奖励(梯度 ∝ 误差),训练被大奖励主导、小奖励域学不动。DreamerV3 用 **symlog 变换**压缩预测目标的量级:
+
+$$\mathrm{symlog}(x) = \mathrm{sign}(x)\cdot\log(1+|x|),\qquad \mathrm{symexp}(x) = \mathrm{sign}(x)\cdot(e^{|x|}-1)$$
+
+symlog 对小值近似线性( $\mathrm{symlog}(0.01)\approx 0.01$ ),对大值退化到对数( $\mathrm{symlog}(1024)\approx 6.93$ )——把跨度 $10^5$ 的奖励压到跨度约 10 的区间,梯度幅度跨域均衡。symexp 是其逆变换,critic 用 symexp 输出价值(把网络的对数尺度输出还原为真实值),防止大回报域发散。symlog 还用于连续值的预测头(奖励、价值),让同一套网络结构处理量级悬殊的信号。
+
+#### 混合分布解码器:建模多模态图像
+
+图像重建若用单高斯或伯努利解码器,只能刻画单峰分布——但实际游戏画面常是多模态的(敌人下一帧可能在左也可能在右,真实分布是双峰,单峰解码器只能预测均值得到模糊平均)。DreamerV3 的图像解码器用**离散化 logistic 混合分布**(categorical mixture / discretized logistic mixture):输出若干个 logistic 分布的混合权重与参数,拟合多模态的下一帧分布。这让世界模型能「想象」出锐利且多样的未来画面,而非模糊均值——对视觉风格悬殊的域(Atari 像素风、Minecraft 3D 渲染、Crafter 2D 瓦片)都稳定。
+
+#### free bits:防止潜表征塌缩
+
+世界模型的训练目标里有**后验 $q(s_t\mid o_{\le t},a_{<t})$ 与先验 $\hat p(s_t\mid s_{t-1},a_{t-1})$ 的 KL 散度**项——先验(转移模型)要逼近后验(编码器),让想象轨迹不依赖未来观测。但 KL 太强会把后验硬拉向先验、丢掉编码器抽取的细节信息(表征塌缩),太弱则先验学不准。DreamerV3 用 **free bits**:对潜变量的每个分组,KL 低于一个阈值(如 1 nat)时梯度置零——「允许后验保留至少这么多信息不被先验吞掉」。这避免了一刀切 KL 把所有域的潜信息压成同一形状,让不同域按需保留不同量的潜信息。
+
+#### 学习的折扣预测器:统一 episodic 与 continuing
+
+不同任务的时间结构不同:Atari 有明确回合终止(episodic),DM Control 部分任务是无限长的(continuing)。DreamerV3 学一个 **discount head** 预测 episode 续航概率 $\hat d_t\in[0,1]$(即 $1-\text{done}$),用小 Bernoulli 损失训练。想象 rollout 时用预测的 $\hat d_t$ 作折扣:回合会结束的域学到 $\hat d_t<1$,无限域学到 $\hat d_t\approx 1$。这样**同一算法自动处理 episodic 与 continuing**,无需逐域指定终止信号或固定折扣。预测会裁剪以防过早终止或无穷horizon。
+
+#### 三损失 + 连续性损失
+
+世界模型在想象轨迹上训练时,目标是四项之和:① **图像重建损失**(解码器从潜状态重建观测,用混合分布)+ ② **奖励预测损失**(symlog 编码)+ ③ **折扣预测损失**(Bernoulli)+ ④ **连续性损失**(相邻潜状态 $s_t,s_{t+1}$ 的 L2 正则,惩罚潜空间大跳变,稳定动力学学习,对有离散视觉变化的环境尤其重要)。actor-critic 完全在这些**想象轨迹**上用 $\lambda$-return + symlog 价值训练,策略梯度不碰真实环境。
+
+#### KL balancing 与 two-hot critic:把训练稳住的两个深层机制
+
+上面几项是「调什么」,但 DreamerV3 真正让一套超参跨 150+ 域的,还有两个**怎么调**的深层机制——它们在论文里是几行公式,却是 R46 那批技术能成立的地基 [9]。
+
+**机制一:KL balancing 的非对称停止梯度**。世界模型要训「先验 $\hat p(z_t\mid h_t)$(转移模型,想象时用)逼近后验 $q(z_t\mid h_t,o_t)$(编码器,看真实观测)」——两者 KL 越小,想象轨迹越贴近真实。但**怎么让它们靠近**大有讲究。朴素做法是对称的:KL 项两边都传梯度,后验与先验各走一半路、在中间相遇。问题是后验手里有真实观测信息,被先验硬拉到中间**等于丢掉了一半观测信息(表征塌缩)**。DreamerV3 用 **KL balancing**(沿用自 DreamerV2)把这一项拆成**两条非对称的损失**,各自用停止梯度 `sg(·)` 切断一侧的梯度流 [9]:
+
+$$
+L_{\text{dyn}}=\max\!\bigl(1,\;\mathrm{KL}\bigl[\,\mathrm{sg}(q_\phi(z_t\mid h_t,o_t))\;\|\;p_\phi(z_t\mid h_t)\,\bigr]\bigr),\quad
+L_{\text{rep}}=\max\!\bigl(1,\;\mathrm{KL}\bigl[\,q_\phi(z_t\mid h_t,o_t)\;\|\;\mathrm{sg}(p_\phi(z_t\mid h_t))\,\bigr]\bigr)
+$$
+
+- $L_{\text{dyn}}$(**动力学损失**,权重 $\beta_{\text{dyn}}=0.5$):先验 $p$ 匹配**停止梯度的**后验——只有先验动、后验不动。**先验做预测工作**:学会「不看观测也能猜准下一潜状态」。
+- $L_{\text{rep}}$(**表示损失**,权重 $\beta_{\text{rep}}=0.1$):后验 $q$ 匹配**停止梯度的**先验——只有后验动、先验不动,且权重只有 $L_{\text{dyn}}$ 的五分之一。**后验做表示工作**:只需轻轻向先验靠拢,主体仍保留观测信息。
+
+两条加预测损失 $L_{\text{pred}}$(权重 1.0)合成世界模型损失 $L(\phi)=\mathbb E[\sum_t(\beta_{\text{pred}}L_{\text{pred}}+\beta_{\text{dyn}}L_{\text{dyn}}+\beta_{\text{rep}}L_{\text{rep}})]$。`max(1,·)` 就是上节说的 **free bits**——KL 低于 1 nat 时梯度置零,「已最小化得够好就不管,把算力留给预测」。这套非对称分工的结果:先验扛预测重活、后验稳守观测信息,KL 不再把表征拉塌。下面这个可运行演示把对称 vs 非对称的差异讲透——
+
+<CodeRunner defaultCode={`# KL balancing toy: 对称 KL 把后验拉塌 vs 非对称停止梯度保住表征
+import numpy as np
+def kl_gauss(m1, s1, m2, s2):  # KL(N(m1,s1^2) || N(m2,s2^2))
+    return np.log(s2/s1) + (s1**2 + (m1-m2)**2)/(2*s2**2) - 0.5
+mu_q_target, sig_q, sig_p = 3.0, 0.5, 0.7   # 后验应守住 mu_q_target=3 编码观测
+lr = 0.05
+# --- 对称 KL: 两边都传梯度 (naive, 非 DreamerV3) ---
+mu_q, mu_p = 3.0, 0.0
+print("=== 对称 KL (两边梯度都流, 非 DreamerV3) ===")
+for t in range(60):
+    gq = (mu_q - mu_p)/sig_p**2      # 后验被拉向先验
+    gp = -(mu_q - mu_p)/sig_p**2     # 先验被拉向后验
+    mu_q -= lr * gq; mu_p -= lr * gp
+    if t in (0, 30, 59):
+        print(f"t={t:2d}  mu_q={mu_q:.4f}  mu_p={mu_p:.4f}  KL={kl_gauss(mu_q,sig_q,mu_p,sig_p):.4f}")
+print(f"-> 后验 mu_q 从 3.0 漂到 {mu_q:.4f} (丢了一半观测信息)\\n")
+# --- KL balancing: 非对称停止梯度, beta_dyn=0.5, beta_rep=0.1 ---
+mu_q, mu_p = 3.0, 0.0
+beta_dyn, beta_rep = 0.5, 0.1
+print("=== KL balancing (非对称停止梯度, DreamerV3) ===")
+for t in range(60):
+    gp_dyn = beta_dyn * (-(mu_q - mu_p)/sig_p**2)   # 先验动, 后验 sg
+    gq_rep = beta_rep * ((mu_q - mu_p)/sig_p**2)    # 后验动(弱), 先验 sg
+    mu_p -= lr * gp_dyn; mu_q -= lr * gq_rep
+    if t in (0, 30, 59):
+        print(f"t={t:2d}  mu_q={mu_q:.4f}  mu_p={mu_p:.4f}  KL={kl_gauss(mu_q,sig_q,mu_p,sig_p):.4f}")
+print(f"-> 后验 mu_q 守在 {mu_q:.4f} (近 3.0, 保住观测信息), 先验 mu_p 学到 {mu_p:.4f} (做预测)")
+print()
+print("机制: L_dyn 让先验匹配停止梯度的后验(先验做预测), L_rep 让后验轻靠停止梯度的先验(权重 0.1, 后验做表征)")
+print("      对称 KL 两边各走一半 -> 中间相遇 -> 后验丢信息; KL balancing 先验扛重活、后验守信息")`} title="KL balancing:对称 KL 塌缩 vs 非对称停止梯度保表征" />
+
+> 💡 **停止梯度为什么是关键**:深度学习里 `sg(·)` 看似只是「不算梯度」,实际是在**指定谁迁就谁**。$L_{\text{dyn}}$ 里 `sg(q)` 说「后验是靶子、先验去对齐它」,$L_{\text{rep}}$ 里 `sg(p)` 说「先验是靶子、后验去对齐它」——两条加起来不是「互相靠拢」,而是「先验全力学预测、后验轻量保表征」,分工明确。若两边都不停止梯度(对称 KL),就成了互相妥协、在中间相遇,后验的观测信息被稀释。这是 DreamerV2→V3 训练稳定的核心机巧之一。
+
+**机制二:two-hot 编码的 symlog critic**。actor-critic 的 critic 若直接用 MSE 回归价值 $V(s)$,在大回报域(如 Minecraft 采钻石奖励 1024)会发散——MSE 损失在大目标下梯度巨大、网络难以稳定输出。DreamerV3 把 critic 做成**离散回归**:在 symlog 空间均匀放 $K=255$ 个桶(范围 $-20$ 到 $+20$,覆盖 symlog 域),critic 输出一个 softmax 分布,价值读数为桶中心的期望 [9]:
+
+$$
+v_\psi(s_t)=\mathrm{symexp}\!\Bigl(\mathbb E_{p_\psi}[b_i]\Bigr)=\mathrm{symexp}\!\Bigl(\sum_i p_\psi(b_i\mid s_t)\,b_i\Bigr)
+$$
+
+其中 $b_i$ 是第 $i$ 个桶在 symlog 空间的中心、$p_\psi(b_i\mid s_t)$ 是 critic 输出该桶的概率。训练目标 $\lambda$-return $R^\lambda_t$ 也先 symlog 变换,再用 **two-hot 编码**:把一个目标值拆给它最近的两个桶、权重与距离成反比,在这两桶上放目标概率 1。这样 critic 学的是一个**分布**而非点估计——大回报被 symlog 压到对数尺度、离散桶又给了 bounded 的 softmax 输出,双重稳定。critic 还向自身参数的**指数滑动平均(EMA)**靠拢,进一步降方差。$\lambda$-return 用 $R^\lambda_t=r_t+\gamma c_t((1-\lambda)v_\psi(s_{t+1})+\lambda R^\lambda_{t+1})$,默认想象 15 步、$\gamma=0.997$、$\lambda=0.95$。
+
+**机制三:分位数回报缩放让固定熵跨密集/稀疏通用**。actor 的目标是「想象 $\lambda$-return 的缩放值 − 熵正则」[9]:
+
+$$
+L(\theta)=\sum_t\mathbb E\!\left[\frac{\mathrm{sg}(R^\lambda_t)}{\max(1,\,S)}\right]-\eta\,\mathcal H[\pi_\theta(a_t\mid s_t)],\qquad S=\mathrm{Per}(R,95)-\mathrm{Per}(R,5)
+$$
+
+$S$ 是近期回报的 5–95 分位距(衡量当前任务回报的典型跨度),$\max(1,S)$ 意思是**只有当跨度大于 1 才缩放、小回报原样保留**——DM Control 的 0.01 量级回报不被放大,Atari/Minecraft 的大回报被压扁。回报跨域归一化后,**一个固定的熵系数 $\eta=3\times10^{-4}$ 就能同时服务密集奖励(需要少探索)与稀疏奖励(需要多探索)**,无需逐域调。连续动作用重参数化把梯度穿过采样反传、离散动作用 reinforce,统一框架。
+
+> 💡 **三机制合起来**:symlog 压尺度(机制零,R46 已讲)+ KL balancing 非对称停止梯度分工先验/后验(机制一)+ two-hot 离散 critic 防大回报发散(机制二)+ 分位数回报缩放让固定熵跨域通用(机制三)——这是「一套超参跨 150+ 域」的真正底层。R46 的六项技术是「调什么」,这三项是「怎么稳稳地调」。
+
+#### 规模律:越大越强,不退化
+
+DreamerV3 展现出 RL 中罕见的**规模律**:模型越大、图像分辨率越高、每环境步的梯度步越多,性能**单调提升**且不退化——而许多 model-based 方法在模型被过度使用时会过拟合/退化。这归功于上述鲁棒技术(symlog/free bits/混合解码器/归一化)把训练稳定住,使得「堆规模」成为可靠收益而非风险。可预测的规模缩放是通用 RL 智能体的关键性质。
+
+#### 跨域机制对照
+
+每项技术治一个具体痛点,合起来让单一配置跨 150+ 域:
+
+| 域 | 挑战 | DreamerV3 对应技术 |
+|---|---|---|
+| Atari 55 游戏 | 奖励尺度悬殊、视觉风格多样、回合长度差异大 | symlog 处理奖励尺度 + 混合解码器处理视觉 + 学习的折扣处理回合长度 |
+| DM Control | 连续控制、低维本体感知观测、continuing 任务 | symlog 处理连续奖励范围 + discount head 处理 continuing |
+| Minecraft | 极稀疏奖励、开放世界、长视野 | 想象规划支持长视野信用分配 + 模型预测/规划跨长时距 |
+| Crafter | 组合式分层目标 | 世界模型捕获多步推理所需动力学 |
+| DMLab | 部分可观测、3D 导航 | 潜模型捕获时间依赖 + 学习的折扣处理变长回合 |
+
+下面这个可运行示例直观展示 symlog 如何把跨尺度奖励压到稳定区间——这是 DreamerV3 跨域稳定的基石之一:
+
+<CodeRunner defaultCode={`# DreamerV3 symlog 预测: 把跨尺度奖励压到稳定区间
+import math
+
+def symlog(x):
+    """sign(x) * log(1 + |x|): 小值近似线性, 大值退化到对数."""
+    return math.copysign(math.log(1 + abs(x)), x)
+
+def symexp(x):
+    """symlog 的逆: 把网络输出(对数尺度)还原为真实值."""
+    return math.copysign(math.exp(abs(x)) - 1, x)
+
+# 不同域的奖励量级差异巨大
+rewards = [0.01, 1.0, 50.0, 100.0, 1024.0]  # DM Control / Atari / Minecraft 钻石
+
+print("=== symlog 压缩跨尺度奖励 ===")
+print(f"{'原始 r':>10} {'symlog(r)':>12} {'还原 symexp':>14}")
+for r in rewards:
+    s = symlog(r)
+    back = symexp(s)
+    print(f"{r:>10.2f} {s:>12.4f} {back:>14.2f}")
+
+print()
+print("关键观察:")
+lo, hi = symlog(0.01), symlog(1024)
+print(f"  奖励跨度 0.01 ~ 1024 (约 10^5), symlog 压到 {lo:.3f} ~ {hi:.3f} (跨度仅 ~{hi-lo:.1f})")
+print(f"  小值近似线性: symlog(0.01) = {symlog(0.01):.4f} ≈ 0.01")
+print(f"  大值退化对数: symlog(1024) = {symlog(1024):.3f} ≈ log(1024) = {math.log(1024):.3f}")
+print()
+print("=== 为何要 symlog: 梯度均衡 ===")
+print("直接 MSE 预测时, 损失对大奖励的梯度幅度 >> 小奖励 (训练被大奖励主导):")
+for r in [0.01, 1.0, 100.0]:
+    print(f"  r={r:>6.2f}: 梯度幅度 ~ {r:>7.2f}")
+print("symlog 预测时, 误差压到对数尺度, 跨域梯度幅度均衡:")
+for r in [0.01, 1.0, 100.0]:
+    print(f"  r={r:>6.2f}: symlog 误差 ~ {abs(symlog(r)):>6.3f}")
+print()
+print("=> symlog 让同一套网络结构处理量级悬殊的奖励, 是 DreamerV3 跨域稳定的关键.")
+`} />
+
+这组技术合起来,把 model-based RL 的「学世界模型 + 想象训练」范式从「每个域都要调参」推向「单一配置通用」——DreamerV3 在 55 个 Atari 游戏达人类水平、Minecraft 采钻石等里程碑,证明潜空间可微想象路线已具备跨域通用性。这也是 model-based RL 走向通用智能体的主流方向。
+
+
+
+### 与 Dyna-Q / AlphaZero 的对照
+
+| 范式 | 模型形态 | 规划方式 | 策略训练 |
+|---|---|---|---|
+| **Dyna-Q** | 表格查找表 `Model(s,a)→(s',r)` | 随机抽见过 $(s,a)$ 回放 | Q-learning 半梯度(模型只产数据,梯度不穿模型) |
+| **AlphaZero** | 已知棋类规则(完美模型) | MCTS 搜索 + 神经网络评估 | 专家迭代(网络模仿 MCTS 精炼后的更强分布) |
+| **Dreamer** | 学到的潜动力学 RSSM | 可微想象 rollout | actor-critic 解析梯度沿轨迹反传(BPTT,梯度穿模型) |
+
+一句话:**Dyna-Q 是「表格+半梯度」、AlphaZero 是「完美模型+搜索」、Dreamer 是「学习模型+可微想象」**——三者都是「学环境模型 + 用模型规划」,但模型的表示力与规划的可微性逐级跃升,Dreamer 代表了可微规划的现代深度学习路线。
+
+### 样本效率与模型偏差
+
+Dreamer 的杀手锏是**样本效率**:在 Atari 上比免模型方法少用一两个量级的真实交互 [8]。代价是**模型偏差(model bias)**——Spinning Up 把它称为 model-based RL 的**最大挑战**:「bias in the model can be exploited by the agent, resulting in an agent which performs well with respect to the learned model, but behaves sub-optimally (or super terribly) in the real environment」[1]。换句话说,智能体不是「随机出错」,而是**被模型的高估区主动吸引过去**——在模型里表现好、现实里崩。这一段我们把「模型错了策略就歪」这句话拆开,看清模型偏差**到底怎么累积、怎么把策略带歪、又怎么治**。
+
+#### 误差累积:模型偏差随 rollout 步数放大
+
+模型每步预测都带误差 $\epsilon$。H 步 rollout 里,误差**不是相加而是链式放大**——第 $t+1$ 步把第 $t$ 步已经偏离的预测状态当输入再预测,偏差沿动力学传播。设真实动力学 $s_{t+1}=f(s_t)$、模型 $\hat f(s_t)=f(s_t)+\epsilon$,递推得
+
+$$
+\hat s_H - s_H \;=\; \epsilon\sum_{t=0}^{H-1}f'(s_t)\cdots f'(s_0) \;\approx\; \epsilon\cdot\frac{\lambda^H-1}{\lambda-1}
+$$
+
+其中 $\lambda=f'(s)$ 是动力学的局部放大率。**$\lambda<1$(稳定动力学,如 $s'=0.9s$)误差饱和有界**——几何级数收敛,$\epsilon/(1-\lambda)$ 封顶;**$\lambda>1$(不稳定动力学,如 $s'=1.3s$)误差指数发散**——$\lambda^H$ 主导,$\epsilon$ 再小也会被放大几个量级。这就是为什么长 horizon rollout 与真实环境迅速发散:不是模型在大步走错,而是小偏差被动力学的放大器一路吹大。
+
+#### 策略钻高估:goodhart 式利用模型缺陷
+
+误差累积只是第一重病。更阴险的是**策略优化会选择性钻进模型高估奖励的区域**——模型在哪里错得最离谱,策略就被吸引到哪里。设真实奖励 $R(a)=-a^2$(峰在 $a=0$),模型奖励 $\hat R(a)=R(a)+2a$($a$ 越大高估越多)。策略在模型里 $\arg\max_a \hat R(a)$ 不会选真峰 $a=0$,而是被高估斜坡拉到大 $a$——模型以为能拿高分,真实奖励却是一大负数。这与 [RLHF 里的 reward hacking](/tutorials/rlhf) 同源:**只要有可被钻空子的代理,优化器就会钻**;model-based RL 的代理就是学到的 $\hat R$。
+
+#### short-rollout 缓解:MBPO 从真实数据分支
+
+Janner et al. (2019) 的 **MBPO** [11] 给出了控制误差累积的工程化解法:**短 rollout 从真实数据分支**——每条 model rollout 只走 $k$ 步($k\ll H$)、且起点是从真实 replay buffer 采的状态而非模型自己生成的。这两点同时治两重病:$k$ 短则误差来不及累积到发散(几何级数还没被 $\lambda^H$ 吹大就截断)、起点在真实数据分布内则不会被带到模型外推的高估区。MBPO 论文的核心经验结论是「short model-generated rollouts branched from real data has the benefits of more complicated model-based algorithms without the usual pitfalls」——它能「scales to horizons that cause other model-based methods to fail entirely」,样本效率超 prior model-based 方法、渐近性能匹配 best model-free [11]。
+
+下面这个可运行示例把三件事一次看清:**模型误差随 rollout 步数怎么累积、策略怎么被钻到高估区、short-rollout 怎么截断累积**:
+
+<CodeRunner defaultCode={`# model bias 三重病: 误差累积 + 策略钻高估 + short-rollout 截断
+import numpy as np
+
+eps = 0.05  # 模型每步常数偏差
+
+# 真实动力学 vs 带常数偏差的模型
+def f_stable(s):     return 0.9 * s           # 稳定: 误差有界
+def fhat_stable(s):  return 0.9 * s + eps
+def f_unstable(s):   return 1.3 * s           # 不稳定: 误差指数发散
+def fhat_unstable(s): return 1.3 * s + eps
+
+# ============ 【1】误差累积: 模型 rollout 误差随步数增长 ============
+print("=" * 64)
+print("【1】模型误差随 rollout 步数累积 (起点 s0=1.0, 模型偏差 eps=0.05)")
+print("=" * 64)
+s0 = 1.0
+print(f"{'H':>4} {'稳定:真实':>10} {'稳定:模型':>10} {'稳定:误差':>10} "
+      f"{'不稳定:真实':>12} {'不稳定:模型':>12} {'不稳定:误差':>12}")
+for H in [1, 2, 5, 10, 20, 40]:
+    st_t, st_h, un_t, un_h = s0, s0, s0, s0
+    for _ in range(H):
+        st_t = f_stable(st_t);     st_h = fhat_stable(st_h)
+        un_t = f_unstable(un_t);   un_h = fhat_unstable(un_h)
+    print(f"{H:>4} {st_t:>10.4f} {st_h:>10.4f} {abs(st_h-st_t):>10.4f} "
+          f"{un_t:>12.4f} {un_h:>12.4f} {abs(un_h-un_t):>12.4f}")
+print("-> 稳定 (0.9): 误差饱和到 eps/(1-0.9)=0.5 (有界)")
+print("-> 不稳定 (1.3): 误差指数发散, H=40 时 0.05 的偏差被放大到 6000+")
+
+# ============ 【2】策略钻高估: goodhart 式利用模型缺陷 ============
+print("\\n" + "=" * 64)
+print("【2】策略钻模型高估区: 在模型里好, 现实里糟")
+print("=" * 64)
+a = np.linspace(0, 5, 101)
+R_true  = -a**2              # 真实奖励: 峰在 a=0
+R_model = -a**2 + 2.0*a      # 模型: a 大处系统性高估
+a_opt_true = a[np.argmax(R_true)]
+a_opt_model = a[np.argmax(R_model)]
+print(f"真实 R(a)=-a^2  (最优 a* = {a_opt_true:.2f}, 真实奖励 {R_true.max():.2f})")
+print(f"模型 R_hat(a)=-a^2+2a  (在模型里 argmax a* = {a_opt_model:.2f})")
+print(f"  -> 策略被带到大 a, 该处真实奖励 = {R_true[np.argmax(R_model)]:.2f}")
+print(f"  -> 模型以为能拿 {R_model.max():.2f}, 实际只拿到 {R_true[np.argmax(R_model)]:.2f}")
+print("-> 策略不是随机出错, 而是被模型高估区主动吸引 (goodhart 式利用)")
+
+# ============ 【3】short-rollout 缓解: 截断误差累积 (MBPO) ============
+print("\\n" + "=" * 64)
+print("【3】short-rollout 截断误差累积 (MBPO, 不稳定动力学 s'=1.3s)")
+print("=" * 64)
+gamma = 0.99
+def true_v(s0, k):
+    s = s0; v = 0.0
+    for t in range(k):
+        v += gamma**t * (-abs(s)); s = f_unstable(s)
+    return v
+def model_v(s0, k):
+    s = s0; v = 0.0
+    for t in range(k):
+        v += gamma**t * (-abs(s)); s = fhat_unstable(s)
+    return v
+print(f"{'k(rollout步数)':>14} {'真实价值':>10} {'模型价值':>10} {'绝对误差':>10}")
+for k in [1, 2, 5, 10, 20]:
+    vt, vm = true_v(s0, k), model_v(s0, k)
+    print(f"{k:>14} {vt:>10.3f} {vm:>10.3f} {abs(vm-vt):>10.3f}")
+print("-> k=1 (short-rollout, MBPO 风格): 误差极小, 偏差来不及累积")
+print("-> k=20 (long-rollout): 误差巨大, 偏差沿不稳定动力学指数发散")
+print("-> MBPO: 从真实数据分支(起点分布内) + 只走 k 步(截断累积) = 同时治两重病")
+`} />
+
+> 💡 **model bias 是「误差累积 + 策略钻高估」双重病,short-rollout 同时治两病。** 第一重:模型每步小偏差 $\epsilon$ 沿动力学链式放大,稳定动力学有界、不稳定动力学指数发散——所以长 horizon rollout 与真实环境迅速发散。第二重:策略优化 goodhart 式钻进模型高估奖励区,模型越错的地方策略越爱去——「在模型里好、现实里糟」。MBPO 的 short-rollout 从真实数据分支、只走 $k$ 步,$k$ 短截断累积、起点分布内不被带到外推区,一味药治两病。这与本篇开头讲的 model-based 头号难题「模型错了策略就歪」一脉相承,只是 MBPO 把「学准模型」换成「不让模型走太远」——既然模型在长 horizon 不可信,那就只用短 horizon。
+
+Dreamer 的工程化路线是另一条治法:**用潜空间 + 可微想象把「学准模型」这件事做深**(RSSM 把高维像素压到紧凑潜空间、概率潜状态建模内在随机性、free bits 防表征塌缩),让模型本身尽量准;再配合不断用真实数据修正模型、周期性回真实环境校准。DreamerV3 在 55 个 Atari 游戏达人类水平说明工程上可控 [9]。**两条路殊途同归**:MBPO 承认模型不准、用短 horizon 绕过;Dreamer 努力把模型学准、让长 horizon 想象可信。
+
+## 纯规划:模型预测控制(MPC)
+
+前面四类方法里,有一类我们只点了名、还没展开——**纯规划(pure planning)**:不学策略网络,每一步都用模型直接规划出最优动作序列,只执行第一步,到下一状态再重新规划。这就是**模型预测控制(Model-Predictive Control, MPC)**,也叫**滚动时域控制(receding horizon control)** [13]。它是最古老的 model-based RL 形态:工业界用 MPC 控制化工过程、机械臂已有半个世纪,远早于深度 RL。
+
+### 滚动时域:规划 H 步,执行第一步,重规划
+
+MPC 的核心是**滚动时域(receding horizon)**原理:
+
+1. 当前状态 $s_t$,用模型 $\hat f$ 在 horizon $H$ 内规划一条动作序列 $\{a_t, a_{t+1}, \dots, a_{t+H-1}\}$,使累计奖励最大;
+2. **只执行第一步** $a_t$,与环境交互得到 $s_{t+1}$;
+3. 在 $s_{t+1}$ 处**重新规划**一整条新序列,再执行第一步……
+
+「规划窗口」随时间向前滚动,始终只看未来 $H$ 步、只用第一步。这带来两个性质:**反馈性**(每步用最新真实状态重规划,误差不累积——与 MBPO 的 short-rollout 同理);**非最优性**(贪心看 $H$ 步,$H$ 之外的奖励看不到)。$H$ 越大越接近全局最优但模型误差累积越严重、计算越贵——MPC 的核心权衡就是 $H$。
+
+> 💡 **滚动时域 = 把无限 horizon 的最优控制问题,切成一串有限 horizon 的规划问题逐个求解。** 不追求一次规划到底,而是「走一步、看一步、再规划」。这正是人类决策的方式:计划赶不上变化,那就只定下一两步,到了再说。
+
+### 轨迹优化:shooting vs collocation
+
+「规划最优动作序列」本质是一个**轨迹优化(trajectory optimization)**问题——在动作空间里找一个序列,使目标函数(累计奖励)取极值。两类主流参数化:
+
+- **shooting 方法**:决策变量只有动作序列 $\mathbf a=(a_0,\dots,a_{H-1})$,状态由模型递推确定 $\hat s_{t+1}=\hat f(\hat s_t,a_t)$。变量少($H\times|a|$),但目标函数对早期动作高度非线性、梯度链长、易局部最优。衍生出**迭代线性化**方法:iLQR(迭代 LQR)在每步把非线性动力学与奖励**局部线性二次化**,解 LQR 闭式解得到下降方向,更新序列后重复;DDP(differential dynamic programming)在 iLQR 基础上加二阶项。iLQR/DDP 是经典机器人 MPC 的主力。
+- **collocation 方法**:决策变量同时包含状态与动作 $\{s_t,a_t\}$,再加动力学约束 $s_{t+1}=\hat f(s_t,a_t)$ 把它们绑起来。变量多($H\times(|s|+|a|)$)但目标函数结构更好、可处理约束(如关节角限位、安全约束),适合带硬约束的工业控制。
+
+两者权衡:shooting 简单但梯度病态,collocation 鲁棒但变量多。连续控制里往往用 shooting + iLQR/DDP 这条线。
+
+### MPPI:采样 + 信息论加权,免梯度
+
+**模型预测路径积分控制(Model-Predictive Path Integral, MPPI)** [14] 是 trajectory optimization 的另一条路——**采样而非求导**。它在当前 nominal 序列 $\mathbf u$ 周围**采样 $N$ 条扰动轨迹** $\{\Gamma_i\}$,用每条的累计回报 $\phi_{\Gamma_i}$ 做指数加权平均,得到更新后的序列:
+
+$$\phi_{\Gamma_i} = \sum_{t=0}^{H-1}\gamma^t R(s_t,a_t^{(i)}) + \gamma^H\, V(s_H^{(i)}),\qquad \omega_i = \exp\!\big(\tau\,\phi_{\Gamma_i}\big),\qquad \mu = \frac{\sum_i \omega_i\,\Gamma_i}{\sum_i \omega_i}$$
+
+其中 $\tau$ 是温度(越大权重越尖锐偏向高回报轨迹),$V(s_H)$ 是**终端价值**估计 horizon 之外的剩余回报。MPPI 的信息论根源是:指数加权是把采样分布向高回报轨迹做 **KL 投影**的最优解(类似最大熵 RL 里 soft policy 的结构),因此它是一个**免梯度、可并行、对非线性动力学与不可微奖励都鲁棒**的规划器——这正是一线 model-based RL 工作选 MPPI 而非 iLQR 的原因。
+
+> 💡 **终端价值 $V(s_H)$ 是「短 horizon 规划器能看到长 horizon」的关键。** 纯靠 horizon 内的奖励 $R$,MPPI 只能贪心 $H$ 步;把学到的价值函数 $V$ 接在轨迹末端,等于告诉规划器「$s_H$ 之后还有多少油水」,于是短 $H$ 也能表现出长 horizon 行为——这就是下一节 TDMPC 的核心思想。
+
+### TDMPC:在价值空间规划
+
+**TDMPC(Temporal Difference Model Predictive Control,Hansen/Wang/Su 2022)** [15] 把 MPC + MPPI + 学习的价值函数三件套缝成一个端到端可微的 model-based RL 算法,核心口号是**「在价值空间规划(planning in value space)」**:
+
+- **TOLD 模型**(Trajectory-based Optimized Latent Dynamics,5 个 MLP 组件):编码器 $h(o)\to z$(把观测压到潜空间,潜维度 50)、潜动力学 $d(z,a)\to z'$(在潜空间前向推演)、奖励头 $R(z,a)$(预测逐步奖励)、价值头 $Q(z,a)$(twin + LayerNorm + Tanh,估计动作价值,作为 MPPI 的**终端价值**)、策略头 $\pi(z)$(蒸馏规划器,推理时免规划直接出动作)。整套约 150 万参数,纯 MLP 无卷积(图像输入时编码器用浅 CNN)。
+- **MPPI 规划器**:从当前 $z_t$ 用 $d$ 在潜空间 rollout $H=5$ 步,采样 $N=512$ 条扰动动作序列,每条用奖励头 $R$ 算逐步奖励、用价值头 $Q$ 算终端价值,按 MPPI 公式 $\phi_{\Gamma_i}=\gamma^H Q(z_H,a_H)+\sum_t\gamma^t R(z_t,a_t)$ 做指数加权平均,得到规划动作。$H=5$ 极短(模型偏差来不及累积,与 MBPO 的 short-rollout 异曲同工),靠 $Q$ 补 horizon 之外的信号。
+- **训练**:世界模型($h/d/R$)用 TD 学习 + 重建损失在潜空间学;价值头 $Q$ 用 TD$(0,\lambda)$ 学;策略头 $\pi$ 蒸馏 MPPI 规划器的输出(行为克隆)。三者共享潜空间、联合训练。
+- **结果**:DM Control(状态与图像两模态,23 个任务)+ Meta-World(50 个任务)上,样本效率与渐近性能均领先 prior model-based 与 model-free 方法,在 Quadruped 跑步、Dog 翻转、Humanoid 等高维连续控制任务上从零学会;且策略头 $\pi$ 推理时跳过 MPPI 规划,延迟低(适合真机)。
+
+TDMPC 的位置:**它是「纯规划」范式(本节主题)在深度学习时代的代表**——不学显式策略网络(策略头只是规划器的蒸馏,用于推理加速),决策由 MPPI 在学到的模型 + 价值上在线规划产生。这与 AlphaZero(专家迭代把规划蒸馏进策略网络)、Dreamer(在想象轨迹上训策略网络)形成对照:**纯规划派的策略始终是「规划器」本身,策略网络至多是缓存**。
+
+### 谱系:从经典 MPC 到 TDMPC
+
+| 方法 | 模型 | 规划器 | 终端价值 | 策略 |
+|---|---|---|---|---|
+| **经典 MPC** | 解析/系统辨识 | iLQR/DDP(求导) | 可选 | 规划器(无策略网) |
+| **MBMF** [1] | 学习的神经网络 | CEM/MPPI(采样) | 无 | 规划器 |
+| **PETS** [16] | 概率神经网络 | CEM(采样)+ 不确定性 | 无 | 规划器 |
+| **MPPI** [14] | 给定/学习 | 路径积分采样(信息论加权) | 可选 | 规划器 |
+| **TDMPC** [15] | TOLD 潜动力学 | MPPI(潜空间) | $Q(z_H,a_H)$ | 规划器 + 蒸馏策略头 |
+
+脉络:**解析模型 → 学习模型**;**求导规划(iLQR/DDP) → 采样规划(CEM/MPPI)**;**无终端价值 → 学到的 $Q$ 作终端价值**——三步演进汇聚到 TDMPC 的「短 horizon + 终端价值 + MPPI」组合。
+
+下面这个 demo 用一个 1-D 稀疏奖励导航任务,演示 MPC 的滚动时域 + MPPI 加权,以及终端价值如何让短 horizon 规划器表现出长 horizon 行为(目标设在 $s\ge 15$,而 horizon $H=5$、动作上限 $2$ 的单次规划最远只能到 $10$——够不着,必须靠终端价值补信号)。
+
+<CodeRunner defaultCode={`# === MPC: 滚动时域 + MPPI 采样加权 + 终端价值 (TDMPC 思想) ===
+import numpy as np
+
+rng = np.random.default_rng(0)
+
+# 1-D 稀疏奖励导航: 起点 s=0, 目标 s>=15
+# 动作 a in [0,2], 规划 horizon H=5 -> 单次规划最远 reach=10 < 15 (够不着!)
+# 这正是 TDMPC 的处境: 短 horizon 看不到稀疏奖励, 必须靠终端价值补信号
+S_GOAL = 15.0
+A_MAX = 2.0
+H = 5          # 规划 horizon (TDMPC 用 H=5)
+N = 256        # 采样轨迹数 (TDMPC 用 512)
+TAU = 8.0      # MPPI 温度 (大 -> 权重越尖锐偏向高 phi)
+GAMMA = 0.99
+
+def step(s, a):
+    return s + a
+
+def reward_seq(s0, actions):
+    s = s0
+    rs = []
+    for a in actions:
+        s = step(s, a)
+        rs.append(1.0 if s >= S_GOAL else 0.0)
+    return rs, s
+
+def terminal_V(s):
+    # TDMPC 终端价值: Q(z_H, a_H) 估计 s_H 到 goal 的剩余价值 (进度归一化)
+    return min(s, S_GOAL) / S_GOAL
+
+def mppi_plan(s0, nominal, use_value):
+    samples = np.clip(
+        nominal[np.newaxis, :] + rng.normal(0, 0.5, size=(N, H)),
+        0.0, A_MAX
+    )
+    phis = np.zeros(N)
+    for i in range(N):
+        rs, s_H = reward_seq(s0, samples[i])
+        ret = sum((GAMMA ** t) * r for t, r in enumerate(rs))
+        if use_value:
+            ret += (GAMMA ** H) * terminal_V(s_H)   # TDMPC: 规划在价值空间
+        phis[i] = ret
+    w = np.exp(TAU * (phis - phis.max()))
+    w /= w.sum()
+    weighted = (w[:, None] * samples).sum(axis=0)
+    return weighted, phis
+
+def receding_horizon(use_value, n_steps=12):
+    s = 0.0
+    nominal = np.full(H, 0.5)   # 弱 nominal: 没有终端价值时只能贴着它走
+    traj = [s]
+    for _ in range(n_steps):
+        plan, _ = mppi_plan(s, nominal, use_value)
+        a0 = float(np.clip(plan[0], 0.0, A_MAX))
+        s = step(s, a0)
+        traj.append(s)
+        nominal = np.roll(plan, -1)
+        nominal[-1] = 0.5
+        if s >= S_GOAL:
+            break
+    return traj
+
+# --- 【1】 MPPI 加权机制 ---
+print("=== 【1】 MPPI: 采样 N=%d 条轨迹, omega=exp(tau*phi) 加权 ===" % N)
+nominal0 = np.full(H, 0.5)
+plan_v, phis_v = mppi_plan(0.0, nominal0, use_value=True)
+top = np.argsort(phis_v)[::-1][:5]
+print("  phi 范围: min=%.4f max=%.4f (spread=%.4f)" % (phis_v.min(), phis_v.max(), phis_v.max() - phis_v.min()))
+print("  top-5 phi:", [round(float(phis_v[i]), 4) for i in top])
+print("  -> 高 phi 轨迹获大权重 omega, 低 phi 被压低 (信息论 = KL 投影到采样分布)")
+print("  加权平均规划 (前3步):", [round(float(x), 4) for x in plan_v[:3]])
+print()
+
+# --- 【2】 终端价值: 短 horizon 看不到稀疏奖励时的信号源 ---
+print("=== 【2】 终端价值的作用 (H=%d, max reach=%.0f, goal=%.0f -> 够不着) ===" % (H, H * A_MAX, S_GOAL))
+plan_nv, phis_nv = mppi_plan(0.0, nominal0, use_value=False)
+print("  无 V: H 步内全够不着 goal -> phi 全=0 -> 权重均匀 -> 规划~采样均值(贴 nominal)")
+print("    无 V 规划 (前3步):", [round(float(x), 4) for x in plan_nv[:3]], "  phi max=%.4f" % phis_nv.max())
+print("  有 V(s_H)=s_H/goal: 规划在价值空间, 高 s_H 获大权重 -> 推高动作")
+print("    有 V 规划 (前3步):", [round(float(x), 4) for x in plan_v[:3]], "  phi max=%.4f" % phis_v.max())
+print()
+
+# --- 【3】 receding horizon 完整轨迹 ---
+print("=== 【3】 receding horizon: 每步规划 H 步, 执行第一步, 重规划 ===")
+traj_nv = receding_horizon(use_value=False, n_steps=12)
+traj_v = receding_horizon(use_value=True, n_steps=12)
+print("  无 V 轨迹 (12 步):", [round(x, 2) for x in traj_nv])
+print("  有 V 轨迹 (12 步):", [round(x, 2) for x in traj_v])
+def reach_steps(traj):
+    for i, s in enumerate(traj):
+        if s >= S_GOAL - 1e-6:
+            return i
+    return -1
+rn = reach_steps(traj_nv)
+rv = reach_steps(traj_v)
+print("  无 V 到达 goal 步数:", rn if rn > 0 else "未达成(12 步内)")
+print("  有 V 到达 goal 步数:", rv if rv > 0 else "未达成(12 步内)")
+print("  -> 终端价值让短 H 规划器表现出长 horizon 行为: 无 V 贴 nominal 慢爬, 有 V 直奔 goal")
+print()
+
+# --- 【4】 TDMPC MPPI 公式 ---
+print("=== 【4】 TDMPC: phi = gamma^H * Q(z_H,a_H) + sum_{t=0}^{H-1} gamma^t * R(z_t,a_t) ===")
+print("  本 demo: Q(z_H)=s_H/goal (进度价值), R=稀疏到达奖励, gamma=%.2f, H=%d, tau=%.1f" % (GAMMA, H, TAU))
+print("  omega_i = exp(tau * phi_i);  mu = sum(omega_i * a_i) / sum(omega_i)")
+print("  采样 N=%d (TDMPC 原文 N=512, elite top-64); TOLD 模型 5 组件: 编码 h / 动力学 d / 奖励 R / 价值 Q / 策略 pi")
+`} title="MPC 滚动时域 + MPPI 加权 + 终端价值 (TDMPC 思想)" />
+
+> 💡 **「在价值空间规划」是 TDMPC 给纯规划派的最后一击。** 经典 MPC 的短板是 horizon 短了看不到长程奖励、长了模型误差累积;TDMPC 的解法是**短 horizon(模型可信)+ 学到的终端价值 $Q$ 补 horizon 之外的信号**——把「规划」与「价值学习」这两个原本独立的 model-based 工具缝在一起。这与本篇前面 Dreamer 的「在想象轨迹上训策略」、AlphaZero 的「规划蒸馏进策略」是三条不同的「规划+学习」融合路线:**TDMPC 让规划器始终在线、价值做眼睛;Dreamer 让规划退化为想象、策略做执行;AlphaZero 让规划做老师、策略做学生**。
+
+## 不确定性感知模型:PETS
+
+前面 MPC 一节假设模型是**确定性**的——给 $(s,a)$ 吐一个 $s'$。但真实环境本身有噪声(传感器抖动、随机扰动),且离线数据只覆盖了状态空间的一小块,$s>2$ 这种没采过的区域模型到底信不信得过?PETS(Probabilistic Ensembles with Trajectory Sampling,Chua/Calandra/McAllister/Levine NeurIPS 2018 [16])的回答是:**让模型自己知道自己「不确定到哪里」**,再把这份不确定性如实传给规划器。
+
+### 两种不确定性:aleatoric vs epistemic
+
+PETS 的整个设计围绕区分两种本质不同的不确定性:
+
+- **aleatoric 不确定性(数据内在随机)**:环境本身的随机性,比如真实转移 $s'=0.9s+0.5a+\mathcal{N}(0,0.3)$ 里那个 $0.3$ 方差。**再多数据也消不掉**——你采一百万条样本,这一步该抖还是抖。
+- **epistemic 不确定性(认知不足)**:因为数据不够,模型对某些区域没把握。$s\in[-2,2]$ 采过、$s>2$ 没采过,那 $s=5$ 处模型给什么预测都是外推。**多采数据能消**——补几条 $s>2$ 的样本,分歧就收缩。
+
+这两者必须分开计量:一个模型如果只知 aleatoric(「这步有 $0.3$ 噪声」)却不知 epistemic(「$s=5$ 我根本没见过」),规划器就会在 OOD 区域自信地乱冲;反过来只知 epistemic 不知 aleatoric,会把固有噪声当点预测,规划过自信。PETS 的核心贡献是**一个模型同时抓住两者、且可分离**。
+
+### 四类模型变体:D < P < DE < PE
+
+PETS 论文 Table 1 把「用什么模型」拆成四种,对应「抓住哪种不确定性」:
+
+| 变体 | 结构 | aleatoric | epistemic |
+|---|---|---|---|
+| **D**(确定性网络) | 输出点预测 $\hat s'=f_\theta(s,a)$,MSE 训练 | ✗ | ✗ |
+| **P**(概率网络) | 输出 Gaussian $\mathcal{N}(\mu_\theta,\Sigma_\theta)$,负对数似然训练 | ✓ | ✗ |
+| **DE**(确定性集成) | $B$ 个 bootstrap 确定性网络,分歧当 epistemic | ✗ | ✓ |
+| **PE**(概率集成) | $B$ 个 bootstrap 概率网络 | ✓ | ✓ |
+
+- **D** 就是普通回归网络,既不给噪声也不给分歧,OOD 也敢吐一个数——前面「模型偏差」一节讲的 goodhart 钻模型漏洞就是这么来的。
+- **P** 让网络多输出一个方差 $\Sigma_\theta(s,a)$(异方差 Gaussian),用负对数似然 $\text{loss}=-\sum_n\log\tilde f_\theta(s_{n+1}|s_n,a_n)$ 训练。它知道「这步有 $0.3$ 噪声」,但只有一个网络,OOD 处**不知道自己不知道**——方差估计本身也是外推的。
+- **DE** 训 $B$ 个(原文 $B=5$)bootstrap 确定性网络,每个在自己的重采样子集上拟合。OOD 处 $B$ 条预测**分歧大**(epistemic),但每条都是点预测,没有 aleatoric。
+- **PE**(PETS 的模型)是 $B$ 个 bootstrap 概率网络的集成。每个网络既给均值也给方差,**集成均值间的方差 = epistemic、各网络自己的方差均值 = aleatoric**——两者天然可分离。
+
+实验结论是一个干净的排序:**PE > P > DE > D**。两种不确定性缺一不可。
+
+### 轨迹采样:TS1 vs TS-inf,把不确定性传给规划器
+
+光有一个会吐不确定性的模型还不够——规划器要往前看 $H$ 步,得把**单步不确定性沿 rollout 累积传播**成轨迹分布。PETS 用**粒子滤波式**的轨迹采样(Trajectory Sampling):维护 $P$ 个粒子(原文 $P=20$),每步每个粒子从一个 bootstrap 模型采样下一步:
+
+$$s_{t+1}^{(p)} \sim \tilde f_{\theta_{b(p,t)}}(s_t^{(p)}, a_t)$$
+
+关键区别在**下标 $b(p,t)$ 怎么随时间演化**:
+
+- **TS1**:每个粒子**每步重抽**一个 bootstrap 模型 $b(p,t)$,每步都换。粒子之间没法稳定地分到某个模型旗下,多模态被抹平——论文称之为「对轨迹多模态的软约束」。好处是粒子间随机化充分,坏处是**没法分离 aleatoric/epistemic**:没有「同一模型的粒子组」这个概念。
+- **TS-inf**:每个粒子**全程绑定**一个 bootstrap 模型 $b(p,0)$,rollout 期间不变。粒子按模型自然分簇:同模型的粒子间方差 = aleatoric(固有噪声),不同模型均值间方差 = epistemic(模型分歧)。**aleatoric 与 epistemic 可分离**——这是 PETS 用 TS-inf 的关键理由。
+
+> 💡 **为什么「全程绑定一个模型」才能分离两种不确定性?** 想象 5 个 bootstrap 模型对 $s=5$ 给出 5 个不同均值的预测——这是 epistemic(模型间分歧,数据不够)。每个模型自己还吐一个方差——这是 aleatoric(固有噪声)。TS-inf 把 $P$ 个粒子按模型分到 5 组,**组内方差**度量「同模型内随机」(aleatoric),**组均值间方差**度量「模型间分歧」(epistemic)。TS1 每步重抽模型,粒子上一秒在模型 A、下一秒在模型 B,没有稳定的「同模型组」,这种分解就做不出来了。
+
+### MPC + CEM:用不确定性做规划
+
+PETS 的规划器是 **MPC + CEM**(Cross-Entropy Method),与前面 MPC 一节的 MPPI 同属「采样式规划」,但 CEM 选 elite 的方式不同:每轮采样 $N$ 条动作序列,用 TS-inf 粒子 rollout PE 模型评估每条的期望回报,选 top-$K$ elite,用 elite 的均值/方差更新下一轮采样分布,迭代几轮后取首步动作执行(receding horizon)。CEM 在高维动作空间显著优于随机搜索,这是 PETS 选 CEM 而非 random shooting 的实证依据。
+
+整套 PETS = **PE 模型(知不确定性) + TS-inf(传播不确定性) + MPC/CEM(用不确定性规划)**。它的定位在前面 MPC 谱系表里是第 3 行:**学习的概率神经网络模型 + CEM 采样 + 不确定性**——比 MBMF 多了「不确定性感知」,比 TDMPC 少了「学到的终端价值」(PETS 用 $H$ 步 rollout 估回报,没有 $Q$ 补 horizon)。它的报偿是惊人的样本效率:在 half-cheetah 上,PETS 达到 SAC 同等性能只用 $1/8$ 的样本、PPO 的 $1/125$。代价是每步要跑 $B$ 个模型前向 + $P$ 粒子 rollout + CEM 迭代,计算远重于 model-free。
+
+### 谱系:PETS 在「纯规划」演进里的位置
+
+PETS 填的是经典 MPC 与 TDMPC 之间的**「模型该多相信」**这一步:
+
+| 步骤 | 代表 | 模型可信度假设 |
+|---|---|---|
+| 经典 MPC | 解析模型 | 完全可信(模型即真理) |
+| MBMF | 学习的确定性网络 | 点预测可信 |
+| **PETS** | **概率集成** | **可信但要带不确定性** |
+| TDMPC | TOLD 潜动力学 + 学到的 $Q$ | 短 horizon 可信 + 价值补长程 |
+
+PETS 把「模型偏差」从「假装不存在」升级为「显式建模并传给规划器」,但 horizon 仍受限于 rollout 长度(没有终端价值)——这正是 TDMPC 接下来要补的拼图。下面这个 demo 演示四类模型变体的不确定性差异、TS1 与 TS-inf 的轨迹分布形态、以及 TS-inf 如何分离两种不确定性。
+
+<CodeRunner defaultCode={`# === PETS: 概率集成 + 轨迹采样 (TS1/TS-inf) + MPC/CEM 规划 ===
+import numpy as np
+
+rng = np.random.default_rng(0)
+
+# --- toy 动力学: 1-D 状态 s, 动作 a, 真实转移 s_{t+1} = 0.9*s + 0.5*a + eps, eps~N(0,0.3) (aleatoric)
+# --- 离线数据: 只在 s in [-2,2] 采过 (support), s>2 是 OOD
+N_DATA = 60
+s_data = rng.uniform(-2, 2, N_DATA)
+a_data = rng.uniform(-1, 1, N_DATA)
+s_next_data = np.array([0.9 * s_data[i] + 0.5 * a_data[i] + rng.normal(0, 0.3) for i in range(N_DATA)])
+
+# === 【1】四类模型变体: D / P / DE / PE (Table 1) ===
+# B=5 个 bootstrap 子集; 概率网络输出 Gaussian (mu, var); 特征 phi(s,a)=[1,s,a,s^2,a^2,s*a]
+B = 5
+boot_idx = [rng.integers(0, N_DATA, size=N_DATA) for _ in range(B)]
+boot_s = [s_data[idx] for idx in boot_idx]
+boot_a = [a_data[idx] for idx in boot_idx]
+boot_sn = [s_next_data[idx] for idx in boot_idx]
+
+def feat(s, a):
+    return np.array([1.0, s, a, s*s, a*a, s*a])
+
+def fit_gauss_linear(S, A, Sn):
+    # 概率网络: mu = w^T phi (最小二乘), var = 残差方差 (aleatoric, 演示用)
+    X = np.array([feat(s, a) for s, a in zip(S, A)])
+    w, *_ = np.linalg.lstsq(X.T @ X + 1e-3 * np.eye(6), X.T @ Sn, rcond=None)
+    resid = Sn - X @ w
+    var = np.mean(resid ** 2) + 0.01
+    return w, var
+
+def fit_det_linear(S, A, Sn):
+    # 确定性网络: 只输出 mu
+    X = np.array([feat(s, a) for s, a in zip(S, A)])
+    w, *_ = np.linalg.lstsq(X.T @ X + 1e-3 * np.eye(6), X.T @ Sn, rcond=None)
+    return w
+
+# 训练 4 种模型
+w_D = fit_det_linear(s_data, a_data, s_next_data)
+w_P, var_P = fit_gauss_linear(s_data, a_data, s_next_data)
+w_DE = [fit_det_linear(boot_s[b], boot_a[b], boot_sn[b]) for b in range(B)]
+w_PE = [fit_gauss_linear(boot_s[b], boot_a[b], boot_sn[b]) for b in range(B)]
+
+s_test_in, a_test = 1.0, 0.5
+s_test_ood = 5.0
+
+print("=== 【1】四类模型变体: D < P < DE < PE (Table 1) ===")
+print("  测试点: support 内 (s=%.1f, a=%.1f), OOD (s=%.1f, a=%.1f)" % (s_test_in, a_test, s_test_ood, a_test))
+print("  真实动力学: s' = 0.9*s + 0.5*a, support 内 s'=%.3f, OOD s'=%.3f" % (0.9*s_test_in+0.5*a_test, 0.9*s_test_ood+0.5*a_test))
+print()
+
+pred_D_in = feat(s_test_in, a_test) @ w_D
+pred_D_ood = feat(s_test_ood, a_test) @ w_D
+print("  [D] 确定性网络: support 内 s'=%.3f, OOD s'=%.3f  <- 不给不确定性, OOD 也敢预测一个数" % (pred_D_in, pred_D_ood))
+
+pred_P_in = feat(s_test_in, a_test) @ w_P
+pred_P_ood = feat(s_test_ood, a_test) @ w_P
+print("  [P] 概率网络: support 内 s'=%.3f+/-%.3f, OOD s'=%.3f+/-%.3f  <- 只知 aleatoric, OOD 不知自己不知道" % (pred_P_in, np.sqrt(var_P), pred_P_ood, np.sqrt(var_P)))
+
+preds_DE_in = np.array([feat(s_test_in, a_test) @ w for w in w_DE])
+preds_DE_ood = np.array([feat(s_test_ood, a_test) @ w for w in w_DE])
+print("  [DE] 确定性集成 (B=%d): support 内 均值=%.3f 分歧 std=%.3f, OOD 均值=%.3f 分歧 std=%.3f  <- OOD 分歧=epistemic, 无 aleatoric" % (B, preds_DE_in.mean(), preds_DE_in.std(), preds_DE_ood.mean(), preds_DE_ood.std()))
+
+mus_PE_in = np.array([feat(s_test_in, a_test) @ w for w, v in w_PE])
+vars_PE_in = np.array([v for w, v in w_PE])
+mus_PE_ood = np.array([feat(s_test_ood, a_test) @ w for w, v in w_PE])
+vars_PE_ood = np.array([v for w, v in w_PE])
+epistemic_in = mus_PE_in.var()
+aleatoric_in = vars_PE_in.mean()
+epistemic_ood = mus_PE_ood.var()
+aleatoric_ood = vars_PE_ood.mean()
+print("  [PE] 概率集成 (B=%d) <- PETS 模型:" % B)
+print("       support 内: 均值=%.3f, epistemic(分歧)=%.4f, aleatoric(噪声)=%.4f" % (mus_PE_in.mean(), epistemic_in, aleatoric_in))
+print("       OOD:        均值=%.3f, epistemic(分歧)=%.4f, aleatoric(噪声)=%.4f" % (mus_PE_ood.mean(), epistemic_ood, aleatoric_ood))
+print("  -> PE 在 OOD 处 epistemic 飙升(%.4f->%.4f), aleatoric 稳定(%.4f->%.4f): 两种不确定性可分离!" % (epistemic_in, epistemic_ood, aleatoric_in, aleatoric_ood))
+print("  -> 性能排序 (Table 1): PE > P > DE > D  (PE 同时抓住两种不确定性)")
+print()
+
+# === 【2】轨迹采样 TS1 vs TS-inf: 粒子如何在 ensemble 上传播 ===
+P_PARTICLES = 20
+H = 10
+s0 = 1.0
+a_seq = np.full(H, 0.3)
+
+def rollout_TS1(s0, a_seq, w_PE, n_particles, seed=0):
+    # TS1: 每个粒子每步重新随机抽一个 bootstrap 模型
+    rng_t = np.random.default_rng(seed)
+    particles = np.full(n_particles, s0)
+    for t in range(len(a_seq)):
+        a = a_seq[t]
+        new_particles = np.empty(n_particles)
+        for p in range(n_particles):
+            b = rng_t.integers(0, B)
+            w, var = w_PE[b]
+            mu = feat(particles[p], a) @ w
+            new_particles[p] = rng_t.normal(mu, np.sqrt(var))
+        particles = new_particles
+    return particles
+
+def rollout_TSinf(s0, a_seq, w_PE, n_particles, seed=0):
+    # TS-inf: 每个粒子全程绑定一个 bootstrap 模型
+    rng_t = np.random.default_rng(seed)
+    particle_b = rng_t.integers(0, B, size=n_particles)
+    particles = np.full(n_particles, s0)
+    for t in range(len(a_seq)):
+        a = a_seq[t]
+        new_particles = np.empty(n_particles)
+        for p in range(n_particles):
+            b = particle_b[p]
+            w, var = w_PE[b]
+            mu = feat(particles[p], a) @ w
+            new_particles[p] = rng_t.normal(mu, np.sqrt(var))
+        particles = new_particles
+    return particles
+
+part_TS1 = rollout_TS1(s0, a_seq, w_PE, P_PARTICLES, seed=1)
+part_TSinf = rollout_TSinf(s0, a_seq, w_PE, P_PARTICLES, seed=1)
+
+print("=== 【2】轨迹采样 TS1 vs TS-inf (P=%d 粒子, B=%d 模型, H=%d 步) ===" % (P_PARTICLES, B, H))
+print("  初始 s0=%.1f, 动作序列 a=%.1f (恒定), 真实 H 步后 s=%.3f" % (s0, a_seq[0], 0.9**H*s0 + 0.5*a_seq[0]*(1-0.9**H)/0.1))
+print("  TS1 (每步重抽模型):    粒子均值=%.3f, 粒子 std=%.3f" % (part_TS1.mean(), part_TS1.std()))
+print("  TS-inf (全程绑定模型): 粒子均值=%.3f, 粒子 std=%.3f" % (part_TSinf.mean(), part_TSinf.std()))
+N_RO = 200
+TS1_finals = np.array([rollout_TS1(s0, a_seq, w_PE, P_PARTICLES, seed=i).mean() for i in range(N_RO)])
+TSinf_finals = np.array([rollout_TSinf(s0, a_seq, w_PE, P_PARTICLES, seed=i).mean() for i in range(N_RO)])
+print("  重复 %d 次 rollout 的粒子均值分布:" % N_RO)
+print("    TS1:    均值=%.3f, std=%.4f  <- 每步重抽, 粒子间多模态被抹平" % (TS1_finals.mean(), TS1_finals.std()))
+print("    TS-inf: 均值=%.3f, std=%.4f  <- 全程绑定, 粒子按模型分簇, 保留多模态" % (TSinf_finals.mean(), TSinf_finals.std()))
+print()
+
+# === 【3】TS-inf 分离 aleatoric / epistemic (PETS 关键性质) ===
+print("=== 【3】TS-inf 分离 aleatoric / epistemic (PETS 关键性质) ===")
+def rollout_TSinf_grouped(s0, a_seq, w_PE, n_particles, seed=0):
+    rng_t = np.random.default_rng(seed)
+    particle_b = np.tile(np.arange(B), n_particles // B + 1)[:n_particles]
+    rng_t.shuffle(particle_b)
+    particles = np.full(n_particles, s0)
+    for t in range(len(a_seq)):
+        a = a_seq[t]
+        new_particles = np.empty(n_particles)
+        for p in range(n_particles):
+            b = particle_b[p]
+            w, var = w_PE[b]
+            mu = feat(particles[p], a) @ w
+            new_particles[p] = rng_t.normal(mu, np.sqrt(var))
+        particles = new_particles
+    return particles, particle_b
+
+parts, pb = rollout_TSinf_grouped(s0, a_seq, w_PE, P_PARTICLES, seed=42)
+group_means = np.array([parts[pb == b].mean() for b in range(B)])
+group_vars = np.array([parts[pb == b].var() for b in range(B)])
+aleatoric_est = group_vars.mean()
+epistemic_est = group_means.var()
+print("  TS-inf 把 %d 粒子按 B=%d 模型分组, 每组 %d 粒子:" % (P_PARTICLES, B, P_PARTICLES // B))
+print("    组内方差均值 (aleatoric, 同模型内随机噪声): %.4f" % aleatoric_est)
+print("    组均值间方差 (epistemic, 模型间分歧):      %.4f" % epistemic_est)
+print("  -> TS1 做不到这种分离: 粒子每步换模型, 没有'同模型的粒子组'概念")
+print()
+
+# === 【4】MPC + CEM 规划 (PE 模型 + TS-inf 传播) ===
+print("=== 【4】MPC + CEM 规划 (PE 模型 + TS-inf 传播) ===")
+def cem_plan(s0, w_PE, H_plan=5, n_samples=200, n_elite=20, n_iter=3, seed=0):
+    rng_t = np.random.default_rng(seed)
+    mu = np.zeros(H_plan)
+    std = np.ones(H_plan)
+    for it in range(n_iter):
+        A = mu + std * rng_t.normal(0, 1, (n_samples, H_plan))
+        A = np.clip(A, -1, 1)
+        P_PLAN = 10
+        rewards = np.zeros(n_samples)
+        for i in range(n_samples):
+            a_seq_i = A[i]
+            particles = np.full(P_PLAN, s0)
+            particle_b = rng_t.integers(0, B, size=P_PLAN)
+            total_r = 0.0
+            for t in range(H_plan):
+                a = a_seq_i[t]
+                new_particles = np.empty(P_PLAN)
+                for p in range(P_PLAN):
+                    b = particle_b[p]
+                    w, var = w_PE[b]
+                    mu_p = feat(particles[p], a) @ w
+                    new_particles[p] = rng_t.normal(mu_p, np.sqrt(var))
+                particles = new_particles
+                total_r += -np.abs(particles.mean() - 4.0)
+            rewards[i] = total_r
+        elite_idx = np.argsort(rewards)[-n_elite:]
+        elite = A[elite_idx]
+        mu = elite.mean(axis=0)
+        std = elite.std(axis=0)
+    return mu, std
+
+s0_plan = 0.0
+plan_mu, plan_std = cem_plan(s0_plan, w_PE, H_plan=5, n_samples=200, n_elite=20, n_iter=3, seed=7)
+print("  目标: s0=%.1f -> s>=4.0, 动作 a in [-1,1], horizon H=5" % s0_plan)
+print("  CEM: 3 轮迭代, 每轮 200 序列, elite top-20, 每序列 10 粒子 TS-inf 评估")
+print("  规划出的动作序列 (前 5 步): %s" % np.round(plan_mu, 3))
+a_first = np.clip(plan_mu[0], -1, 1)
+s_real = 0.9 * s0_plan + 0.5 * a_first
+print("  执行第一步 a=%.3f, 真实 s_1=%.3f (receding horizon: 每步重规划)" % (a_first, s_real))
+print("  -> PETS = PE 模型(知不确定性) + TS-inf(传播不确定性) + MPC/CEM(用不确定性规划)")
+print()
+
+# === 【5】样本效率 (原文 half-cheetah) ===
+print("=== 【5】样本效率 (原文 half-cheetah) ===")
+print("  PETS: 8x fewer samples than SAC, 125x fewer than PPO (达同等渐近性能)")
+print("  关键: 模型学得好 + 不确定性感知 -> 每条真实样本都被模型'放大'成多条想象经验")
+print("  代价: 每步要跑 B 个模型前向 + P 粒子 rollout + CEM 规划, 计算重于 model-free")
+print()
+
+# === 【6】两种不确定性为何缺一不可 ===
+print("=== 【6】两种不确定性 (aleatoric vs epistemic) 为何缺一不可 ===")
+print("  aleatoric (数据内在噪声): 真实转移 s'=0.9s+0.5a+N(0,0.3) 的 0.3 方差, 多采数据也消不掉")
+print("  epistemic (数据不足):    OOD 区域 s>2 没采过, 模型不知道, 多采数据能消")
+print("  D:  两者皆无  -> OOD 也敢给点预测, 最危险 (goodhart 钻模型漏洞)")
+print("  P:  有 aleatoric 无 epistemic -> 知道噪声, 但 OOD 不知自己不知道 (低估风险)")
+print("  DE: 有 epistemic 无 aleatoric -> 知道分歧, 但把固有噪声当点预测 (规划过自信)")
+print("  PE: 两者皆有  -> OOD epistemic 飙升提醒'别信', aleatoric 保留'固有随机', 规划最稳")
+`} title="PETS: 概率集成 + 轨迹采样 (TS1/TS-inf) + MPC/CEM 规划" />
+
+> 💡 **PETS 与 BEAR 的 ensemble 是「同一味药治两种病」。** BEAR(本站[离线强化学习](/tutorials/offline-rl)教程)用 $K$ 个 Q 网络的集成 $\min$ 抑制 OOD 动作的高估——ensemble 分歧 = 「这个动作我不确定、别选」,是**悲观主义**的用法。PETS 用 $B$ 个动力学模型的集成传播 epistemic——ensemble 分歧 = 「这片区域我没数据、规划器当心」,是**风险感知**的用法。同一个「集成即不确定性」思想,在 model-free 的 Q 侧压高估、在 model-based 的转移侧传风险,两处呼应。
+
+## 离线设定:当模型不能再去环境验证
+
+前面所有方法——Dyna-Q、MCTS、AlphaZero、MuZero、Dreamer、MPC、PETS——都假设智能体**还能继续和环境交互**:模型 rollout 出错时,真去环境跑几步就能发现并修正模型,这是在线 model-based RL 的安全网。但若数据是**离线**采集的静态集(不能再交互),这条安全网就断了:**模型外推到 support 外不可信,且没有环境验证来修正**——策略可能钻进模型错误预测高回报的区域,在模型里表现好、现实里崩。这就是**离线 model-based RL** 要解决的核心问题:**怎么用模型外推,又不被模型骗**[17][18]。
+
+### 在线 vs 离线:安全网的有无
+
+| 维度 | 在线 model-based(Dreamer/MuZero/PETS) | 离线 model-based(MOPO/MOReL) |
+|---|---|---|
+| 能否再交互 | ✅ 模型错了可真去环境验证修正 | ❌ 只有静态数据集,不能再交互 |
+| ensemble 不确定性用途 | **风险感知规划**(PETS:把 epistemic 传给规划器当心) | **悲观主义**(MOPO/MOReL:在不确定处假设最坏) |
+| 模型外推到 support 外 | 错了能在线修正 | 不可信且无修正,策略可能被模型骗 |
+| 安全保证 | 无(靠在线修正兜底) | MOReL:P-MDP 回报是真实回报下界 |
+
+关键洞见:**同一个「学模型 + ensemble 不确定性」框架,在线时用来风险感知(规划器当心不确定区域)、离线时用来悲观(在不确定处假设最坏)**。区别在于有没有环境这个「裁判」——有裁判时不确定性是「提示」,没裁判时不确定性是「禁区」。
+
+### MOPO:悲观奖励 = 模型均值 − λ·不确定性
+
+**MOPO**(Model-based Offline Policy Optimization,Yu et al., NeurIPS 2020 [17])给出最直接的答案:**别相信模型不确定的地方**。训一个动力学模型的 ensemble(5-10 个模型,不同初始化/bootstrap 子集),对 $(s,a)$ 既有均值预测 $\mu(s,a)$ 也有分歧 $\sigma(s,a)$(模型间标准差)。support 内数据见过、ensemble 一致 $\sigma$ 小;support 外没见过、各凭外推 $\sigma$ 大——**ensemble 分歧就是「离 support 有多远」的度量**。MOPO 把它变成奖励惩罚,构造**悲观奖励**:
+
+$$\tilde r(s,a)=r(s,a)-\lambda\,\sigma(s,a)$$
+
+然后用模型 rollout 生成虚拟数据,在这些数据上用**任意**标准 RL 算法(PPO/SAC 都行)训策略——奖励用 $\tilde r$ 而非 $r$。效果:策略走到 support 外时 $\sigma$ 大、$\tilde r$ 被压低、没动力往那走;留在 support 内 $\sigma$ 小、$\tilde r\approx r$、正常学。$\lambda$ 控制悲观程度:$\lambda\to0$ 退化为普通 model-based(会被模型骗),$\lambda$ 大则高度保守。理论上 MOPO 最大化真实 MDP 回报的一个**下界**,刻画「离开 support 的收益与风险」权衡。
+
+### MOReL:悲观动力学,不压奖励改转移
+
+**MOReL**(Model-based Offline RL,Kidambi et al., NeurIPS 2020 [18])走另一条路:**不惩罚奖励,构造悲观的动力学模型**。学一个 ensemble,用它构造**悲观 MDP(P-MDP)**:support 外区域的转移被改成「不利的」(掉进吸收态 / 转到低回报状态),等效「模型不确定 → 假设最坏情况发生」,在 P-MDP 上学策略。关键性质:**对任意策略 $\pi$,它在 P-MDP 里的回报是真实环境回报的下界** $v^\pi_{\text{P-MDP}}\le v^\pi_{\text{real}}$——在 P-MDP 上学的「最优」策略在真实环境至少不会更差(下界保证),避免被模型误差骗。MOPO 与 MOReL 对照:MOPO 悲观 reward(奖励侧加惩罚项)、MOReL 悲观动力学(转移侧改不利),两者都是「学模型 + 在模型不确定处悲观」,实现路径不同但哲学一致。
+
+下面这个玩具演示**离线设定如何破坏在线安全网**,以及 MOPO 的悲观奖励如何把策略从 OOD 假高回报区压回 support 内。
+
+<CodeRunner defaultCode={`import numpy as np
+
+rng = np.random.default_rng(0)
+
+# toy: 真实动力学 s' = 0.5s + 1.2sin(s) + 0.3a (非线性)
+# 离线数据只在 s in [0, 1.5] 采 (support = [0, 1.5]); s > 1.5 是 OOD
+def true_dynamics(s, a):
+    return 0.5 * s + 1.2 * np.sin(s) + 0.3 * a
+
+def features(s, a):
+    return np.array([1.0, s, a, s*s, s*a, a*a, s**3])
+
+N_MODELS = 6
+support_data_s = rng.uniform(0, 1.5, 60)
+support_data_a = rng.uniform(-1, 1, 60)
+support_data_s_next = np.array([true_dynamics(s, a) for s, a in zip(support_data_s, support_data_a)])
+
+models = []
+for i in range(N_MODELS):
+    idx = rng.choice(60, size=40, replace=True)
+    X = np.array([features(support_data_s[j], support_data_a[j]) for j in idx])
+    y = support_data_s_next[idx]
+    W, *_ = np.linalg.lstsq(X.T @ X + 1e-3 * np.eye(7), X.T @ y, rcond=None)
+    models.append(W)
+
+def ensemble_predict(s, a):
+    preds = np.array([features(s, a) @ W for W in models])
+    return float(preds.mean()), float(preds.std())
+
+# === 【1】在线 vs 离线: 安全网的有无 ===
+print("=== 【1】在线 vs 离线 model-based RL: 安全网的有无 ===")
+print("  [在线] 模型 rollout 错了 -> 真去环境交互验证 -> 修正模型 (安全网)")
+print("         Dreamer/MuZero/PETS 都依赖这个: 模型不准可以在线修正")
+print("  [离线] 只有静态数据集, 不能再交互 -> 模型外推到 support 外不可信")
+print("         且无环境验证修正 -> 策略可能钻进模型错误预测高回报的区域 (被模型骗)")
+print("  -> 离线 model-based 的核心问题: 怎么用模型外推, 又不被模型骗")
+print()
+
+# === 【2】ensemble 分歧: support 内小, support 外大 ===
+print("=== 【2】ensemble 分歧 = 模型不确定性: support 内小, support 外大 ===")
+print("  真实动力学 s' = 0.5s + 1.2sin(s) + 0.3a, 离线数据只在 s in [0,1.5] 采")
+test_states = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+for s in test_states:
+    mu, sigma = ensemble_predict(s, 0.0)
+    true_v = true_dynamics(s, 0.0)
+    in_support = "<- support 内" if s <= 1.5 else "<- support 外 (OOD)"
+    print("    s=%.1f  ensemble mu=%.3f  sigma=%.4f  真值=%.3f  %s" % (s, mu, sigma, true_v, in_support))
+print("  -> support 内 ensemble 一致 (sigma 小), support 外各凭外推 (sigma 大)")
+print("     ensemble 分歧 = '离 support 有多远' 的度量")
+print()
+
+# === 【3】被模型骗: 无悲观时策略钻进 OOD 假高回报区 ===
+print("=== 【3】被模型骗: 无悲观时策略钻进 OOD 假高回报区 ===")
+candidates_s = np.arange(0.0, 4.1, 0.1)
+mu_all = np.array([ensemble_predict(s, 0.0)[0] for s in candidates_s])
+best_naive = candidates_s[int(np.argmax(mu_all))]
+print("  无悲观策略 argmax mu(s): s = %.2f  (support 外, 模型外推的假高回报)" % best_naive)
+print("  -> 模型在 OOD 区可能错误预测高回报, 策略钻进去 -> 现实里崩 (model bias)")
+print()
+
+# === 【4】MOPO: 悲观 reward = mu - lambda*sigma 把策略压回 support ===
+print("=== 【4】MOPO: 悲观 reward = mu - lambda*sigma, 把策略压回 support 内 ===")
+lam = 8.0
+mopo_reward = np.array([ensemble_predict(s, 0.0)[0] - lam * ensemble_predict(s, 0.0)[1] for s in candidates_s])
+best_mopo = candidates_s[int(np.argmax(mopo_reward))]
+print("  lambda = %.1f, MOPO argmax (mu - lambda*sigma): s = %.2f  (压回 support 内)" % (lam, best_mopo))
+print("  -> OOD 区 sigma 大, 悲观 reward 被压低, 策略没动力往那走")
+print("     support 内 sigma 小, 悲观 reward ~ mu, 正常学")
+print("  -> lambda 控悲观: lambda->0 退化普通 model-based (会被骗), lambda 大高度保守")
+print()
+
+# === 【5】MOReL: 悲观动力学 (不压 reward, 改转移) ===
+print("=== 【5】MOReL: 悲观动力学 (不压 reward, 改转移) ===")
+print("  MOPO: 奖励侧加惩罚 -> r_tilde = r - lambda*sigma")
+print("  MOReL: 转移侧改不利 -> support 外的 s' 被改成'不利'转移 (掉吸收态/低回报)")
+print("  两者都是'学模型 + 在模型不确定处悲观', 实现路径不同哲学一致")
+print("  MOReL 关键性质: P-MDP 上任意策略的回报是真实回报的下界 v^pi_P-MDP <= v^pi_real")
+print("     -> 在 P-MDP 上学的'最优'策略在真实环境至少不会更差 (下界保证)")
+print()
+
+# === 【6】对照: 在线 model-based vs 离线 model-based ===
+print("=== 【6】对照: 在线 vs 离线 model-based RL ===")
+print("  在线 (Dreamer/MuZero/PETS):")
+print("    模型 rollout 错了可以真去环境验证修正, ensemble 不确定性用来'风险感知规划'")
+print("  离线 (MOPO/MOReL):")
+print("    没有环境验证, ensemble 不确定性用来'悲观' (压 reward 或改转移)")
+print("  -> 同一个'学模型 + ensemble 不确定性'框架, 在线=风险感知, 离线=悲观主义")
+print("     这与 model-free offline RL (CQL/BEAR/IQL) 的悲观主义同源, 只是从 Q 侧搬到模型侧")
+`} title="离线 model-based RL: 在线安全网失效 + MOPO/MOReL 悲观模型" />
+
+> 💡 **一句话**:离线 model-based RL = world model 思想(学模型 + 用模型 rollout)在**不能再去环境验证**时的「带安全约束」版本——在线时 ensemble 不确定性是「风险感知提示」(规划器当心),离线时变成「悲观禁区」(压 reward 或改转移)。MOPO/MOReL 把 model-free offline RL(CQL/BEAR/IQL)的悲观主义从 Q 侧搬到模型侧:同一个「别去数据没见过的地方」哲学,前者压 Q 函数、后者压环境模型。完整的算法推导与五大家族对照见 [offline-rl 篇](/tutorials/offline-rl)。
+
+## 四类 model-based 方法一览
+
+Spinning Up 把 model-based RL 分成四类 [1],上面四类都已展开:
+
+| 范式 | 做法 | 代表 |
+|---|---|---|
+| **纯规划** | 不学策略,每步用模型 MPC 规划最优动作序列,只执行第一步,下一步重规划 | MBMF |
+| **专家迭代** | 规划器(MCTS)产出高质量落子,策略网络模仿它;网络变强后反哺规划器 | AlphaZero、ExIt |
+| **数据增强** | 模型生成模拟经验,加到真实经验里一起训练免模型算法 | Dyna-Q、MBVE、World Models |
+| **规划嵌入策略** | 把规划当作策略网络里的一个子程序,让策略学会「何时用、怎么用」规划 | I2A |
+
+## 典型案例:基于模型的方法都用在哪
+
+| 系统 | 用到的方法 | 为什么用 model-based |
+|---|---|---|
+| **AlphaGo / AlphaZero** | MCTS + 神经网络(专家迭代) | 棋类规则已知可作完美模型,MCTS 搜索深度 + 网络评估 = 超人类 |
+| **muZero** | 学习隐式模型(不依赖已知规则) | Atari/棋类统一框架,既学模型又学策略,无需给定环境规则 |
+| **Dreamer 系列** | 潜空间世界模型 + 想象训练 | 样本效率高,适合真实机器人/视觉控制 |
+| **机械臂 MPC** | 学动力学模型 + 模型预测控制 | 真机交互昂贵,模型让样本需求骤降;实时 MPC 保证安全 |
+
+> 💡 规律:**环境规则已知**(棋类、简单物理)→ 直接用模型规划(MCTS/MPC);**规则未知但可学**(视觉控制)→ 学世界模型在想象里训练;**交互极贵**(真机)→ model-based 的样本效率优势压倒一切。
+
+## 常见问题 FAQ
+
+**Q:model-based 一定比 model-free 好吗?**
+不一定。模型学不准时,model-based 会**被自己的模型骗**——在模型里表现好、现实里崩(Spinning Up 称之为 model bias [1])。免模型虽费样本,但没这个风险。实践中:交互便宜(仿真器)→ 免模型够用;交互贵(真机)→ model-based 值得;规则已知(棋类)→ 必用模型。
+
+**Q:Dyna-Q 的规划步数 $n$ 怎么选?**
+$n$ 越大样本效率越高、但计算越贵,且模型有偏差时 $n$ 越大偏差放大越严重。Sutton 教材里常取 $n=5\sim 50$ [2]。它本质是「用 $n$ 倍计算换样本」的旋钮。
+
+**Q:MCTS 为什么用 UCT 而不是直接选平均价值最高的子节点?**
+纯贪心会**锁死**在第一个偶然搜到高价值的分支上,永远不探索其他分支——和 [多臂老虎机](/tutorials/multi-armed-bandit) 里「只拉目前最好的臂」是同一个病。UCT 的探索项 $c\sqrt{\ln N_p/N_i}$ 让访问次数少的节点有 bonus,保证每个分支都被充分试过,这是 UCB1 在树上的直接推广 [4][5]。
+
+**Q:AlphaZero 和原始 MCTS 的关键差别是什么?**
+两点:(1) 原始 MCTS 用**随机 rollout** 评估叶节点(浅且噪),AlphaZero 用**神经网络**直接输出价值 $v$(深且准);(2) AlphaZero 的网络还输出策略先验 $\pi$,用来在 MCTS 选择时给更靠谱的动作加权(替代均匀偏好)。再加上**自我对弈**循环训练,网络越练越强、搜索越来越准——这是它能超越人类的原因 [6]。
+
+**Q:self-play 训练网络,网络又指导 self-play,这不就「左脚踩右脚」原地打转吗?**
+不会,关键在 **MCTS 搜索这一步注入了新信息**。训练目标不是网络的原始输出 $\pi_\theta$(那确实会原地打转),而是「网络输出经 MCTS 搜索精炼后的更强分布」$\pi_{\text{MCTS}}$——搜索利用游戏规则向前看几步,产出的分布严格比网络当前水平强。所以每轮训练目标都比网络高一截,形成稳定的提升梯度。这就是**专家迭代(exIt)**:MCTS 当老师、网络当学生,老师靠规则搜索始终领先学生一步 [1][6]。
+
+**Q:AlphaZero 的损失里,策略头为什么用交叉熵、价值头用 MSE?**
+策略头是「让网络模仿 MCTS 的走子分布」——这是一个**分类问题**(从所有合法走子里选),交叉熵正是分布匹配的标准损失,目标 $\pi_{\text{MCTS}}$ 是软标签。价值头是「让网络预测终局胜负 $z\in\{-1,0,1\}$」——这是**回归问题**,用 MSE 让 $v$ 逼近真实结果。两项相加 $\mathcal L=(z-v)^2-\pi_{\text{MCTS}}^\top\log\pi_\theta$ 联合训练同一个网络骨架,共享特征、两个输出头 [6]。
+
+**Q:AlphaGo → AlphaGo Zero → AlphaZero → MuZero 这条线到底在甩掉什么?**
+一路甩掉「人类先验」与「规则先验」:AlphaGo 用人类棋谱监督预训练(天花板是人类水平);AlphaGo Zero 甩掉棋谱、纯 self-play 反而更强;AlphaZero 把围棋专用法泛化到棋/将棋三棋;MuZero 连**游戏规则都不给**,自己学一个隐式模型(不预测下一状态的像素,而是预测价值/策略/奖励这些「规划有用」的量),还能打 Atari。每次「甩先验」都让方法更通用、更接近 AGI 的设想 [1][6]。
+
+**Q:世界模型「做梦训练」会不会和现实脱节?**
+会,这是 model-based RL 的通病。缓解办法:(1) 用真实数据不断修正模型,让「梦」贴近现实;(2) 在想象轨迹上加分布约束(如 KL 正则),不让策略跑出模型可信的区域;(3) 周期性回真实环境验证、用真实回报校准。DreamerV3 在 55 个 Atari 游戏上达到人类水平,说明工程上可控 [9]。
+
+**Q:模型偏差为什么会随 rollout 步数放大?short-rollout 怎么治?**
+模型每步预测带误差 $\epsilon$,H 步 rollout 里误差沿动力学链式放大——稳定动力学($\lambda<1$)误差饱和有界、不稳定动力学($\lambda>1$)误差指数发散 $\propto\lambda^H$。叠加策略优化 goodhart 式钻进模型高估区,长 horizon rollout 会把策略带到「模型里好、现实里糟」的区域。MBPO 的 short-rollout 从真实数据分支、只走 $k$ 步 [11]:$k$ 短截断误差累积(几何级数还没被 $\lambda^H$ 吹大就停)、起点在真实分布内不被带到外推区,一味药治「误差累积 + 策略钻高估」两重病。这是承认模型不准、用短 horizon 绕过;Dreamer 走另一条路——把模型学准让长 horizon 想象可信。
+
+## 动手作业
+
+1. **改 $n$ 看规划威力**:把 Dyna-Q 代码里 `n_plan` 从 5 改成 0、50,对比多少回合后策略收敛到「全向右」。预期 $n=0$ 明显更慢。
+2. **MCTS 探索参数**:在上面的 viz 里把 $c$ 拖到 0,观察是否锁死在第一个搜到的分支;再拖到 3,观察是否过度探索、价值高的分支反而访问不够。
+3. **模型偏差**:在 Dyna-Q 里人为把 `Model` 存的奖励改错(比如存成 $r=0.5$ 而非真值),看策略学到什么——直观感受「模型错了策略就歪」。
+4. **思考 rollout 策略**:MCTS 的 simulation 步用均匀随机,这在围棋上很弱。如果用一个**学到的弱策略**做 rollout,搜索质量会怎样?这正是 AlphaZero「网络替 rollout」的动机。
+5. **理解专家迭代**:AlphaZero 训练目标里的 $\pi_{\text{MCTS}}$ 如果直接换成网络自己的输出 $\pi_\theta$(跳过 MCTS 精炼),训练会怎样?想清楚为何这会退化成「左脚踩右脚」原地打转——这正是 MCTS 搜索作为「信息注入步骤」的价值所在。
+6. **误差累积的动力学依赖**:在上面 CodeRunner 里把不稳定动力学 `1.3*s` 改成 `0.9*s`(稳定)、再改成 `1.05*s`(近临界),观察同样 $\epsilon=0.05$ 偏差下 H=40 时误差从「饱和 0.5」到「指数发散但温和」到「指数发散到 6000+」的三档变化——直观体会「误差累积是否发散取决于动力学的局部放大率 $\lambda$」,这也是为什么真实环境里**不稳定区域**的 model-based RL 特别难。
+
+## 小结
+
+| 概念 | 含义 |
+|---|---|
+| 模型 $\hat P, \hat R$ | 学环境转移与奖励,让智能体能「想象」经验 |
+| Dyna-Q | 真实交互 1 步 + 模型规划 $n$ 步,Q-learning 更新对两者相同 |
+| 优先扫描 / Dyna-Q+ | 优先队列按 TD 误差绝对值调度 + 前驱级联(集中预算);探索奖励 R⁺=R+κ√τ(应对环境变化)[10] |
+| 模型偏差 / 误差累积 | 模型每步误差 $\epsilon$ 沿动力学链式放大(稳定有界、不稳定指数发散 $\propto\lambda^H$)+ 策略 goodhart 式钻高估区;MBPO short-rollout 从真实数据分支 $k$ 步截断累积 [11],Dreamer 把模型学准让长 horizon 可信 |
+| MCTS 四步 | 选择(UCT)→ 扩展 → 模拟(rollout)→ 回传 |
+| UCT | $V_i/N_i + c\sqrt{\ln N_p/N_i}$,UCB1 在博弈树上的推广,平衡利用-探索 |
+| AlphaZero | MCTS + 双头神经网络(输出 $v$ 与 $\pi$)+ self-play 专家迭代;白板学习无需人类棋谱 |
+| 谱系 | AlphaGo(用棋谱)→ AlphaGo Zero(纯 self-play)→ AlphaZero(泛化三棋)→ MuZero(连规则都学) |
+| 世界模型 / Dreamer | 学潜空间动力学(RSSM:确定性 $h_t$ + 随机 $s_t$),可微想象 rollout 价值梯度 BPTT 反传训策略,样本效率高但有模型偏差;DreamerV3 单配置跨 150+ 任务 |
+| model-based 四分类 | 纯规划 / 专家迭代 / 数据增强 / 规划嵌入策略 [1] |
+
+> 🗺️ 一句话记住:**免模型费样本、基于模型费计算且怕模型错**。Dyna-Q 用模型回放加速 Q 学习;MCTS 用 UCT 在树上边搜边长;AlphaZero 用网络替掉 rollout;Dreamer 在潜空间做梦训练。交互越贵,模型越值。
+
+## 延伸阅读
+
+- **站内论文笔记**:[DeepSeek-OCR](/papers/deepseek-ocr) —— 同为「世界模型」思想:它学的不是游戏动力学而是「图像→文本」的压缩映射,OCR 被重构为上下文光学压缩
+- **经典论文**:Schrittwieser et al. (2020). *Mastering Atari, Go, Chess and Shogi by Planning with a Learned Model* (MuZero). [arXiv:1911.08265](https://arxiv.org/abs/1911.08265) —— 不预置规则、纯学动力学模型做规划的巅峰:AlphaZero 框架 + 学到的隐式模型统一三棋与 Atari
+
+## 参考文献
+
+1. OpenAI Spinning Up — *Algorithms: Model-Based RL*. [spinningup.openai.com](https://spinningup.openai.com/en/latest/spinningup/rl_intro2.html). —— model-based RL 四分类(纯规划 / 专家迭代 / 数据增强 / 规划嵌入策略)、model bias(学到的模型有偏差会被智能体利用)的权威讲解。
+2. Sutton & Barto (2018). *Reinforcement Learning: An Introduction*, Ch.8 *Planning and Learning with Tabular Methods*. [incompleteideas.net](http://incompleteideas.net/book/RLbook2020.pdf). —— Dyna-Q 原始算法:直接 RL + 模型更新 + $n$ 步规划回放,确定性 `Model(s,a)→(s',r)` 查找表。
+3. Browne, Powley, Whitehouse, Lucas, Cowling, Rohlfshagen, Tavener, Perez, Samothrakis, Colton (2012). *A Survey of Monte Carlo Tree Search Methods*. [IEEE DOI:10.1109/TCIAIG.2012.2186816](https://doi.org/10.1109/TCIAIG.2012.2186816). —— MCTS 四步(选择/扩展/模拟/回传)的标准综述。
+4. Kocsis & Szepesvári (2006). *Bandit based Monte-Carlo Planning*. [ECML 2006](https://link.springer.com/chapter/10.1007/11871842_29). —— UCT(UCB applied to Trees):把多臂老虎机的 UCB1 搬到博弈树选择,后悔界理论保证。
+5. Auer, Cesa-Bianchi, Fischer (2002). *Finite-time Analysis of the Multiarmed Bandit Problem*. [Mach. Learn. DOI:10.1023/A:1013689704352](https://doi.org/10.1023/A:1013689704352). —— UCB1 原始论文,UCT 探索项的根源;详见本站[多臂老虎机教程](/tutorials/multi-armed-bandit)。
+6. Silver, Hubert, Schrittwieser, Antonoglou, Lai, Guez, Lanctot, Sifre, Kumaran, Graepel, Lillicrap, Simonyan, Hassabis (2018). *A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play*. [Science DOI:10.1126/science.aar6404](https://doi.org/10.1126/science.aar6404). —— AlphaZero:神经网络替代 rollout(输出价值 $v$ 与策略 $\pi$)+ 自我对弈专家迭代,统一掌握三种棋。
+7. Ha & Schmidhuber (2018). *World Models*. [arXiv:1803.10122](https://arxiv.org/abs/1803.10122). —— VAE 编码 + RNN 动力学 + 线性策略,完全在「梦」里训练的先驱工作。
+8. Hafner, Lillicrap, Ba, Norouzi (2020). *Dream to Control: Learning Behaviors by Latent Imagination*. [arXiv:1912.01603](https://arxiv.org/abs/1912.01603). —— Dreamer:潜空间递归世界模型(RSSM:确定性 RNN 路径 $h_t$ + 随机潜状态 $s_t$ + 表示/转移/解码三组件)+ actor-critic 在**可微想象轨迹**上训练(价值梯度沿轨迹 BPTT 反传,策略训练不碰真实环境不生成像素)+ Atari 样本效率大幅领先免模型方法。
+9. Hafner, Pasukonis, Ba, Lillicrap (2023). *Mastering Diverse Domains through World Models (DreamerV3)*. [arXiv:2301.04104](https://arxiv.org/abs/2301.04104). —— DreamerV3:单一超参配置跨 150+ 任务(Atari/DM Control/Crafter/Minecraft);首个从零无人类数据/课程在 Minecraft 采钻石;symlog 预测 + free bits + 规模缩放实现跨域稳定;证明 model-based「学世界模型+想象训练」范式已具备通用性。**深层训练机制**(ar5iv 全文核验):① **KL balancing 非对称停止梯度**(沿用 DreamerV2)——世界模型损失 $L(\phi)=E[\sum(\beta_{pred}L_{pred}+\beta_{dyn}L_{dyn}+\beta_{rep}L_{rep})]$,权重 1.0/0.5/0.1;$L_{dyn}=\max(1,KL[sg(q)\|p])$ 训练先验匹配停止梯度后验(先验做预测),$L_{rep}=\max(1,KL[q\|sg(p)])$ 训练后验匹配停止梯度先验(后验做表征,弱权重);非对称 stop-gradient 让 KL 不把后验拉塌、free bits 1 nat 阈值下置零梯度、categorical 混 1% uniform 防 near-deterministic;② **two-hot 编码 symlog critic**——K=255 桶(symlog 空间 -20..+20)softmax 分布,价值 $v_\psi=symexp(E[b_i])$,two-hot 编码目标,EMA 正则,大回报不发散;③ **分位数回报缩放**——actor 目标 $L(\theta)=\sum E[sg(R^\lambda_t)/\max(1,S)]-\eta H[\pi]$,$S=Per(R,95)-Per(R,5)$ 仅 S>1 缩放,固定 $\eta=3\times10^{-4}$ 跨密集/稀疏通用;$\lambda$-return $R^\lambda_t=r_t+\gamma c_t((1-\lambda)v_\psi(s_{t+1})+\lambda R^\lambda_{t+1})$,想象 H=15、γ=0.997、λ=0.95;连续动作重参数反传、离散动作 reinforce。
+10. Moore & Atkeson (1993). *Prioritized Sweeping: Reinforcement Learning with Less Data and Less Time*. [Mach. Learn. DOI:10.1023/A:1022635614211](https://doi.org/10.1023/A:1022635614211). —— 优先扫描:用优先队列(PQueue)按 TD 误差大小调度规划更新,配合前驱表让价值变动沿转移图向后级联传播;在稀疏奖励迷宫里比随机回放 Dyna-Q 节省数个量级的更新次数;Dyna-Q+ 的 $\kappa\sqrt{\tau}$ 探索奖励用于非静止环境(blocking maze 实验)。
+11. Janner, Fu, Zhang, Levine (2019). *When to Trust Your Model: Combining Model-Based and Model-Free Reinforcement Learning* (MBPO). [arXiv:1906.08253](https://arxiv.org/abs/1906.08253). —— model bias 的工程化解法:**short model-generated rollouts branched from real data**——从真实 replay buffer 采起点、只 rollout $k$ 步($k\ll H$),一味药治「误差累积(短 horizon 截断)+ 策略钻高估(起点分布内不被带到外推区)」两重病;理论分析「real off-policy data is always preferable to model-generated on-policy data」揭示误差累积本质;「scales to horizons that cause other model-based methods to fail entirely」,样本效率超 prior model-based、渐近性能匹配 best model-free。
+12. Schrittwieser, Antonoglou, Hubert, Simonyan, Sifre, Schmitt, Guez, Lockhart, Hassabis, Graepel, Lillicrap, Silver (2020). *Mastering Atari, Go, Chess and Shogi by Planning with a Learned Model*. Nature 588:604-609. [arXiv:1911.08265](https://arxiv.org/abs/1911.08265) / [DOI:10.1038/s41586-020-03051-4](https://doi.org/10.1038/s41586-020-03051-4). —— MuZero 原始论文:AlphaZero 之后进一步**甩掉游戏规则先验**,学一个**价值等价模型**——三函数 $h(o)\to z$(表示)、$g(z,a)\to(z',r)$(动力学)、$f(z)\to(\mathbf p,v)$(预测),全部在隐空间运作,**不预测观测本身、只预测规划直接相关的 $r/\pi/v$**;MCTS 用学到的 $g$ 在隐空间前向推演、$f$ 给叶子估值,实现「无规则环境上的搜索即策略提升」;单一算法在围棋/将棋/国际象棋匹配 AlphaZero 超人表现、并在 57 个 Atari 游戏上 SOTA。本篇「MuZero:不学规则,学规划的价值等价模型」小节三函数抽象、价值等价 toy、AlphaZero/MuZero/Dreamer 三路线对照的直接来源。
+13. Garcia, Prett, Morari (1989). *Model Predictive Control: Theory and Practice — A Survey*. Automatica 25(3):335-348. —— MPC 经典综述:系统讲解**滚动时域(receding horizon)**原理——在每步求解有限 horizon 开环最优控制问题、只执行第一步、用新测量状态重规划;形式化约束处理(状态/输入限位)与稳定性保证(终端约束/终端代价);奠定工业过程控制里 MPC 的标准框架。本篇「纯规划:模型预测控制」小节滚动时域原理、轨迹优化 shooting/collocation 权衡、iLQR/DDP 迭代线性化脉络的来源。(DOI 据 R39 教训不臆造,仅注期刊卷期。)
+14. Williams, Aldrich, Theodorou (2015). *Model Predictive Path Integral Control using Covariance Variable Importance Sampling*. [arXiv:1509.01149](https://arxiv.org/abs/1509.01149). —— MPPI 原始论文:基于路径积分控制与信息论,**采样 $N$ 条扰动轨迹、按 $\omega_i=\exp(\tau\,\phi_{\Gamma_i})$ 指数加权平均**更新 nominal 序列;用协方差变量重要性采样改进漂移/扩散项、GPU 大规模并行(每条轨迹独立 rollout)、对非线性动力学与不可微奖励鲁棒;从 KL 散度视角证明指数加权是把采样分布向高回报轨迹做 KL 投影的最优解。本篇 MPPI 公式 $\phi_\Gamma=\gamma^H V(s_H)+\sum_t\gamma^t R(s_t,a_t)$、$\omega_i=e^{\tau\phi}$、$\mu=\sum\omega_i\Gamma_i/\sum\omega_i$ 的来源。(TDMPC [15] 参考文献列表引用此 arXiv:1509.01149 版本,据 R39 教训 WebFetch arXiv abs 页确认作者/标题/年份完全匹配。)
+15. Hansen, Su, Wang (2022). *Temporal Difference Learning for Model Predictive Control* (TDMPC). [arXiv:2203.04955](https://arxiv.org/abs/2203.04955). —— TDMPC:口号「**在价值空间规划(planning in value space)**」——TOLD 潜动力学模型(5 组件:编码器 $h$ / 潜动力学 $d$ / 奖励头 $R$ / 价值头 $Q$(twin + LayerNorm + Tanh)/ 策略头 $\pi$,潜维度 50、约 150 万参数)+ MPPI 规划器(潜空间 rollout $H=5$ 步、采样 $N=512$ 取 elite top-64、终端价值用学到的 $Q(z_H,a_H)$);世界模型与价值用 TD 学习训练、策略头蒸馏 MPPI 规划器输出;DM Control(状态 + 图像两模态)与 Meta-World 上样本效率与渐近性能领先,在 Quadruped/Dog/Humanoid 等高维连续控制从零学会。本篇「TDMPC:在价值空间规划」小节 TOLD 五组件、MPPI + 终端价值、短 horizon + 价值补信号的直接来源。
+16. Chua, Calandra, McAllister, Levine (2018). *Deep Reinforcement Learning in a Handful of Trials using Probabilistic Dynamics Models* (PETS). NeurIPS 2018. [arXiv:1805.12114](https://arxiv.org/abs/1805.12114). —— PETS:**Probabilistic Ensembles with Trajectory Sampling**——区分 aleatoric(数据内在随机,多采消不掉)与 epistemic(数据不足,多采能消)两种不确定性,用**概率集成(PE)**模型($B=5$ 个 bootstrap 概率网络,各输出 Gaussian 均值+方差,负对数似然训练)同时抓住两者且可分离(集成均值间方差=epistemic、各网络方差均值=aleatoric);**轨迹采样**传播不确定性($P=20$ 粒子,TS1 每步重抽模型抹平多模态、TS-inf 全程绑定模型保留多模态并分离两种不确定性);**MPC + CEM** 规划器用 TS-inf 粒子 rollout 评估动作序列、选 elite refine 采样分布;四变体性能排序 PE > P > DE > D;half-cheetah 上样本效率比 SAC 少 8×、比 PPO 少 125× 达同等性能。本篇「不确定性感知模型:PETS」小节四变体对照、TS1/TS-inf 轨迹采样、aleatoric/epistemic 分离、CEM 规划的直接来源。(arXiv ID 1805.12114 经 WebFetch arXiv abs + ar5iv 全文双重确认,非 R39 猜测。)
+17. Yu, Kumar, Gupta, Levine, Hausman, Finn (2020). *MOPO: Model-based Offline Policy Optimization*. NeurIPS 2020. [arXiv:2005.13239](https://arxiv.org/abs/2005.13239). —— MOPO:离线 model-based RL 的「悲观奖励」路线——学动力学模型 ensemble(均值 $\mu(s,a)$ + 模型间标准差 $\sigma(s,a)$),把 ensemble 分歧作为「离 support 多远」的度量,构造**悲观奖励** $\tilde r(s,a)=r(s,a)-\lambda\sigma(s,a)$,在模型 rollout 生成的虚拟数据上用任意标准 RL 算法训策略;$\lambda$ 控悲观程度($\lambda\to0$ 退化为普通 model-based 会被骗、$\lambda$ 大高度保守);理论上最大化真实 MDP 回报的一个下界,刻画「离开 support 的收益与风险」权衡。本篇「离线设定:当模型不能再去环境验证」小节 MOPO 公式、$\lambda$ 权衡、ensemble 分歧作 support 距离度量的直接来源。(arXiv ID 2005.13239 经 offline-rl 篇 refs [14] 复用 + WebFetch arXiv abs 确认 Yu et al. NeurIPS 2020,非 R39 猜测。)
+18. Kidambi, Rajeswaran, Netrapalli, Joachims (2020). *MOReL: Model-based Offline Reinforcement Learning*. NeurIPS 2020. [arXiv:2005.05951](https://arxiv.org/abs/2005.05951). —— MOReL:离线 model-based RL 的「悲观动力学」路线——不压奖励、构造**悲观 MDP(P-MDP)**:support 外区域的转移被改成「不利的」(掉吸收态/低回报),等效「模型不确定 → 假设最坏情况发生」,在 P-MDP 上学策略;关键性质**对任意策略 $\pi$,它在 P-MDP 里的回报是真实环境回报的下界** $v^\pi_{\text{P-MDP}}\le v^\pi_{\text{real}}$,下界保证避免被模型误差骗;与 MOPO 对照:MOPO 悲观 reward(奖励侧)、MOReL 悲观动力学(转移侧),同一「学模型 + 在不确定处悲观」哲学的两种实现。本篇「离线设定」小节 MOReL P-MDP、下界保证、MOPO/MOReL 对照的直接来源。(arXiv ID 2005.05951 经 offline-rl 篇 refs [15] 复用 + WebFetch arXiv abs 确认 Kidambi et al. NeurIPS 2020,非 R39 猜测。)

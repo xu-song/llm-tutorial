@@ -1,0 +1,189 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("qwen3-vl");
+
+<PaperHeader slug="qwen3-vl" />
+
+# 👁️ Qwen3-VL:看懂、想清、做得出
+
+2025 年 9 月,阿里 Qwen 团队发布了 Qwen3-VL——一个从 2B Dense 到 235B-A22B MoE、每档都提供 Instruct 与 Thinking 双版本的视觉语言模型家族。旗舰 235B-A22B 的 Instruct 版在多项视觉感知评测上达到或超过 Gemini 2.5 Pro,Thinking 版则在多模态推理基准上拿下开源 SOTA。它没有发布独立的技术报告,信源是[官方博客](https://qwen.ai/blog?id=qwen3-vl)与 HuggingFace 模型卡(Apache 2.0),所以这篇笔记是一份「从发布材料里反推方法论」的拆解:三个架构改动(Interleaved-MRoPE、DeepStack、Text-Timestamp Alignment)、一条「感知-推理-行动」的能力主线、以及 256K 到 1M 的长视频上下文从哪来。
+
+> 📌 前置:Qwen3-VL 的语言底座是 [Qwen3](https://arxiv.org/abs/2505.09388),视觉架构承袭 [Qwen2.5-VL 技术报告](https://arxiv.org/abs/2502.13923);对照 [Kimi K1.5](/papers/kimi-k15) 的多模态 RL 与 [DeepSeek-V3](/papers/deepseek-v3) 的 MoE 配比阅读,脉络更清楚。
+
+## 一、动机:视觉模型的三个台阶
+
+Qwen 团队给 Qwen3-VL 的定位是三个递进的动词:**看懂**(perception)、**想清**(reasoning)、**做得出**(agentic)。2025 年的多模态竞争里,纯感知(OCR、VQA)早已不是分水岭——差距出现在后两级:带图的链式推理、以及把视觉理解变成**行动**(操作手机/PC 的 GUI、从设计图生成可运行代码)。Qwen3-VL 的全部架构与数据决策,都可以读成对这三个台阶的回应。
+
+官方博客的能力雷达图:Qwen3-VL 在视频理解、视觉 Agent、视觉推理、文档解析、视觉编程、GUI 理解等维度上全面覆盖,外围一圈是 Gemini 2.5 Pro 等竞品——
+
+<figure className="my-6">
+  <img src="./fig-1-arc.jpg" alt="Qwen3-VL 能力雷达图:横跨视频理解、长视频理解、视觉 Agent、视觉推理、文档解析、OCR、视觉编程、多语言 OCR、GUI 理解等十余个维度,235B-A22B-Instruct 的覆盖面积整体达到或超过 Gemini 2.5 Pro、GPT-5 等闭源模型" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Qwen Team, Qwen3-VL 官方博客(qwen.ai/blog?id=qwen3-vl)
+  </figcaption>
+</figure>
+
+值得先记一个工程事实:Qwen3-VL 的纯文本能力与 Qwen3-235B-A22B-2507 不相上下。这不是「先训 LLM 再接视觉塔」能拿到的结果——预训练从早期阶段就**混合文本与视觉协同训练**,视觉信号不降级为后挂模块。这也是 2025 年新一代 VLM 的共同选择:语言与视觉不是蒸馏关系,而是同一预训练里的两个模态。
+
+## 二、Interleaved-MRoPE:把频率铺满时间轴
+
+多模态位置编码的经典难题:文本一维、图像二维、视频三维,三种坐标怎么共存?Qwen2-VL 提出 **MRoPE(Multimodal RoPE)**:把 RoPE 的频率维拆成 $t/h/w$ 三组,文本 token 三组用同一个值,图像 token 冻结时间维、只在 $h/w$ 上变化,视频 token 三维都动。
+
+$$
+\mathrm{RoPE}(\mathbf{q}, \mathrm{pos}) \; \Rightarrow \; \mathrm{RoPE}\big(\mathbf{q},\; (t,\,h,\,w)\big),\qquad
+\mathbf{q}=\big[\underbrace{\mathbf{q}_t}_{d/3}\,\big\|\, \underbrace{\mathbf{q}_h}_{d/3}\,\big\|\, \underbrace{\mathbf{q}_w}_{d/3}\big]
+$$
+
+问题出在**分组是连续的**:维度按顺序切成三块,一块给 $t$、一块给 $h$、一块给 $w$。后果是任何一个单独的轴都只覆盖**三分之一的频段**——完整 RoPE 的频率范围从高频(区分相邻位置)一直铺到低频(区分远距离位置),连续切块后时间维拿不到完整频段,长时间跨度的位置区分度不足,这对「一小时视频里第 5 分钟和第 50 分钟各出现过一次的物体」这类跨时长检索是硬伤。
+
+Qwen3-VL 的 **Interleaved-MRoPE** 把分组方式从「连续切块」改成「交错」:第 $i$ 个频率维度不再固定属于某个轴,而是按 $i \bmod 3$ 轮转分配给 $t/h/w$:
+
+$$
+\text{dim } i \in \{0,1,2,\dots\}\;\mapsto\;\text{axis}(i) \in \{t, h, w, t, h, w, \dots\}
+$$
+
+这样每个轴都能覆盖**从低频到高频的完整频段**,时间维不再只做「粗定位」。官方报告的收益集中在长视频理解——视频大海捞针从「大致记住」变成「精确召回」(见第五节)。改动本身近乎免费:只是换了频率维到轴的映射表,不增加参数、不改算子。
+
+用 numpy 把两种分组方式的频率覆盖差异画出来(手动跑一遍就知道「交错」在补什么):
+
+<CodeRunner defaultCode={String.raw`import numpy as np
+
+d = 24            # RoPE 频率维总数(实际模型是 head_dim,如 128)
+base = 10000.0
+freqs = base ** (-np.arange(0, d, 2) / d)   # RoPE 实际有 d/2 个频率,从高到低
+n = len(freqs)                               # = 12
+
+# —— 原版 MRoPE:连续切块,前 1/3 频率给 t,中间给 h,最后给 w ——
+cont = {"t": freqs[0:n//3], "h": freqs[n//3:2*n//3], "w": freqs[2*n//3:]}
+
+# —— Interleaved-MRoPE:按 i mod 3 轮转,每个轴都拿到完整频段 ——
+inter = {"t": [], "h": [], "w": []}
+for i, f in enumerate(freqs):
+    inter[["t", "h", "w"][i % 3]].append(f)
+inter = {k: np.array(v) for k, v in inter.items()}
+
+for name, groups in [("连续切块(MRoPE)", cont), ("交错(Interleaved)", inter)]:
+    print(name)
+    for ax in "thw":
+        g = groups[ax]
+        # 波长 = 2π/freq;每个轴分到的最长波长(低频)与最短波长(高频)
+        lam = 2 * np.pi / g
+        print(f"  轴 {ax}: 频率 {g.min():.2e} ~ {g.max():.2e}  (波长 {lam.min():.0f} ~ {lam.max():.2e})")
+print()
+print("结论:连续切块时每个轴只分到 1/3 频段(如 t 轴频率上限 1.0、下限被切断);")
+print("交错分组后每个轴的频率范围都贯穿全频段(t 轴低至 1e-3、高达 1.0)")
+print("—— 时间维既有粗定位的低频、又有细区分的高频,长视频检索靠的就是它。")`} />
+
+## 三、DeepStack:多层对多层的特征注入
+
+标准 VLM 的视觉→语言注入是**单点**的:ViT 最后一层的输出经一层投影(常见是一个两层 MLP)进 LLM 的 embedding 层。视觉信息不管多复杂,都挤在序列开头的「一层」里,靠 LLM 自己在前向中逐层消化。
+
+DeepStack 的做法是**多层对多层**:把 ViT 中间若干层的特征,分别注入 LLM 对应深度的层。设 ViT 第 $l$ 层特征为 $\mathbf{V}^{(l)}$,LLM 第 $l$ 层的隐状态流为 $\mathbf{h}^{(l)}$,则注入可以写成:
+
+$$
+\mathbf{h}^{(l)} \;\leftarrow\; \mathbf{h}^{(l)} + \mathrm{Proj}^{(l)}\!\big(\mathbf{V}^{(l)}\big),\qquad l \in \{l_1, l_2, \dots\}
+$$
+
+每个注入点有**独立的投影** $\mathrm{Proj}^{(l)}$,把 ViT 的维度与 patch 数对齐到 LLM 的隐藏维与 token 序列。直觉上:浅层 ViT 特征携带边缘、纹理等低级线索,深层携带语义;单点注入相当于只递给 LLM 一张「摘要」,多层注入则让 LLM 的不同深度直接取用不同抽象层级的视觉证据——对空间理解、细粒度定位这类任务,信息不必在语言侧重建。
+
+用 numpy 演示「单层注入 vs 多层注入」的形状与计算概念(注意注入位置如何随深度对齐):
+
+<CodeRunner defaultCode={String.raw`import numpy as np
+
+rng = np.random.default_rng(0)
+d_vit, d_llm, n_patch, L = 64, 96, 16, 8   # ViT 维度 / LLM 维度 / patch 数 / 层数
+
+# ViT 各层特征(真实模型里是训练出来的中间表征)
+vit = {l: rng.normal(scale=0.5, size=(n_patch, d_vit)) for l in range(L)}
+# LLM 各层隐状态流(流过 Transformer 的 token 序列)
+h = {l: rng.normal(scale=0.5, size=(n_patch, d_llm)) for l in range(L)}
+
+# —— 方式一:单点注入(标准 VLM) ——
+# 只用 ViT 最后一层,经一个 MLP 投影,拼进 LLM 输入序列
+W1 = rng.normal(scale=0.1, size=(d_vit, 4 * d_vit))
+W2 = rng.normal(scale=0.1, size=(4 * d_vit, d_llm))
+proj_last = np.maximum(vit[L - 1] @ W1, 0) @ W2
+print("单点注入: ViT 最后一层 %s -> 投影 %s,只在 LLM 第 0 层入口拼接一次"
+      % (vit[L - 1].shape, proj_last.shape))
+
+# —— 方式二:DeepStack 多层对多层注入 ——
+# ViT 第 1、4、7 层 -> LLM 对应深度的层,各自有独立投影
+inject_at = [1, 4, 7]
+for l in inject_at:
+    P = rng.normal(scale=0.1, size=(d_vit, d_llm))   # 独立的 Proj^(l)
+    h[l] = h[l] + vit[l] @ P                          # 加到该层隐状态上
+print("DeepStack: 注入层 %s,每个注入点一套独立投影矩阵" % inject_at)
+print("           低层注入边缘/纹理线索,高层注入语义 —— LLM 各深度直接取用,")
+print("           不必在语言侧逐层重建视觉证据。")`} />
+
+## 四、Text-Timestamp Alignment:让时间变成「文本」
+
+第三个架构改动针对视频。此前的做法(Qwen2.5-VL 的 T-RoPE)是把绝对时间编码进位置信息的额外分量;Qwen3-VL 改成**把时间戳当成普通文本 token,与视频帧交错输入**:
+
+```
+<|frame 1|> [视频帧 token…] <|00:00:03|> <|frame 2|> [视频 token…] <|00:00:07|> …
+```
+
+这个看似朴素的改动有两个直接收益:其一,时间信息走的是模型最擅长的通道——**语言**;其二,输出侧可以对齐——模型回答「第几分钟发生了什么」时,生成的时间戳与输入时间戳在同一表示空间,原生支持秒与 HH:MM:SS 两种格式。这也是「让任务结构与模型先验对齐」的一个教科书案例:与其发明专用的位置-时间耦合机制,不如把时间摊平成 token,让注意力自己学对齐。
+
+三个架构改动最终都服务于同一个目标:**让推理发生在图像之上,而不是图像之后**。Thinking 版的「带图推理」(Thinking with Image)就是这个目标的直接体现——
+
+<figure className="my-6">
+  <img src="./fig-3-thinking-with-image.jpg" alt="Qwen3-VL 带图推理(Thinking with Image)示意:Thinking 模型在推理过程中直接引用与操作图像内容,图像理解与链式推理交错进行,而不是先感知后推理的单向流程" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Qwen Team, Qwen3-VL 官方博客(qwen.ai/blog?id=qwen3-vl)
+  </figcaption>
+</figure>
+
+## 五、长视频:256K 上下文与大海捞针
+
+Qwen3-VL 原生 256K 上下文,可扩展到 1M——对应约两小时的视频。检验「长上下文是否真的在工作」的标准实验是**视频大海捞针**(Video Needle-in-a-Haystack):在长视频中插入一条需要精确召回的线索,测试模型在不同时间深度上的检索精度。
+
+官方结果:256K 上下文内大海捞针 **100%** 召回,扩展到 1M 后仍有 **99.5%**——几乎无损。这背后正是第二节的 Interleaved-MRoPE(时间维全频段覆盖)与第四节的时间戳对齐在共同起作用:前者给长时间跨度足够的位置区分度,后者给「什么时候」一个可对齐的查询通道。
+
+<figure className="my-6">
+  <img src="./fig-4-haystack.jpg" alt="视频大海捞针实验结果:横轴为视频时长对应的上下文长度,纵轴为线索插入的时间深度,格子的颜色表示召回精度;256K 上下文内全绿(100% 召回),扩展到 1M 上下文后整体仍保持 99.5% 的召回率" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Qwen Team, Qwen3-VL 官方博客(qwen.ai/blog?id=qwen3-vl)
+  </figcaption>
+</figure>
+
+## 六、基准:感知、推理、Agent 三条线
+
+模型家族覆盖 2B/4B/8B/32B Dense 与 30B-A3B/235B-A22B MoE。旗舰 235B-A22B **Instruct** 在多项视觉感知评测达到或超过 Gemini 2.5 Pro;**Thinking** 版在多模态推理基准上为开源 SOTA。能力亮点(来自官方博客):
+
+| 能力维度 | 关键结果 | 说明 |
+|---|---|---|
+| 视觉 Agent(OSWorld 等) | 顶尖(开源) | 直接操作 PC/手机 GUI,截图→点击/输入 |
+| 视觉 Coding | 图→Draw.io / HTML / CSS / JS | 从设计稿/草图生成可运行代码 |
+| Grounding | 2D 相对坐标 + 3D 空间定位 | 输出可直接驱动下游动作的坐标 |
+| OCR | 32 种语言(原 10 种) | 39 语言测试集上 32 种 >70% 准确率 |
+| 纯文本 | ≈ Qwen3-235B-A22B-2507 | 多模态训练未拖累语言能力 |
+
+Thinking 版的多模态推理基准全景(官方博客完整对照表,很长,建议放大看;列头为各基准,Qwen3-VL Thinking 与 GPT-5、Gemini 2.5 Pro、Claude 等闭源模型逐项对照):
+
+<figure className="my-6">
+  <img src="./fig-2-benchmarks.jpg" alt="Qwen3-VL Thinking 在多模态推理基准上的完整对照表:覆盖 MMMU、MathVista、OSWorld、视频理解、文档解析等数十项基准,与 GPT-5、Gemini 2.5 Pro、Claude 等闭源模型逐项对比,多数基准达到开源最优" className="mx-auto h-auto max-h-[80vh] max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    图源:Qwen Team, Qwen3-VL 官方博客(qwen.ai/blog?id=qwen3-vl)
+  </figcaption>
+</figure>
+
+「视觉 Agent 顶尖」值得一提:OSWorld 这类基准要求模型看屏幕截图、输出结构化操作(点击坐标、键盘序列)、根据环境反馈调整——它把「看懂→想清→做得出」压成了一条闭环,Qwen3-VL 在这条线上是开源第一梯队。这与 2D 相对坐标 + 3D grounding 的设计直接相关:输出的不是描述性文字,而是**可执行的坐标**。
+
+## 七、局限与批判
+
+- **无独立技术报告**:全部信息来自官方博客与模型卡,训练数据构成、算力、消融实验均未披露;「Interleaved-MRoPE 提升长视频理解」「DeepStack 优于单层注入」这些因果结论无法独立验证,复现门槛高。
+- **基准口径**:感知类「达到/超过 Gemini 2.5 Pro」的表述依赖具体基准选取;OCR「39 语言测试集 32 种 >70%」是自设的评测口径,与常见多语言 OCR 基准不完全可比。
+- **1M 上下文的实际成本**:99.5% 召回 ≠ 1M 上下文的推理成本可接受;预填充与 KV cache 的开销在博客中没有讨论。
+- **Thinking 版的推理数据来源未说明**:多模态 CoT 是合成、蒸馏还是 RL 得到,官方材料没有交代——这恰是各家 Thinking 模型差异最大的环节。
+- **家族过宽**:六档尺寸 × 双版本共 12 个模型,选择成本高;2B/4B 档的架构改动(如 DeepStack)是否同样有效没有单独说明。
+
+## 小结
+
+- **架构三件套**:Interleaved-MRoPE(频率维按 $i \bmod 3$ 交错分配给 $t/h/w$,时间维全频段覆盖)、DeepStack(ViT 多层特征经独立投影注入 LLM 对应深度,替代单层注入)、Text-Timestamp Alignment(时间戳作为文本 token 与视频帧交错,原生支持秒与 HMS 输出)。
+- **能力主线**:感知(OCR 扩到 32 语言、2D/3D grounding)→ 推理(Thinking 版多模态基准开源 SOTA)→ 行动(视觉 Agent 操作 PC/手机 GUI,OSWorld 顶尖;图→Draw.io/HTML/CSS/JS)。
+- **长视频**:原生 256K、可扩 1M;视频大海捞针 256K 100% / 1M 99.5%(约两小时视频)。
+- **定位**:2B 到 235B-A22B 全家族、Instruct/Thinking 双版本、Apache 2.0;纯文本能力与 Qwen3-235B-A22B-2507 相当,是 2025 下半年开源多模态的实际标杆之一——但记住它是一份发布材料而非技术报告,数字之外的方法论细节要打折扣读。
+
+对照阅读:位置编码的通用机制见 [Transformer](/papers/attention-transformer),多模态 RL 的对照样本见 [Kimi K1.5](/papers/kimi-k15),MoE 配比的另一条路线见 [DeepSeek-V3](/papers/deepseek-v3)。
