@@ -29,7 +29,7 @@ arxiv
 wikipedia
 
 
-先读进度档 `memory/rl-loop-progress.md`:**若文件不存在或为空,视同首轮冷启动**,全量选 1-3 个 RL 关键词即可(此时无「上几轮」历史可参考);若已有记录,看清**上几轮搜过哪些关键词、有哪些待办**,避免重复。然后调研 **1-3 个尚未搜过的强化学习关键词**,了解业界/学界的经典教程、最新进展与常见讲法。
+先读进度档 `.claude/local/memory/rl-loop-progress.md`:**若文件不存在或为空,视同首轮冷启动**,全量选 1-3 个 RL 关键词即可(此时无「上几轮」历史可参考);若已有记录,看清**上几轮搜过哪些关键词、有哪些待办**,避免重复。然后调研 **1-3 个尚未搜过的强化学习关键词**,了解业界/学界的经典教程、最新进展与常见讲法。
 
 **首选两个 arxiv skill 深挖原始论文(本步重点)**:RL 板块的权威性主要靠原始论文支撑,每轮侦察都应优先动用这两个 skill,而不是只停留在网页搜索。
 - **`arxiv-search`**:按关键词检索 arxiv 上的经典/前沿 RL 论文,发现该主题的奠基作与最新进展(如 DQN、PPO、SAC、GAE、DPO、GRPO 等原文)。用它定位「该引哪篇」。
@@ -43,12 +43,12 @@ wikipedia
 - **前沿与对齐**:RLHF、DPO、GRPO、reward model、KL penalty、reward hacking、process reward model、RLVR、self-play
 - **概念/教学**:credit assignment、discount factor、reward shaping、gridworld、multi-armed bandit、model-based RL、offline RL
 
-把搜到的**权威讲法、经典图示、易错点、面试常考点**记入本轮改进依据,并**追加到 `memory/rl-loop-progress.md`**(每条记录必须以具体时间起头,格式 `## YYYY-MM-DD HH:MM 第 N 轮`,精确到分钟,时间戳由 `date '+%Y-%m-%d %H:%M'` 命令取得,轮次号从上一轮递增;**首轮冷启动时写「第 1 轮」**;正文含本轮搜的关键词 + 关键发现 + 新增待办),供下一轮开场读取。
+把搜到的**权威讲法、经典图示、易错点、面试常考点**记入本轮改进依据,并**追加到 `.claude/local/memory/rl-loop-progress.md`**(每条记录必须以具体时间起头,格式 `## YYYY-MM-DD HH:MM 第 N 轮`,精确到分钟,时间戳由 `date '+%Y-%m-%d %H:%M'` 命令取得,轮次号从上一轮递增;**首轮冷启动时写「第 1 轮」**;正文含本轮搜的关键词 + 关键发现 + 新增待办),供下一轮开场读取。
 
 
 
 ### 步骤 2:教程大纲专项(必做 · 只动大纲档,不碰源码/内容,也不读源码)
-本步**只动一份文件**:`memory/rl-tutorial-structure.md`(RL 板块大纲,不存在或为空则创建),且**只审阅这一份档本身**——不读注册表 `src/lib/tutorials.ts`、不扫文件系统 `src/app/tutorials/`、不碰任何 `page.mdx`。源码与磁盘的真实状态由步骤 3 落地源码时保证;本步专注在大纲档里**审阅与规划**:篇目清单是否合理、topic 划分是否最佳、学习路径是否最优、缺口是否补齐。
+本步**只动一份文件**:`.claude/local/memory/rl-tutorial-structure.md`(RL 板块大纲,不存在或为空则创建),且**只审阅这一份档本身**——不读注册表 `src/lib/tutorials.ts`、不扫文件系统 `src/app/tutorials/`、不碰任何 `page.mdx`。源码与磁盘的真实状态由步骤 3 落地源码时保证;本步专注在大纲档里**审阅与规划**:篇目清单是否合理、topic 划分是否最佳、学习路径是否最优、缺口是否补齐。
 
 > **大纲档是一份精炼快照,不是逐轮日志(硬约束)**:全档控制在 **2000 字以内**。本步是**重新组织、完善、订正这份档本身**,让它始终反映最新最优结构——**不许追加「第 N 轮审阅结论」之类的流水账**(那类逐轮明细写进 `rl-loop-progress.md`)。每轮进来先通读全档,该合并的合并、该订正的订正、该精简的精简;结构无变化时只更新过时表述与「最近核对时间」。若发现档已超字数或混入历轮日志,**本步的首要任务就是把它压缩回精炼快照**。
 
@@ -77,7 +77,7 @@ wikipedia
   - **结构重组**:对一篇(或跨篇)做**章节级的重新编排**——调整小节顺序理顺递进、拆分臃肿章节、合并重复内容、抽出共性小节、重排 prev/next 学习路径,使整体骨架明显更优(即便净字数持平或减少);
   - **内容重构**:对现有内容做**成段的重述/订正**——统一术语与符号、改写晦涩推导、替换失准表述、把零散论断整理成对比表或分点,使可读性与准确性明显提升。
   - **量级底线**:以「扩充/新建」为主的产出,单轮净新增正文应达到**约 150 行以上**(viz 组件代码另计);以「结构重组/内容重构」为主的产出可不涨行数,但改动应覆盖**至少一个完整章节或跨多个小节**、且能一句话说清「重构前 → 重构后」结构或表达如何变优。无论哪类,若感觉分量单薄,回头再加一块。
-- **调整**:修正过时/不准的表述,对齐步骤 1 搜到的权威讲法,理顺学习路径(期望主线见 `memory/rl-tutorial-structure.md` 的「学习路径递进核对」小节,需调整时改那里而非本文件)。
+- **调整**:修正过时/不准的表述,对齐步骤 1 搜到的权威讲法,理顺学习路径(期望主线见 `.claude/local/memory/rl-tutorial-structure.md` 的「学习路径递进核对」小节,需调整时改那里而非本文件)。
 - **优化**:补交互式 viz(gridworld、Q 表演化、bandit、PPO 裁剪目标曲线)、可运行 Python 示例、典型案例、面试 FAQ、动手作业。
 - **补充**:填补明显缺口(如 DQN、policy gradient/REINFORCE、actor-critic、多臂老虎机、Bellman 方程等尚无独立教程的核心主题)。
 - **参考文献与权威链接(必带)**:正文每一处论断、公式、图示凡引用步骤 1 侦察到的权威讲法,都要补**可点击的正式出处**,让内容「有据可查」。
@@ -92,7 +92,7 @@ wikipedia
 - 功能 bug:渲染错误、交互异常、SSR/水合不一致、边界条件崩溃
 - 数值/知识正确性:viz 数学公式、Python 示例、图表数值(用 `python3`/`node` 独立复算)、教程表述无硬伤
 - 悬空引用:被正文引用却无页面/无锚点的概念
-- **注册表 / 文件系统一致性**:核对 `src/lib/tutorials.ts` 中 `category === "强化学习"` 的条目与 `src/app/tutorials/<slug>/page.mdx` 一一对应——无孤儿(注册表有但磁盘缺)、无幽灵(磁盘有但注册表未注册);slug / title / topic / icon / prev-next 顺序与磁盘实际一致。发现偏差立即修(补建缺失 `page.mdx`、补注册条目或删孤儿),修后同步 `memory/rl-tutorial-structure.md`
+- **注册表 / 文件系统一致性**:核对 `src/lib/tutorials.ts` 中 `category === "强化学习"` 的条目与 `src/app/tutorials/<slug>/page.mdx` 一一对应——无孤儿(注册表有但磁盘缺)、无幽灵(磁盘有但注册表未注册);slug / title / topic / icon / prev-next 顺序与磁盘实际一致。发现偏差立即修(补建缺失 `page.mdx`、补注册条目或删孤儿),修后同步 `.claude/local/memory/rl-tutorial-structure.md`
 
 ### 步骤 5:UI / 视觉(本轮至少落 2-3 处)
 看得舒服、各终端各主题都正常。**逐轮轮换走查不同教程页与 viz,别每轮只碰本轮新建的那个组件——挑 2-3 处最值得优化的落改。**
@@ -112,20 +112,20 @@ wikipedia
 
 ## 每轮工作约定(重要)
 
-1. **先侦察 + 审阅大纲档,再依次落四维改进(每维都要「贪多」)**:先完成步骤 1 关键词侦察(1-3 个 RL 关键词,**优先用 `arxiv-search` / `read-arxiv-paper` 两个 skill 深挖原始论文**,再辅以 `WebSearch`/`WebFetch`)与步骤 2 大纲档审阅(只读 `memory/rl-tutorial-structure.md` 自身,评估篇目清单/topic 划分/学习路径/缺口并写回优化建议,**不读注册表、不扫文件系统、不改教程源码**),再对**强化学习板块**做一次巡检(内容 + 代码)。然后**按步骤 3 → 4 → 5 → 6 顺序处理**——**步骤 3 内容至少落 2 处「大块」改动**(扩充或结构重组/内容重构,见步骤 3 的量级标准与底线),**步骤 4/5/6 各至少落 2-3 处改进**(扫不出足量时才降级并写明原因)。巡检时留意:被引用却无页面的悬空概念、功能 bug、渲染/水合异常、数值错误;任一步发现正确性问题立即优先修。**核心要求:每轮的总改动量要肉眼可见地大,若结尾感觉「这轮改得有点少」,就是没做够,回头补。**
-2. **单一数据源**:教程注册表 `src/lib/tutorials.ts` 驱动首页、侧边栏、移动抽屉、prev/next、sitemap、每页 metadata。新增教程 = 注册表加一条 + 建 `src/app/tutorials/<slug>/page.mdx` + 同步更新 `memory/rl-tutorial-structure.md`(RL 板块地图)。分类顺序由首次出现决定;新分类记得在 `getCategories()` 的 `categoryIcons` 加图标。
+1. **先侦察 + 审阅大纲档,再依次落四维改进(每维都要「贪多」)**:先完成步骤 1 关键词侦察(1-3 个 RL 关键词,**优先用 `arxiv-search` / `read-arxiv-paper` 两个 skill 深挖原始论文**,再辅以 `WebSearch`/`WebFetch`)与步骤 2 大纲档审阅(只读 `.claude/local/memory/rl-tutorial-structure.md` 自身,评估篇目清单/topic 划分/学习路径/缺口并写回优化建议,**不读注册表、不扫文件系统、不改教程源码**),再对**强化学习板块**做一次巡检(内容 + 代码)。然后**按步骤 3 → 4 → 5 → 6 顺序处理**——**步骤 3 内容至少落 2 处「大块」改动**(扩充或结构重组/内容重构,见步骤 3 的量级标准与底线),**步骤 4/5/6 各至少落 2-3 处改进**(扫不出足量时才降级并写明原因)。巡检时留意:被引用却无页面的悬空概念、功能 bug、渲染/水合异常、数值错误;任一步发现正确性问题立即优先修。**核心要求:每轮的总改动量要肉眼可见地大,若结尾感觉「这轮改得有点少」,就是没做够,回头补。**
+2. **单一数据源**:教程注册表 `src/lib/tutorials.ts` 驱动首页、侧边栏、移动抽屉、prev/next、sitemap、每页 metadata。新增教程 = 注册表加一条 + 建 `src/app/tutorials/<slug>/page.mdx` + 同步更新 `.claude/local/memory/rl-tutorial-structure.md`(RL 板块地图)。分类顺序由首次出现决定;新分类记得在 `getCategories()` 的 `categoryIcons` 加图标。
 3. **新 viz 必须注册**:任何新交互组件要加到 `mdx-components.tsx` 才能在 MDX 里用。
 4. **每页结构统一**:MDX 顶部 `export const metadata = tutorialMetadata("<slug>")`;正文遵循「概念 → 交互/代码 → 典型案例 → 常见问题 FAQ → 动手作业 → 小结(表格) → 参考文献」。末尾「参考文献」小节汇总本篇引用的论文/教材/讲义/博客并统一编号,正文对应处用 `[1]`/`[2]` 角标或行内链接。
 5. **验证是硬门槛**:
    - **六步改动全部落地后统一 `npm run build` 一次**(不必每步都 build),它是唯一的类型检查 + 预渲染门(会打印无害的 `Failed to patch lockfile ... 'os'` 警告)。
    - 例外:改了 `public/pyodide-worker.js` 或 `next.config.ts` 需重启 dev server 才能验证,单独处理。
    - viz 的数学 / 教程里的 Python 代码,尽量用本地 `python3` 或 `node` 独立复算验证正确性后再交付。
-6. **改完记得说清楚**:每轮结尾用中文小结,**按 1 → 2 → 3 → 4 → 5 → 6 六步分点报告**每步「本步改了什么 / 验证结果」——步骤 3 逐一列出本轮的 2+ 处大块改动(注明每处是扩充还是重组/重构),步骤 4/5/6 逐一列出本轮的多处改进(某步降级到 <2 处时写明原因;步骤 1-2 是必做侦察,即便无产出也要写明搜了什么/核对了什么),末尾附「后续方向」;并确认已同步更新 `memory/rl-loop-progress.md` 与 `memory/rl-tutorial-structure.md`(**每轮新增的进度记录块必须以 `## YYYY-MM-DD HH:MM 第 N 轮` 起头,精确到分钟**,时间取自系统当前时间,从上一轮的轮次号递增)。
-7. **大纲档即地图(精炼快照)**:`memory/rl-tutorial-structure.md` 是 RL 板块的「地图」,记录当前所有 RL 篇目的 slug/title/topic/icon、prev-next 链、文件系统对应关系、缺口清单。**它是一份不超过 2000 字的精炼快照,每轮重新组织而非追加流水账**(逐轮明细归 `rl-loop-progress.md`)。步骤 2 必读必核,每轮审阅后把(可能订正、精简后的)最新大纲写回档;**步骤 2 只动这一份档,不碰教程源码**——源码层面的变更(拆/并 topic、调整归属、重排顺序)在步骤 3 新建教程时落地,落地后再回头同步本档,杜绝「注册表 / 文件系统 / 大纲档」三处不一致。
+6. **改完记得说清楚**:每轮结尾用中文小结,**按 1 → 2 → 3 → 4 → 5 → 6 六步分点报告**每步「本步改了什么 / 验证结果」——步骤 3 逐一列出本轮的 2+ 处大块改动(注明每处是扩充还是重组/重构),步骤 4/5/6 逐一列出本轮的多处改进(某步降级到 <2 处时写明原因;步骤 1-2 是必做侦察,即便无产出也要写明搜了什么/核对了什么),末尾附「后续方向」;并确认已同步更新 `.claude/local/memory/rl-loop-progress.md` 与 `.claude/local/memory/rl-tutorial-structure.md`(**每轮新增的进度记录块必须以 `## YYYY-MM-DD HH:MM 第 N 轮` 起头,精确到分钟**,时间取自系统当前时间,从上一轮的轮次号递增)。
+7. **大纲档即地图(精炼快照)**:`.claude/local/memory/rl-tutorial-structure.md` 是 RL 板块的「地图」,记录当前所有 RL 篇目的 slug/title/topic/icon、prev-next 链、文件系统对应关系、缺口清单。**它是一份不超过 2000 字的精炼快照,每轮重新组织而非追加流水账**(逐轮明细归 `rl-loop-progress.md`)。步骤 2 必读必核,每轮审阅后把(可能订正、精简后的)最新大纲写回档;**步骤 2 只动这一份档,不碰教程源码**——源码层面的变更(拆/并 topic、调整归属、重排顺序)在步骤 3 新建教程时落地,落地后再回头同步本档,杜绝「注册表 / 文件系统 / 大纲档」三处不一致。
 
 ## 关键技术约束(踩过的坑)
 
-- **matplotlib 图表**:CodeRunner 现已支持内联渲染 PNG(见 `memory/coderunner-matplotlib-support.md`)。**图表标签必须用英文** —— Pyodide 只带 DejaVu 字体,中文会渲染成方框(□□□)。正文散文保持中文。
+- **matplotlib 图表**:CodeRunner 现已支持内联渲染 PNG(见 `.claude/local/memory/coderunner-matplotlib-support.md`)。**图表标签必须用英文** —— Pyodide 只带 DejaVu 字体,中文会渲染成方框(□□□)。正文散文保持中文。
 - **编辑 `public/pyodide-worker.js` 需硬刷新 / 重启 dev server** —— 它是经典 Web Worker,不在模块图里,HMR 不生效。改 `next.config.ts` 同理需重启。
 - **Turbopack 要求可序列化的 MDX 插件配置**:remark/rehype 插件用字符串名 `[["remark-gfm"]]`,不能 import 函数。
 - **表格靠 `remark-gfm`**:Markdown 表格是 GFM 扩展,已在 `next.config.ts` 启用 `remark-gfm`(否则表格渲染成裸文本)。

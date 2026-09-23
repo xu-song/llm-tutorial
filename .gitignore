@@ -43,5 +43,3 @@ next-env.d.ts
 # Claude local workspace
 .claude/settings.local.json
 .claude/local/
-memory/
-research/
