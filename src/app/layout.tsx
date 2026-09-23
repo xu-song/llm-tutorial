@@ -7,12 +7,12 @@ import { SITE_URL } from "@/lib/tutorials";
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
-    default: "机器学习交互式教程",
-    template: "%s · 机器学习交互式教程",
+    default: "大模型与机器学习教程",
+    template: "%s · 大模型与机器学习教程",
   },
-  description: "可在浏览器中运行 Python 的机器学习入门教程",
+  description: "可在浏览器中交互学习大模型、机器学习与强化学习的中文教程",
   openGraph: {
-    siteName: "机器学习交互式教程",
+    siteName: "大模型与机器学习教程",
     type: "website",
   },
 };

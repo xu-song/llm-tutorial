@@ -32,7 +32,7 @@ export default function NavBar() {
         <MobileNav />
         <Link href="/" className="mr-2 flex items-center gap-2 font-semibold">
           <span className="text-xl">🤖</span>
-          <span>机器学习交互式教程</span>
+          <span>大模型与机器学习教程</span>
         </Link>
         <nav className="ml-auto flex items-center gap-1">
           {link("/", "首页")}

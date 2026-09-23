@@ -37,12 +37,12 @@ export default function Home() {
       <div className="text-center">
         <div className="text-5xl">🤖</div>
         <h1 className="mt-4 text-4xl font-bold tracking-tight">
-          机器学习交互式教程
+          大模型与机器学习教程
         </h1>
         <p className="mx-auto mt-4 max-w-2xl text-lg text-zinc-600 dark:text-zinc-400">
-          在浏览器里直接运行 Python、拖动交互图表建立直觉,边学边练。
+          从机器学习基础到强化学习、大模型对齐与论文精读,用交互图表和可运行代码建立直觉。
           <br />
-          无需安装任何环境,打开即用。
+          按学习路径循序渐进,也可以直接跳到感兴趣的专题。
         </p>
 
         {/* 概览统计 */}

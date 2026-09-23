@@ -38,20 +38,6 @@ export interface NestedCategory {
 // 顺序即学习路径顺序;同时决定上一篇/下一篇。
 export const tutorials: Tutorial[] = [
   {
-    slug: "python-numpy-basics",
-    title: "Python 与 NumPy 基础",
-    desc: "零基础起步:变量、列表、循环、函数,以及机器学习离不开的 NumPy 数组运算。边读边运行。",
-    category: "编程基础",
-    icon: "🐍",
-  },
-  {
-    slug: "pandas-basics",
-    title: "Pandas 数据处理",
-    desc: "真实数据都是表格。用 Pandas 读取、筛选、分组、清洗——机器学习的第一步从这里开始。",
-    category: "编程基础",
-    icon: "🐼",
-  },
-  {
     slug: "probability-basics",
     title: "概率论基础",
     desc: "随机、条件概率、贝叶斯、期望与方差——机器学习的语言。翻硬币亲眼看大数定律。",
@@ -369,7 +355,6 @@ export const tutorials: Tutorial[] = [
 
 /** 领域 → 图标。新增领域记得在这里加一条。 */
 const CATEGORY_ICONS: Record<string, string> = {
-  编程基础: "🐍",
   基础理论: "🧮",
   监督学习: "🧭",
   评估与调优: "🎯",

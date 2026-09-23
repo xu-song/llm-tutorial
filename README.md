@@ -1,36 +1,42 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 大模型与机器学习教程
 
-## Getting Started
+一个中文交互式教程站,覆盖机器学习基础、深度学习、强化学习、大模型对齐与论文精读。教程以直觉解释、公式推导、交互可视化和可运行代码结合的方式组织,适合循序渐进学习,也适合按专题查阅。
 
-First, run the development server:
+站点地址:https://xu-song.github.io/llm-tutorial/
+
+## 内容结构
+
+- **基础理论**:概率、数值稳定性、信息论、交叉熵与 KL 散度等机器学习底层概念。
+- **监督学习**:线性回归、逻辑回归、KNN、SVM、朴素贝叶斯、决策树与集成学习。
+- **评估与调优**:模型评估、过拟合与正则化、交叉验证。
+- **无监督学习**:K-means、PCA 等经典方法。
+- **深度学习**:神经网络入门与表示学习基础。
+- **强化学习**:Bandit、MDP、动态规划、蒙特卡洛、TD、DQN、策略梯度、连续控制、RLHF、GRPO/RLVR、离线 RL、模仿学习、模型式 RL、分层 RL、多智能体 RL。
+- **前沿与对齐**:知识蒸馏、在线/混合蒸馏、学生超越老师、大模型解码等。
+- **论文阅读**:PPO、GRPO、DPO、Transformer、DeepSeek、Kimi、Qwen、InternVL、UI-TARS、MiniMax 等论文笔记。
+
+## 教程特色
+
+- **中文讲解**:避免只翻译术语,重点解释概念背后的直觉和适用边界。
+- **交互图表**:通过滑块、动态图和可视化组件观察算法行为。
+- **可运行代码**:部分章节可直接在浏览器中运行 Python 示例。
+- **公式与推导**:用 KaTeX 呈现关键公式,把数学定义和工程含义连起来。
+- **论文互链**:教程正文与论文阅读相互引用,便于从概念跳到原始论文。
+- **评论讨论**:每篇教程和论文页支持 GitHub 登录评论,由 GitHub Discussions 承载。
+
+## 本地运行
 
 ```bash
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+打开 http://localhost:3742 查看本地站点。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 构建
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+```
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+项目使用 Next.js 静态导出,部署到 GitHub Pages 时会由 GitHub Actions 自动构建。
