@@ -1,0 +1,209 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("glm-5");
+
+<PaperHeader slug="glm-5" />
+
+# GLM-5：从 Vibe Coding 到 Agentic Engineering
+
+2026 年 2 月，智谱/Z.ai 发布 GLM-5 技术报告（arXiv:2602.15763），题目很直接：**from Vibe Coding to Agentic Engineering**。<Cite n={1} />它不是单纯把 GLM-4.5 放大，而是把目标从「会写代码」推进到「能长期经营一个工程任务」：读仓库、改代码、跑命令、看报错、调整计划、再试，直到跨越数百轮交互。参数规模从 [GLM-4.5](/papers/glm-45) 的 355B/32B 激活扩到 **744B/40B 激活**，预训练数据从 23T 增到 **28.5T token**，并引入 [DeepSeek-V3.2](/papers/deepseek-v3-2) 同款 DSA 稀疏注意力以压低长上下文成本。<Cite n={1} />更关键的是后训练侧：官方把 RL 的工程瓶颈单独拎出来，用 **slime 异步 RL 基础设施**把 rollout 生成与策略训练解耦，服务于长程 agentic 任务。<Cite n={1} />
+
+> 📌 前置：GLM-5 是 [GLM-4.5](/papers/glm-45) 的续篇；架构侧建议对照 [DeepSeek-V3.2 的 DSA](/papers/deepseek-v3-2)，RL 侧建议先看 [GRPO 与 RLVR](/papers/grpo-deepseek-r1) 和 [策略梯度](/tutorials/policy-gradient)。
+
+## 一、有没有论文？有，而且是官方技术报告
+
+公开资料链条比较完整：
+
+- 官方 GitHub README 明确链接 GLM-5 Technical report，并给出 BibTeX:`GLM-5: from Vibe Coding to Agentic Engineering`,arXiv:2602.15763。<Cite n={2} />
+- arXiv 页面显示 v1 提交于 2026-02-17，v2 更新于 2026-02-24，主类目 cs.LG，同时属于 cs.CL，许可为 CC BY 4.0。<Cite n={1} />
+- Hugging Face `zai-org/GLM-5` 模型卡给出模型、评测与部署信息；后续 `GLM-5.2`、`GLM-5.3`、`GLM-5.3-Flash` 也都把 GLM-5 技术报告作为系列引用。<Cite n={[2,3]} />
+
+所以这篇不是「没有论文的发布材料精读」，而是**技术报告精读**。但要注意：GLM-5.2/5.3 的很多新能力来自后续博客与模型卡，它们不是 GLM-5 初版论文的全部内容；本文会把两者分开：前半讲 GLM-5 报告本体，最后一节讲 5.1/5.2/5.3 如何沿这条线继续演进。
+
+## 二、定位：为什么叫 Agentic Engineering
+
+GLM-4.5 把目标定义为 ARC:Agentic、Reasoning、Coding。GLM-5 的标题把 Coding 前面加了一个限定词：**Vibe Coding**。这个词在工程语境里指「让模型帮你糊出一段可跑代码」——一次 prompt、一次 diff、一次 demo。这种短程代码生成当然有用，但它离真正的软件工程还远。
+
+GLM-5 想优化的是另一种任务：<Cite n={1} />
+
+1. **任务模糊**：需求可能不完整，模型要主动读项目结构与现有约束。
+2. **反馈延迟**：一次改动不一定马上成功，需要跑测试、看日志、定位失败。
+3. **状态很长**：仓库、issue、依赖、历史尝试会撑爆短上下文。
+4. **动作带副作用**：命令、文件编辑、工具调用都会改变环境。
+5. **成功不可局部判断**：写对一个函数没用，最终要整个系统通过验证。
+
+这就是 agentic engineering 与普通 code generation 的差别：模型不只是输出代码，而是在一个可交互环境里反复做**计划 → 行动 → 观察 → 修正**。论文把 GLM-5 的核心能力都围绕这个目标组织：更长上下文、更便宜的长序列注意力、更强代码/终端/浏览器任务、更高吞吐的 RL。
+
+## 三、规模升级：744B/40B + 28.5T token
+
+GLM-5 延续 MoE 路线，但参数账明显上了一档：<Cite n={1} />
+
+| 模型 | 总参数 | 激活参数 | 预训练 token | 主要定位 |
+|---|---:|---:|---:|---|
+| GLM-4.5 | 355B | 32B | 23T | ARC:agentic/reasoning/coding |
+| GLM-5 | 744B | 40B | 28.5T | 长程软件工程与复杂系统智能体 |
+| GLM-5.3-Flash | 320B | 18B | 30T 多模态语料 | 更低成本、原生多模态、混合注意力 |
+
+从 32B 激活到 40B 激活，单 token 推理成本没有翻倍；真正放大的是**稀疏专家池的容量**。这与 2025 年主流开源前沿一致：DeepSeek-V3 是 671B/37B，Kimi K2 是 1.04T/32B，GLM-5 则落在 744B/40B。差别在于 GLM-5 把「长程工程」当一等目标，所以架构与后训练都围绕长上下文 agent rollouts 展开。
+
+用一个粗糙账本理解为什么 744B 总参还能部署：
+
+<CodeRunner defaultCode={String.raw`
+models = {
+    "GLM-4.5": dict(total=355, active=32, tokens=23.0),
+    "GLM-5": dict(total=744, active=40, tokens=28.5),
+    "DeepSeek-V3": dict(total=671, active=37, tokens=14.8),
+    "Kimi K2": dict(total=1040, active=32, tokens=15.5),
+}
+
+for name, m in models.items():
+    sparsity = m["active"] / m["total"]
+    print(f"{name:12s} 总参={m['total']:4.0f}B 激活={m['active']:2.0f}B "
+          f"激活占比={sparsity:5.1%} 预训练={m['tokens']:4.1f}T token")
+
+print("\n要点:MoE 的总参扩容主要买容量,每 token 成本更接近激活参数。")
+`} />
+
+这里不要把「总参更大」简单理解成「一定更聪明」。论文真正押注的是**智能效率**：相同/相近激活预算下，更多专家容量 + 更多预训练 token + 更大后训练吞吐，能不能换来更强长程任务表现。
+
+## 四、DSA：把长上下文成本从瓶颈变成可训练对象
+
+GLM-5 报告明确说集成了 **DeepSeek Sparse Attention（DSA）**，目的不是炫技，而是解决 agentic RL 的硬成本：长程任务的 rollout 很长，每一步又要多次采样；如果注意力仍是完整平方复杂度，后训练预算会被上下文长度吃掉。<Cite n={1} />
+
+DSA 的思想可以概括为两级注意力：
+
+1. 轻量索引器先给历史 token 打分；
+2. 每个 query 只选 top-k 个关键 token 进入主注意力；
+3. 主注意力从 $O(L^2)$ 降到 $O(Lk)$，其中 $k \ll L$。
+
+这与 DeepSeek-V3.2 的 DSA 同源。GLM-5 借用它的战略意义是：长上下文不只是「推理时能塞更多文件」，还是**训练时能把更长任务轨迹放进 RL**。工程智能体的难点往往不是单步知识，而是记住自己改过什么、测试为什么失败、下一步该验证哪里。
+
+一个 1M 上下文的直观量级：
+
+<CodeRunner defaultCode={String.raw`
+for L in [128_000, 300_000, 1_000_000]:
+    for k in [2048, 4096]:
+        dense = L * L
+        sparse = L * k
+        print(f"L={L:>7,d}, k={k:>4,d}: 主注意力计算对数约降为 {dense/sparse:6.1f}x")
+    print()
+`} />
+
+当然，DSA 不是免费午餐。索引器本身要训练，top-k 选择可能漏掉低频但关键的证据，而且长程任务的瓶颈还包括工具环境、执行时间、奖励稀疏度。GLM-5 的路线是把架构成本先压下去，再用 RL 基础设施吃掉剩下的系统瓶颈。
+
+## 五、slime：为什么 RL 基础设施成了论文主角
+
+技术报告把 **slime** 单独列为关键创新：一个异步 RL 基础设施，核心是**生成与训练解耦**。<Cite n={1} />这点对 LLM 后训练很重要。
+
+<figure className="my-6">
+  <img src="./fig-5-training-pipeline.svg" alt="GLM-5 整体训练流水线：左侧为预训练、长上下文 mid-training 与 sparse attention adaptation；右侧为 Overall SFT、Reasoning RL、Agentic RL、General RL，以及贯穿多阶段的 On-Policy Cross-Stage Distillation" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption>
+    <span className="figure-caption-main">这张图展示 GLM-5 的整体训练流水线：左侧是 27T token 预训练、长上下文 mid-training 与稀疏注意力适配；右侧是 SFT、Reasoning RL、Agentic RL、General RL，以及贯穿多阶段的 On-Policy Cross-Stage Distillation。</span>
+    <span className="figure-caption-source">图源：GLM-5-Team, <em>GLM-5: from Vibe Coding to Agentic Engineering</em>（arXiv:2602.15763）Figure 5。</span>
+  </figcaption>
+</figure>
+
+传统同步 RL loop 大致是：
+
+1. 当前策略生成一批 rollouts;
+2. 等全部环境跑完；
+3. 计算奖励/优势；
+4. 训练更新；
+5. 再进入下一轮。
+
+长程 agent 任务会把这个 loop 拖得很慢：有的样本很快失败，有的要跑几百轮工具调用；有的环境卡在测试，有的还要浏览器/终端/沙箱。同步等待会导致 GPU 空转，训练吞吐被最慢 rollout 拖住。
+
+slime 的目标是把它改成流水线：
+
+- rollout worker 持续生成新轨迹；
+- trainer 持续消费已经完成的轨迹；
+- 策略版本、样本新鲜度、优势估计与 off-policy 偏差由基础设施管理；
+- 更细粒度地做 post-training 迭代，而不是等一个巨大 batch 完整落地。
+
+这和 [UI-TARS-2](/papers/ui-tars-2) 的多轮交互式 RL、[Kimi K2](/papers/kimi-k2) 的 agentic 数据飞轮有共同趋势：当训练对象变成「完整任务轨迹」，真正难的就不只是算法公式，而是**环境吞吐、状态管理、失败样本利用、奖励延迟**这些工程问题。
+
+## 六、Agent RL：从答案奖励到过程经营
+
+GLM-5 的 RL 目标不再只是数学题「答案对不对」，而是让模型在复杂环境里持续推进任务。论文摘要提到 asynchronous agent RL algorithms，模型卡和官方 README 则强调 GLM-5 在 CC-Bench-V2、SWE-bench、Terminal-Bench、BrowseComp、Vending Bench 2 等长程任务上的表现。<Cite n={[1,2,3]} />
+
+这些任务的共同点是奖励更像**经营结果**:
+
+- SWE-bench：最终 patch 是否修好真实 issue;
+- Terminal-Bench：在真实终端环境里完成任务；
+- BrowseComp：搜索、读网页、整合证据；
+- Vending Bench 2：模拟经营一年自动售货机，最终余额是长期策略结果；
+- MCP/Tool benchmarks：多工具选择、参数填写、反馈修正。
+
+这类奖励与 RLVR 的数学验算不同：它更贵、更慢、更容易被环境细节污染，但更接近真实 agent。GLM-5 的贡献点可以理解为：把 2025 年「可验证奖励 RL」从数学/代码单题，推向**长期环境中的可验证结果**。
+
+## 七、在线蒸馏：把长程 Agent 能力稳定压回主模型
+
+GLM-5 已经把任务从短程代码生成推到长程 agentic engineering，这会让后训练面临一个更难的问题：RL 可以在某些环境里探索出更强行为，但这些行为未必稳定保留在主模型里，也可能让通用对话、短程代码或别的任务回退。
+
+在线蒸馏在这里的角色不是替代 GLM-5 的 agent RL，而是服务于能力迁移和稳定化：
+
+1. 长程 RL 或领域专家先在特定任务上拉高上限；
+2. 当前 student 生成自己的轨迹，暴露真实会犯的错误；
+3. teacher 或中间 checkpoint 在这些 student-visited states 上提供更密集的过程信号；
+4. student 把阶段性能力吸收回来，减少多阶段训练后的 regression。
+
+这和 [OPD 总览](/papers/opd-agarwal) 里的共同结构一致：**student rollout + teacher scoring**。<Cite n={[4,5]} />GLM-5 的特殊之处在于它把这件事放在 slime 异步 RL 与长程工程任务环境里，而不是只在数学题或静态 prompt 上验证。换句话说，GLM-5 关注的不是“多一个蒸馏 loss”，而是如何让长程 agent 能力在持续 post-training 中被收集、压缩和保存。
+
+读这一点时也要谨慎：如果技术报告没有完整公开 OPD loss、teacher routing 和 teacher pool 细节，就不应该把 GLM-5 强行写成某个特定 OPD 公式的实例。更稳妥的读法是：GLM-5 代表了在线蒸馏从推理题扩展到长程 agent 训练系统的趋势。
+
+## 八、评测数字：别只看榜单，要看评测口径
+
+官方模型卡给出一组代表数字：<Cite n={3} />
+
+| 维度 | GLM-5 数字 | 读法 |
+|---|---:|---|
+| AIME 2026 I | 92.7 | 数学推理已进入前沿开源水平 |
+| GPQA-Diamond | 86.0 | 高难科学问答能力强 |
+| SWE-bench Verified | 77.8 | 真实 GitHub issue 修复能力是主卖点之一 |
+| BrowseComp | 62.0 / 75.9（带上下文管理） | 搜索与上下文管理强相关 |
+| Terminal-Bench 2.0 | 56.2 / 60.7 或 61.1 | 结果依赖 harness 与执行环境 |
+| τ²-Bench | 89.7 | 工具/任务执行能力 |
+| Vending Bench 2 | $4,432.12 | 长期经营任务，更像 agent 耐力测试 |
+
+这类数字最容易误读。建议看三点：
+
+1. **上下文窗口口径**：很多 agent/coding 评测使用 128K、200K、300K 甚至 1M 上下文；这不是单纯模型能力，也是上下文与工程栈能力。
+2. **工具 harness 口径**：同一模型换执行框架、终端代理、浏览器代理，结果可能变动很大。
+3. **成本口径**：长程任务的 pass rate 如果靠大量 token/工具调用堆出来，部署价值要和成本一起看。
+
+GLM-5 报告的价值不是某个榜单第一，而是把评测靶心从「一次回答」移到「长程任务完成」。这会倒逼模型、上下文、推理框架、RL 基础设施一起升级。
+
+## 九、从 GLM-5 到 5.3：一条很清晰的系列路线
+
+GLM-5 初版之后，官方仓库与模型卡展示了后续演化：<Cite n={[2,3]} />
+
+- **GLM-5.1**：继续强化 agentic engineering，强调长时间会话、反复迭代、上百轮工具调用后仍能保持判断力。
+- **GLM-5.2**：主打 solid 1M-token context，引入 **IndexShare**（每四个稀疏注意力层共享 indexer），在 1M 上下文下 per-token FLOPs 降 2.9×；MTP speculative decoding 接受长度提升最多 20%。
+- **GLM-5.3**：使用与 5.2 相同底座，所有增益来自 post-training；复杂代码、长程任务和 cyber capability 明显上升。
+- **GLM-5.3-Flash**：重新训练 320B/18B 底座，引入稀疏 + 线性注意力混合架构、mHC（Manifold-Constrained Hyper-Connections），并使用 30T token 多模态预训练语料，成为系列里更低成本、原生多模态的一支。
+
+所以「GLM-5」已经不是单篇论文能完全覆盖的一个点，而是一个系列主线：大 MoE 底座 + 稀疏长上下文 + agentic RL 基础设施 + 持续 post-training。<Cite n={[1,2,3]} />把它放进本站关键词「GLM 系列」是合理的，后续如果 GLM-5.2/5.3 有更完整技术报告，可以再拆成独立精读。
+
+## 十、局限：这篇报告该怎么谨慎读
+
+1. **很多系统细节不可复现**：slime、环境池、内部 CC-Bench-V2 与采样策略决定了最终能力，但外部很难完全复刻。
+2. **agentic benchmark 依赖 harness**：模型本体、提示词、工具协议、上下文管理都会影响分数。
+3. **DSA 迁移成本高**：稀疏注意力不只是换一层模块，还牵涉训练配方、索引器对齐、推理内核与 KV 管理。
+4. **安全边界更难**：越擅长长期工具使用与 cyber 任务，越需要对授权、沙箱与风险控制有清晰边界。
+5. **OPD 细节需要看报告口径**：如果 teacher pool、routing 和 loss 没有完整公开，就只能把它作为后训练趋势来读，不能补造实现细节。
+
+因此 GLM-5 最值得学习的不是「某个榜单数值」，而是工程化方向：当模型目标变成长程任务，论文的核心创新会从单个 loss/结构，转向**模型架构 + 训练系统 + 环境设计 + 评测协议**的组合。
+
+## 十一、一句话总结
+
+GLM-5 是 GLM 系列从“会写代码”转向“会做工程”的拐点：744B/40B MoE 扩容提供容量，DSA 让长上下文成本可控，slime 异步 RL 让长程 agent rollouts 能被持续训练，在线蒸馏则承担把阶段性长程能力稳定压回主模型的角色。它标志着 2026 年前沿开源模型竞争的一个新中心：谁能把模型放进环境里，让它稳定工作很久。
+
+## 参考资料
+
+<References>
+1. GLM-5-Team (2026). *GLM-5: from Vibe Coding to Agentic Engineering*. arXiv: [2602.15763](https://arxiv.org/abs/2602.15763). —— 本文主报告，提供 GLM-5 的模型规模、训练流水线、DSA、slime 异步 RL、agentic benchmark 与 Figure 5 训练流程图。
+2. Z.ai / GLM Team. *GLM-5 official repository*. [github.com/zai-org/GLM-5](https://github.com/zai-org/GLM-5). —— 官方仓库，提供模型发布、技术报告入口、部署与系列模型说明。
+3. Z.ai. *GLM-5 model card*. [huggingface.co/zai-org/GLM-5](https://huggingface.co/zai-org/GLM-5). —— 官方模型卡，补充 GLM-5 的评测、权重、使用方式与部署信息。
+4. veRL contributors (2026). *On-Policy Distillation (OPD)*. [verl.readthedocs.io/en/latest/algo/opd.html](https://verl.readthedocs.io/en/latest/algo/opd.html). —— OPD / MOPD 工程背景，用于解释 student rollout、teacher scoring 与跨阶段蒸馏的训练结构。
+5. Kevin Lu, Thinking Machines Lab (2025). *On-Policy Distillation*. [thinkingmachines.ai/blog/on-policy-distillation](https://thinkingmachines.ai/blog/on-policy-distillation/). —— OPD 工程 recipe 与成本对比背景，用于理解在线蒸馏为什么适合复制强策略。
+</References>

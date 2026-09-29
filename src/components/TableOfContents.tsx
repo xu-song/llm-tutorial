@@ -25,9 +25,12 @@ export default function TableOfContents() {
     setActiveId("");
 
     let observer: IntersectionObserver | null = null;
+    let raf = 0;
 
-    // 软导航时新正文可能尚未替换完成,等下一帧再读 DOM 更稳妥。
-    const raf = requestAnimationFrame(() => {
+    const scanHeadings = () => {
+      observer?.disconnect();
+      observer = null;
+
       const article = document.querySelector("article");
       if (!article) return;
       const nodes = Array.from(article.querySelectorAll("h2, h3")) as HTMLElement[];
@@ -57,10 +60,19 @@ export default function TableOfContents() {
       );
 
       nodes.forEach((n) => n.id && observer!.observe(n));
-    });
+    };
+
+    const scheduleScan = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(scanHeadings);
+    };
+
+    scheduleScan();
+    window.addEventListener("tutorial-section-numbers-ready", scheduleScan);
 
     return () => {
       cancelAnimationFrame(raf);
+      window.removeEventListener("tutorial-section-numbers-ready", scheduleScan);
       observer?.disconnect();
     };
   }, [pathname]);

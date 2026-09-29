@@ -3,20 +3,32 @@ import Sidebar from "@/components/Sidebar";
 import PrevNext from "@/components/PrevNext";
 import TableOfContents from "@/components/TableOfContents";
 import Comments from "@/components/Comments";
-import { getPapersNav } from "@/lib/papers";
+import {
+  getPapersNav,
+  getPapersNavByDate,
+  getPapersNavFlat,
+} from "@/lib/papers";
 
 // 论文区三栏布局,镜像 tutorials/layout.tsx:
-//   左 = 论文「之间」的导航(全部论文列表,按方向分组,跨篇跳转)
+//   左 = 论文「之间」的导航(全部论文列表,默认不分组按时间正序;关键词 / 时间分组可切换)
 //   中 = 正文(PaperHeader + 阅读笔记 MDX)
 //   右 = 论文「之内」的章节目录(本页 h2/h3,带滚动高亮)
 export default function PaperLayout({ children }: { children: ReactNode }) {
-  const tree = getPapersNav();
-
   return (
     <div className="mx-auto flex w-full max-w-7xl gap-8 px-4 py-8">
       <aside className="hidden w-56 shrink-0 lg:block">
         <div className="sticky top-20 max-h-[calc(100vh-6rem)] overflow-y-auto pr-2">
-          <Sidebar tree={tree} basePath="/papers" heading="全部论文 · 按关键词" />
+          <Sidebar
+            tree={getPapersNavFlat()}
+            basePath="/papers"
+            heading="全部论文"
+            treeLabel="列表"
+            altTree={getPapersNav()}
+            altLabel="关键词"
+            altTree2={getPapersNavByDate()}
+            altLabel2="时间"
+            showLeafIcons={false}
+          />
         </div>
       </aside>
 
@@ -35,6 +47,7 @@ export default function PaperLayout({ children }: { children: ReactNode }) {
             [&_strong]:font-semibold [&_strong]:text-zinc-900 [&_strong]:dark:text-zinc-100
             [&_table]:my-4 [&_table]:w-full [&_table]:text-sm [&_th]:border [&_th]:border-zinc-200 [&_th]:dark:border-zinc-700 [&_th]:bg-zinc-50 [&_th]:dark:bg-zinc-800 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_td]:border [&_td]:border-zinc-200 [&_td]:dark:border-zinc-700 [&_td]:px-3 [&_td]:py-2 [&_td]:text-zinc-700 [&_td]:dark:text-zinc-300
             [&_blockquote]:border-l-4 [&_blockquote]:border-emerald-300 [&_blockquote]:bg-emerald-50 [&_blockquote]:px-4 [&_blockquote]:py-2 [&_blockquote]:rounded-r-lg [&_blockquote]:my-4 [&_blockquote_p]:my-1 [&_blockquote_p]:text-zinc-700 [&_blockquote]:dark:border-emerald-700 [&_blockquote]:dark:bg-emerald-950/40 [&_blockquote_p]:dark:text-zinc-300
+            [&_figcaption]:!mt-3 [&_figcaption]:mx-auto [&_figcaption]:max-w-2xl [&_figcaption]:text-center [&_figcaption]:text-zinc-500 [&_figcaption]:dark:text-zinc-500 [&_.figure-caption-main]:block [&_.figure-caption-main]:!text-[13px] [&_.figure-caption-main]:!leading-5 [&_.figure-caption-main]:text-zinc-500 [&_.figure-caption-main]:dark:text-zinc-500 [&_.figure-caption-source]:mt-1 [&_.figure-caption-source]:block [&_.figure-caption-source]:!text-[11px] [&_.figure-caption-source]:!leading-4 [&_.figure-caption-source]:text-zinc-400 [&_.figure-caption-source]:dark:text-zinc-600
           "
         >
           {children}

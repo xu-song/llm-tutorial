@@ -2,31 +2,31 @@ import { tutorialMetadata } from "@/lib/tutorials";
 
 export const metadata = tutorialMetadata("on-policy-distillation");
 
-# 🎬 在线蒸馏(on-policy distillation)
+# 🎬 在线蒸馏（on-policy distillation）
 
-上一篇[知识蒸馏](/tutorials/knowledge-distillation)里,老师是**冻结的**,数据由老师或数据集提供,学生被动模仿——这叫**离线(off-policy)蒸馏**。它有个致命隐患:**学生只在「老师会遇到的状态」下学过,一旦自己生成时跑偏到没见过的地方,就会一步错、步步错。** 在线 / **on-policy 蒸馏**换了个思路:**让学生自己生成内容,老师在学生走过的每一步上打分纠正。** 这是 2024 年以来大模型蒸馏的当红方案。
+上一篇[知识蒸馏](/tutorials/knowledge-distillation)里，老师是**冻结的**，数据由老师或数据集提供，学生被动模仿——这叫**离线（off-policy）蒸馏**。<Cite n={[1,2]} />它有个致命隐患：**学生只在「老师会遇到的状态」下学过，一旦自己生成时跑偏到没见过的地方，就会一步错、步步错。** 在线 / **on-policy 蒸馏**换了个思路：**让学生自己生成内容，老师在学生走过的每一步上打分纠正。** 这是 2024 年以来大模型蒸馏的当红方案。<Cite n={[4,9]} />
 
-> 💡 **关键洞察**:on-policy 蒸馏的三段式定义——**数据来自学生** → 覆盖学生真正会遇到的状态(补上暴露偏差);**老师逐 token 打分** → 提供稠密信号(不像 RL 只给一个终局奖励);**用反向 KL 拉齐** → mode-seeking、不可 hack。一句话:**让学生自己跑、老师当场纠错**。这篇会用到[前向 vs 反向 KL](/tutorials/forward-reverse-kl) 和[知识蒸馏](/tutorials/knowledge-distillation) 两个前置概念。
+> 💡 **关键洞察**：on-policy 蒸馏的三段式定义——**数据来自学生** → 覆盖学生真正会遇到的状态（补上暴露偏差）；**老师逐 token 打分** → 提供稠密信号（不像 RL 只给一个终局奖励）；**用反向 KL 拉齐** → mode-seeking、不可 hack。一句话：**让学生自己跑、老师当场纠错**。这篇会用到[前向 vs 反向 KL](/tutorials/forward-reverse-kl) 和[知识蒸馏](/tutorials/knowledge-distillation) 两个前置概念。
 
-## 离线蒸馏的病:暴露偏差
+## 离线蒸馏的病：暴露偏差
 
-想象教一个学生下棋,方法是让他背棋谱(老师的对局)。问题是:真下起来,他会走到棋谱里从没出现过的残局——而他恰恰没在那些局面上练过。**训练时见到的状态分布,和自己生成时进入的状态分布,对不上**,这叫**暴露偏差(exposure bias)**,也叫**复合误差(compounding error)**。
+想象教一个学生下棋，方法是让他背棋谱（老师的对局）。问题是：真下起来，他会走到棋谱里从没出现过的残局——而他恰恰没在那些局面上练过。**训练时见到的状态分布，和自己生成时进入的状态分布，对不上**，这叫**暴露偏差（exposure bias）**，也叫**复合误差（compounding error）**。<Cite n={[7,8]} />
 
-形式化地,离线蒸馏的训练数据来自老师,而测试/生成时数据来自学生自己,两者的状态分布对不上:
+形式化地，离线蒸馏的训练数据来自老师，而测试/生成时数据来自学生自己，两者的状态分布对不上：
 
 $$
 p_{\text{train}}(x) = p_{\text{teacher}}(x) \;\neq\; p_{\text{student}}(x) = p_{\text{test}}(x)
 $$
 
-> ⚠️ **注意:长序列 / 思维链放大这个病**。设学生每一步有 $\varepsilon$ 的概率漂移到「老师没教过」的状态,那么走 $N$ 步后仍留在老师分布内的概率约为 $(1-\varepsilon)^N$,随 $N$ 指数衰减趋向 0。这正是**数学推理、长链思维(long CoT)**受暴露偏差伤害最大的原因——序列越长,跑偏越严重。短文本分类则几乎无感。
+> ⚠️ **注意：长序列 / 思维链放大这个病**。设学生每一步有 $\varepsilon$ 的概率漂移到「老师没教过」的状态，那么走 $N$ 步后仍留在老师分布内的概率约为 $(1-\varepsilon)^N$，随 $N$ 指数衰减趋向 0。这正是**数学推理、长链思维（long CoT）**受暴露偏差伤害最大的原因——序列越长，跑偏越严重。短文本分类则几乎无感。
 
-用一个例子直观感受:学生**自己生成**时,会频繁进入一些「没学好、老师又很少涉足」的状态。下面给两个不同的例子,它们演示的是同一个现象——**点标签切换**:「🎮 走格子」在一维格子上走,「✍️ 造句」逐词生成句子。
+用一个例子直观感受：学生**自己生成**时，会频繁进入一些「没学好、老师又很少涉足」的状态。下面给两个不同的例子，它们演示的是同一个现象——**点标签切换**：「🎮 走格子」在一维格子上走，「✍️ 造句」逐词生成句子。
 
-<CodeTabs labels={["🎮 例子一:走格子", "✍️ 例子二:造句"]}>
+<CodeTabs labels={["🎮 例子一：走格子", "✍️ 例子二：造句"]}>
 
 <div>
 
-> 🎮 **走格子**:一个小人在直线格子上走路——格子 0→5 = 走到过的位置;走一步 = 一次决策;在某格「卡住」= 在该位置能力不足、迈不出去;老师 = 顺畅到终点的强模型,学生 = 会卡壳的小模型。下面让老师和学生各走几趟,对比它们分别经过哪些格子。
+> 🎮 **走格子**：一个小人在直线格子上走路——格子 0→5 = 走到过的位置；走一步 = 一次决策；在某格「卡住」= 在该位置能力不足、迈不出去；老师 = 顺畅到终点的强模型，学生 = 会卡壳的小模型。下面让老师和学生各走几趟，对比它们分别经过哪些格子。
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -85,13 +85,13 @@ print("   没教过学生'卡住时怎么脱身';on-policy 蒸馏正好补上这
 
 <div>
 
-> ✍️ **造句**:一个玩具语言模型逐词生成句子(用的正是[大模型解码](/tutorials/llm-decoding)里的 softmax 采样)。老师语法过关只生成通顺句;学生语法没学透会跑出「猫在猫睡觉」这类病句,于是进入一批老师根本不会产生的上文(如「在→猫」)。下面统计这些「病句上文」。
+> ✍️ **造句**：一个玩具语言模型逐词生成句子（用的正是[大模型解码](/tutorials/llm-decoding)里的 softmax 采样）。老师语法过关只生成通顺句；学生语法没学透会跑出「猫在猫睡觉」这类病句，于是进入一批老师根本不会产生的上文（如「在→猫」）。下面统计这些「病句上文」。
 
-**先看老师的「语法」长什么样**。这个玩具模型的规则可以画成一张图——节点是词,箭头是「允许的下一个词」。**点按钮切换老师 / 学生**:
+**先看老师的「语法」长什么样**。这个玩具模型的规则可以画成一张图——节点是词，箭头是「允许的下一个词」。**点按钮切换老师 / 学生**：
 
 <GrammarGraph />
 
-老师的语法是一条严格的链:开头 `{猫|狗}` → 强制走 `在` → `{睡觉|跑}` → 强制 `。` 结束。每个岔路口只有 2 选 1,所以老师**总共只能生成 4 个句子**:
+老师的语法是一条严格的链：开头 `{猫|狗}` → 强制走 `在` → `{睡觉|跑}` → 强制 `。` 结束。每个岔路口只有 2 选 1，所以老师**总共只能生成 4 个句子**：
 
 | 老师能生成的句子 | 出现概率 |
 |---|---|
@@ -100,9 +100,9 @@ print("   没教过学生'卡住时怎么脱身';on-policy 蒸馏正好补上这
 | 狗在睡觉。 | ~25% |
 | 狗在跑。 | ~25% |
 
-注意:这 4 句里出现的「上文」永远是 `<s>→猫`、`猫→在`、`在→睡觉` 这一类**顺着语法走**的组合。老师**从不**产生「在→猫」(往回蹦)、「猫→猫」(重复)这种上文。
+注意：这 4 句里出现的「上文」永远是 `<s>→猫`、`猫→在`、`在→睡觉` 这一类**顺着语法走**的组合。老师**从不**产生「在→猫」（往回蹦）、「猫→猫」（重复）这种上文。
 
-**学生**则不同:它在「猫」「在」之后仍给错误的词留了概率(上图红色虚线),所以自己生成时会写出「猫在猫睡觉」这类病句,一旦写下就进入了「在→猫」这种**老师语料里压根没有**的上文。下面用代码统计:让老师和学生各生成 4000 句,找出「学生频繁产生、但老师从不产生」的上文:
+**学生**则不同：它在「猫」「在」之后仍给错误的词留了概率（上图红色虚线），所以自己生成时会写出「猫在猫睡觉」这类病句，一旦写下就进入了「在→猫」这种**老师语料里压根没有**的上文。下面用代码统计：让老师和学生各生成 4000 句，找出「学生频繁产生、但老师从不产生」的上文：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -179,17 +179,17 @@ print("   on-policy 蒸馏让学生自己生成、老师当场纠正,才补得�
 
 </CodeTabs>
 
-把上面代码框里的「走格子」画成动画,按 ▶ 看学生怎么卡在格子 3/4——这是暴露偏差最直观的样子:
+把上面代码框里的「走格子」画成动画，按 ▶ 看学生怎么卡在格子 3/4——这是暴露偏差最直观的样子：
 
 <ExposureBiasWalk />
 
-> 🔗 两个例子一一对应:「格子 3/4」↔「病句上文(在→猫、猫→猫…)」;「学生卡在那里」↔「学生频繁生成这些病句」;「老师不去那儿」↔「老师语料里没有这些上文」。它们讲的是同一件事——**学生自己会进入老师覆盖不到的状态**。
+> 🔗 两个例子一一对应：「格子 3/4」↔「病句上文（在→猫、猫→猫…）」；「学生卡在那里」↔「学生频繁生成这些病句」；「老师不去那儿」↔「老师语料里没有这些上文」。它们讲的是同一件事——**学生自己会进入老师覆盖不到的状态**。
 
 ## 训练算法
 
-on-policy 蒸馏的算法骨架出奇简单:**它几乎就是一个 RL 训练循环,只是把奖励换成「老师的负逐 token 反向 KL」**。具体说:折扣因子 $\gamma=0$(只看当前 token,不需要回报)、rollout 不必跑完就能算损失(逐 token 稠密)、老师只做前向推理(不反传、不更新参数)。下面是单步伪代码:
+on-policy 蒸馏的算法骨架出奇简单：**它几乎就是一个 RL 训练循环，只是把奖励换成「老师的负逐 token 反向 KL」**。<Cite n={9} />具体说：折扣因子 $\gamma=0$（只看当前 token，不需要回报）、rollout 不必跑完就能算损失（逐 token 稠密）、老师只做前向推理（不反传、不更新参数）。下面是单步伪代码：
 
-> 📝 **on-policy 蒸馏训练循环(伪代码)**
+> 📝 **on-policy 蒸馏训练循环（伪代码）**
 >
 > ```python
 > for step in range(N_steps):
@@ -204,29 +204,29 @@ on-policy 蒸馏的算法骨架出奇简单:**它几乎就是一个 RL 训练循
 >     loss.backward(); optimizer.step()
 > ```
 
-下面把这套循环画成动画,按 ▶ 看四个相位轮流点亮,学生分布(蓝条)随训练步数逐步逼近老师(橙条),反向 KL(红条)递减:
+下面把这套循环画成动画，按 ▶ 看四个相位轮流点亮，学生分布（蓝条）随训练步数逐步逼近老师（橙条），反向 KL（红条）递减：
 
 <OnPolicyDistillLoop />
 
-> ⚠️ **注意:老师只需前向推理**。老师不进入反向传播图、不更新参数,所以可以 `torch.no_grad()`、可以用更低精度(fp8/int8)、可以放到另一张卡上、甚至部分缓存。这是 on-policy 蒸馏「便宜」的关键之一(详见[实践细节](#-实践细节--实现注意)一节)。
+> ⚠️ **注意：老师只需前向推理**。老师不进入反向传播图、不更新参数，所以可以 `torch.no_grad()`、可以用更低精度（fp8/int8）、可以放到另一张卡上、甚至部分缓存。这是 on-policy 蒸馏「便宜」的关键之一（详见[实践细节](#-实践细节--实现注意)一节）。
 
-## on-policy 蒸馏:在学生自己的轨迹上学
+## on-policy 蒸馏：在学生自己的轨迹上学
 
-解决办法出奇简单:
+解决办法出奇简单：
 
-1. **让学生自己生成**一段序列(on-policy 采样);
-2. **老师对学生生成的每个 token 打分**——给出老师在同样上下文下的概率;
-3. 用**逐 token 反向 KL** 作为损失,把学生朝老师拉。
+1. **让学生自己生成**一段序列（on-policy 采样）；
+2. **老师对学生生成的每个 token 打分**——给出老师在同样上下文下的概率；
+3. 用**逐 token 反向 KL** 作为损失，把学生朝老师拉。<Cite n={4} />
 
-损失是学生分布 $\pi_\theta$ 对老师分布 $\pi_\text{teacher}$ 的**反向 KL**,期望在**学生自己的轨迹**下取:
+损失是学生分布 $\pi_\theta$ 对老师分布 $\pi_\text{teacher}$ 的**反向 KL**，期望在**学生自己的轨迹**下取：
 
 $$
 \mathcal{L} = \mathbb{E}_{x\sim\pi_\theta}\!\left[\sum_t D_{KL}\big(\pi_\theta(\cdot\mid x_{<t})\parallel \pi_\text{teacher}(\cdot\mid x_{<t})\big)\right]
 $$
 
-为什么是**反向** KL?原因有三,详见下一节[为什么是反向 KL](#-为什么是反向-kl):反向是 **mode-seeking(择一收窄)**、**zero-forcing(不可 hack)**、且期望天然在学生下取(所以必须 on-policy 采样)。
+为什么是**反向** KL？原因有三，详见下一节[为什么是反向 KL](#-为什么是反向-kl)：反向是 **mode-seeking（择一收窄）**、**zero-forcing（不可 hack）**、且期望天然在学生下取（所以必须 on-policy 采样）。
 
-下面把上面那个「卡住的时刻」放大来看:此刻学生正站在它自己走到的某个状态,面对下一步的若干选项,**老师和学生各有一套倾向**。代码算出这一步的反向 KL,也就是「这一个 token 的损失」:
+下面把上面那个「卡住的时刻」放大来看：此刻学生正站在它自己走到的某个状态，面对下一步的若干选项，**老师和学生各有一套倾向**。代码算出这一步的反向 KL，也就是「这一个 token 的损失」：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -255,173 +255,175 @@ print("     on-policy 蒸馏让老师在这里逐 token 打分纠正,正好补�
 
 ## 为什么是反向 KL
 
-on-policy 蒸馏几乎总是用**反向** KL $D_{KL}(\pi_\theta \parallel \pi_T)$(期望在学生分布下取),而不是前向 KL。原因有三:
+on-policy 蒸馏几乎总是用**反向** KL $D_{KL}(\pi_\theta \parallel \pi_T)$（期望在学生分布下取），而不是前向 KL。原因有三：
 
-1. **Mode-seeking(择一收窄)vs mean-seeking(摊平覆盖)**。回忆[前向 vs 反向 KL](/tutorials/forward-reverse-kl):前向 $D_{KL}(P\parallel Q)$ 迫使 $Q$ **覆盖** $P$ 的所有峰(mean-seeking,$Q$ 倾向于摊宽、落在峰之间);反向 $D_{KL}(Q\parallel P)$ 迫使 $Q$ **抓住** $P$ 的某一个峰(mode-seeking,$Q$ 倾向于变窄、择一)。蒸馏时我们要学生「学到老师的具体本事」,而不是「摊平到学不像的多样性上」,所以反向更合适。
+1. **Mode-seeking（择一收窄）vs mean-seeking（摊平覆盖）**。回忆[前向 vs 反向 KL](/tutorials/forward-reverse-kl)：前向 $D_{KL}(P\parallel Q)$ 迫使 $Q$ **覆盖** $P$ 的所有峰（mean-seeking，$Q$ 倾向于摊宽、落在峰之间）；反向 $D_{KL}(Q\parallel P)$ 迫使 $Q$ **抓住** $P$ 的某一个峰（mode-seeking，$Q$ 倾向于变窄、择一）。蒸馏时我们要学生「学到老师的具体本事」，而不是「摊平到学不像的多样性上」，所以反向更合适。<Cite n={5} />
 
-2. **Zero-forcing / 不可 hack**。反向 KL 是「零强制」的:在老师概率 $\pi_T\approx 0$ 的 token 上,学生若放质量,会被 $\log(\pi_\theta/\pi_T)\to\infty$ 重罚,所以学生**必须**把那些 token 的概率压到接近 0。这意味着「低反向 KL」**等价于**「学生在老师认可的 token 上行为像老师」——学生没法靠在老师沉默处堆质量来 hack 损失。前向 KL 没这个性质。
+2. **Zero-forcing / 不可 hack**。反向 KL 是「零强制」的：在老师概率 $\pi_T\approx 0$ 的 token 上，学生若放质量，会被 $\log(\pi_\theta/\pi_T)\to\infty$ 重罚，所以学生**必须**把那些 token 的概率压到接近 0。这意味着「低反向 KL」**等价于**「学生在老师认可的 token 上行为像老师」——学生没法靠在老师沉默处堆质量来 hack 损失。前向 KL 没这个性质。
 
-3. **反向 KL 天然 on-policy**。反向 KL 的期望在学生 $Q$ 下取,$\mathbb{E}_{x\sim\pi_\theta}[\cdot]$——所以**必须从学生采样**才能估计它,这正好是 on-policy 的来源。前向 KL 期望在老师 $P$ 下取,可以从老师采样(off-policy)。所以「反向 KL」和「on-policy」是绑定的:选了反向,就天然 on-policy。
+3. **反向 KL 天然 on-policy**。反向 KL 的期望在学生 $Q$ 下取，$\mathbb{E}_{x\sim\pi_\theta}[\cdot]$——所以**必须从学生采样**才能估计它，这正好是 on-policy 的来源。前向 KL 期望在老师 $P$ 下取，可以从老师采样（off-policy）。所以「反向 KL」和「on-policy」是绑定的：选了反向，就天然 on-policy.<Cite n={4} />
 
-拖动下面滑块,把学生的质量从老师的 mode(第一个 token)挪到第二个 token,看反向 KL 怎么飙升、哪个 token 被罚最狠(红框):
+拖动下面滑块，把学生的质量从老师的 mode（第一个 token）挪到第二个 token，看反向 KL 怎么飙升、哪个 token 被罚最狠（红框）：
 
 <ReverseKLBar />
 
-> 💡 **关键洞察**:反向 KL = **mode-seeking + zero-forcing + 天然 on-policy**,三合一。这就是 on-policy 蒸馏选它、而不是前向 KL 的根本原因。
+> 💡 **关键洞察**：反向 KL = **mode-seeking + zero-forcing + 天然 on-policy**，三合一。这就是 on-policy 蒸馏选它、而不是前向 KL 的根本原因。
 
-## 三种范式对比:SFT vs RL vs on-policy 蒸馏
+## 三种范式对比：SFT vs RL vs on-policy 蒸馏
 
-on-policy 蒸馏正好卡在监督微调和强化学习中间,取两者之长:
+on-policy 蒸馏正好卡在监督微调和强化学习中间，取两者之长：
 
 | 方法 | 采样来自 | 监督信号 | 类比 |
 |---|---|---|---|
-| **离线蒸馏 / SFT** | 老师(off-policy) | **稠密**(逐 token) | 看大师下你永远遇不到的棋局 |
-| **[强化学习](/tutorials/reinforcement-learning)** | 学生(on-policy) | **稀疏**(整局一个奖励) | 只知道整盘赢了还是输了 |
-| **on-policy 蒸馏** | 学生(on-policy) | **稠密**(逐 token) | 教练给你自己走的每一步打分 |
+| **离线蒸馏 / SFT** | 老师（off-policy） | **稠密**（逐 token） | 看大师下你永远遇不到的棋局 |
+| **[强化学习](/tutorials/reinforcement-learning)** | 学生（on-policy） | **稀疏**（整局一个奖励） | 只知道整盘赢了还是输了 |
+| **on-policy 蒸馏** | 学生（on-policy） | **稠密**（逐 token） | 教练给你自己走的每一步打分 |
 
-- **SFT** 稠密但 off-policy → 有暴露偏差;
-- **RL** on-policy 但奖励稀疏(整段序列才 $O(1)$ 比特信息)→ 只知道错了、不知道错在哪;
-- **on-policy 蒸馏** 两全:on-policy 消除暴露偏差,逐 token 反向 KL 提供稠密信号(每段序列 $O(N)$ 比特)。
+- **SFT** 稠密但 off-policy → 有暴露偏差；
+- **RL** on-policy 但奖励稀疏（整段序列才 $O(1)$ 比特信息）→ 只知道错了、不知道错在哪；
+- **on-policy 蒸馏** 两全：on-policy 消除暴露偏差，逐 token 反向 KL 提供稠密信号（每段序列 $O(N)$ 比特）。<Cite n={9} />
 
-把三种范式沿五个维度摆开,差异一目了然:
+把三种范式沿五个维度摆开，差异一目了然：
 
-| 方法 | on-policy? | 稠密信号? | 需奖励模型? | 需老师在线? | 长序列友好? |
+| 方法 | on-policy？ | 稠密信号？ | 需奖励模型？ | 需老师在线？ | 长序列友好？ |
 |---|---|---|---|---|---|
-| **离线蒸馏 / SFT** | ❌(老师采样) | ✅ | ❌ | ❌(可预缓存) | ❌(暴露偏差) |
-| **[强化学习](/tutorials/reinforcement-learning)** | ✅ | ❌(稀疏) | ✅ | ❌ | ✅ |
-| **on-policy 蒸馏** | ✅ | ✅ | ❌(用老师) | ✅ | ✅ |
+| **离线蒸馏 / SFT** | ❌（老师采样） | ✅ | ❌ | ❌（可预缓存） | ❌（暴露偏差） |
+| **[强化学习](/tutorials/reinforcement-learning)** | ✅ | ❌（稀疏） | ✅ | ❌ | ✅ |
+| **on-policy 蒸馏** | ✅ | ✅ | ❌（用老师） | ✅ | ✅ |
 
-> 💡 实现上,on-policy 蒸馏几乎就是把 RL 训练循环里的**奖励换成「老师的负逐 token 反向 KL」**——一行改动。折扣因子设为 0(只看当前 token),且 rollout 不必跑完就能算损失。
+> 💡 实现上，on-policy 蒸馏几乎就是把 RL 训练循环里的**奖励换成「老师的负逐 token 反向 KL」**——一行改动。折扣因子设为 0（只看当前 token），且 rollout 不必跑完就能算损失。
 
 ## 惊人的效率
 
-Thinking Machines Lab 的实验(Qwen3-8B 学生、Qwen3-32B 老师,数学推理 AIME)[9]:
+Thinking Machines Lab 的实验（Qwen3-8B 学生、Qwen3-32B 老师，数学推理 AIME）[9]:
 
-- 达到与大规模 SFT / RL 相当的成绩(约 70% AIME'24),但算力约为 **RL 的 1/10**;
-- 若把 SFT 数据成本摊销,效率提升约 **9×**;把老师采样成本也算进去约 **30×**;
-- 自蒸馏(把 RL 训好的模型蒸回自己)只需 **7~10 倍更少的梯度步**就能追平 RL 老师。
+- 达到与大规模 SFT / RL 相当的成绩（约 70% AIME'24），但算力约为 **RL 的 1/10**;<Cite n={9} />
+- 若把 SFT 数据成本摊销，效率提升约 **9×**；把老师采样成本也算进去约 **30×**;<Cite n={9} />
+- 自蒸馏（把 RL 训好的模型蒸回自己）只需 **7~10 倍更少的梯度步**就能追平 RL 老师。<Cite n={9} />
 
-原因有两层:
+原因有两层：
 
-1. **省掉搜索开销**。RL 的算力大多花在**搜索**「哪种策略好」上(反复试错、估优势、更新);一旦老师已经知道好策略,on-policy 蒸馏让学生**直接学最终策略**,跳过了 RL 摸索的中间弯路。
-2. **信号密度高一个数量级**。RL 每段序列只给 $O(1)$ 比特监督(赢/输);on-policy 蒸馏逐 token 给反向 KL,$O(N)$ 比特稠密信号——所以**每条样本学到的更多、收敛更快**。
+1. **省掉搜索开销**.RL 的算力大多花在**搜索**「哪种策略好」上（反复试错、估优势、更新）；一旦老师已经知道好策略，on-policy 蒸馏让学生**直接学最终策略**，跳过了 RL 摸索的中间弯路。
+2. **信号密度高一个数量级**.RL 每段序列只给 $O(1)$ 比特监督（赢/输）；on-policy 蒸馏逐 token 给反向 KL，$O(N)$ 比特稠密信号——所以**每条样本学到的更多、收敛更快**.
 
 <EfficiencyCompare />
 
 ## 变体与相关工作
 
-on-policy 蒸馏不是孤例,它处在一族「用老师指导学生」的方法谱系里。把它们记全,有助于选型:
+on-policy 蒸馏不是孤例，它处在一族「用老师指导学生」的方法谱系里。把它们记全，有助于选型：
 
-- **GKD(Generalized Knowledge Distillation)**[4]:把这些选择统一成两个旋钮——**数据来自谁**(老师 off-policy / 学生 on-policy / 混合)× **用什么损失**(前向 KL / 反向 KL / 两者自适应混合 AKL)。离线蒸馏、on-policy 蒸馏都是它的特例。
-- **MiniLLM**[5]:较早用**策略梯度**优化反向 KL 的代表作。要点:反向 KL 期望在学生下、无法直接交叉熵,需 REINFORCE 式估计;提出 **length normalization**(按序列长度归一化,避免偏向短序列)、**单步裁剪**、**方差缩减**来稳定训练。
-- **DistiLLM**[6]:提出 **skew KL**(有偏反向 KL 变体,梯度方差更低)+ **自适应 off-policy** 策略(复用历史学生样本,比纯 on-policy 更省采样),在保持质量的同时进一步降本。
-- **序列 vs 并行采样**:on-policy 每步都需新鲜学生样本(串行、无法完全缓存);但可跨 batch 并行、或用 vLLM 式 speculative decoding 摊销老师开销。
-- **自蒸馏**[9]:把 RL 训好的模型蒸回自己(或同架构的新初始化),只需 7~10 倍更少的梯度步就能追平 RL 老师——说明瓶颈是**探索**而非**容量**。
+- **GKD(Generalized Knowledge Distillation)**[4]：把这些选择统一成两个旋钮——**数据来自谁**（老师 off-policy / 学生 on-policy / 混合）× **用什么损失**（前向 KL / 反向 KL / 两者自适应混合 AKL）。离线蒸馏、on-policy 蒸馏都是它的特例。<Cite n={4} />
+- **MiniLLM**[5]：较早用**策略梯度**优化反向 KL 的代表作。要点：反向 KL 期望在学生下、无法直接交叉熵，需 REINFORCE 式估计；提出 **length normalization**（按序列长度归一化，避免偏向短序列）、**单步裁剪**、**方差缩减**来稳定训练。<Cite n={5} />
+- **DistiLLM**[6]：提出 **skew KL**（有偏反向 KL 变体，梯度方差更低）+ **自适应 off-policy** 策略（复用历史学生样本，比纯 on-policy 更省采样），在保持质量的同时进一步降本。<Cite n={6} />
+- **序列 vs 并行采样**：on-policy 每步都需新鲜学生样本（串行、无法完全缓存）;但可跨 batch 并行、或用 vLLM 式 speculative decoding 摊销老师开销.
+- **自蒸馏**[9]：把 RL 训好的模型蒸回自己（或同架构的新初始化），只需 7~10 倍更少的梯度步就能追平 RL 老师——说明瓶颈是**探索**而非**容量**.<Cite n={9} />
 
-> 💡 **选型直觉**:有强老师 → on-policy 蒸馏(本篇);老师太贵或要保留多样性 → GKD 的 AKL 混合或 DistiLLM 的 skew KL;只想离线快速打底 → 经典 SFT。很多流水线是「SFT 打底 → on-policy 蒸馏收尾」。
+> 💡 **选型直觉**：有强老师 → on-policy 蒸馏（本篇）；老师太贵或要保留多样性 → GKD 的 AKL 混合或 DistiLLM 的 skew KL；只想离线快速打底 → 经典 SFT。很多流水线是「SFT 打底 → on-policy 蒸馏收尾」。
 
 ## 实践细节 / 实现注意
 
-真正动手训 on-policy 蒸馏时,这些细节决定成败:
+真正动手训 on-policy 蒸馏时，这些细节决定成败：
 
-- **老师只需前向推理**:不进入反向图、不更新参数,可 `torch.no_grad()`、用更低精度(fp8/int8)、放到另一张卡、甚至部分缓存(学生分布稳定时复用老师 logits)。
-- **老师批处理 / KV-cache 复用**:老师贵就大批量喂;学生相邻步上下文高度重叠时,复用老师的 KV-cache 能省大量重复计算。
-- **老师 offloading**:老师跑在便宜硬件 / 更低精度上,学生训练在主力卡。这是「30×」效率故事的来源(把老师采样成本摊销掉)。
-- **KL 稳定技巧**(尤其用策略梯度优化反向 KL 时,梯度方差大):
-  - **length normalization**:把 KL 按序列长度归一化,避免损失偏向短序列(MiniLLM[5]);
-  - **单步裁剪**:PPO 式的 ratio clipping,防止学生偏离过远导致估计爆炸;
-  - **基线减除**:减去老师自身 logprob 的均值作为 baseline,降方差;
-  - **混合损失**:GKD[4] 的 AKL 把前向 + 反向 KL 自适应混合,用前向的稳定性补反向的高方差。
-- **off-policy 修正**:若复用了稍微陈旧的学生样本,需用重要性采样修正 $\pi_{\theta_\text{new}}/\pi_{\theta_\text{old}}$(带裁剪)——这是 PPO / 专家迭代里同样的技巧。
-- **何时用 on-policy vs 离线**:短输出 / 判别任务 → 离线 SFT 足够;长思维链 / 推理 → on-policy 才拉开差距(暴露偏差主导)。**很多流水线:离线 SFT 打底 → on-policy 蒸馏收尾**。
+- **老师只需前向推理**：不进入反向图、不更新参数,可 `torch.no_grad()`、用更低精度（fp8/int8）、放到另一张卡、甚至部分缓存（学生分布稳定时复用老师 logits）.
+- **老师批处理 / KV-cache 复用**：老师贵就大批量喂;学生相邻步上下文高度重叠时,复用老师的 KV-cache 能省大量重复计算.
+- **老师 offloading**：老师跑在便宜硬件 / 更低精度上,学生训练在主力卡.这是「30×」效率故事的来源（把老师采样成本摊销掉）.
+- **KL 稳定技巧**（尤其用策略梯度优化反向 KL 时，梯度方差大）：
+  - **length normalization**：把 KL 按序列长度归一化,避免损失偏向短序列（MiniLLM[5]）;
+  - **单步裁剪**：PPO 式的 ratio clipping,防止学生偏离过远导致估计爆炸;
+  - **基线减除**：减去老师自身 logprob 的均值作为 baseline,降方差;
+  - **混合损失**：GKD[4] 的 AKL 把前向 + 反向 KL 自适应混合,用前向的稳定性补反向的高方差.
+- **off-policy 修正**：若复用了稍微陈旧的学生样本,需用重要性采样修正 $\pi_{\theta_\text{new}}/\pi_{\theta_\text{old}}$（带裁剪）——这是 PPO / 专家迭代里同样的技巧.
+- **何时用 on-policy vs 离线**：短输出 / 判别任务 → 离线 SFT 足够;长思维链 / 推理 → on-policy 才拉开差距（暴露偏差主导）.<Cite n={3} />**很多流水线:离线 SFT 打底 → on-policy 蒸馏收尾**.
 
-> ⚠️ **注意**:反向 KL 用策略梯度估计时方差远大于 SFT 的交叉熵——稳定化技巧(上面前三条)不是可选的,是必需的。跳过它们训练会震荡甚至发散。
+> ⚠️ **注意**：反向 KL 用策略梯度估计时方差远大于 SFT 的交叉熵——稳定化技巧（上面前三条）不是可选的，是必需的。跳过它们训练会震荡甚至发散。
 
 ## ❓ 常见问题 FAQ
 
-**Q:on-policy 蒸馏和 RLHF 是一回事吗?**
-框架几乎相同(都在学生轨迹上、用反向 KL、类似 RL 循环),但**奖励来源不同**:[RLHF](/tutorials/rlhf) 的奖励来自「人类偏好训练的奖励模型」,on-policy 蒸馏的「奖励」来自「老师逐 token 的对数概率」。后者信号稠密得多,所以更高效。
+**Q：on-policy 蒸馏和 RLHF 是一回事吗？**
+框架几乎相同（都在学生轨迹上、用反向 KL、类似 RL 循环），但**奖励来源不同**：[RLHF](/tutorials/rlhf) 的奖励来自「人类偏好训练的奖励模型」，on-policy 蒸馏的「奖励」来自「老师逐 token 的对数概率」。后者信号稠密得多，所以更高效。
 
-**Q:为什么离线蒸馏还在用?**
-离线更简单、可**预先缓存**老师 logits、训练稳定,数据量足够时效果也很好。只有当暴露偏差明显(长序列生成、推理任务)时,on-policy 的优势才拉开。很多流程是「先离线 SFT 打底,再 on-policy 蒸馏收尾」。
+**Q：为什么离线蒸馏还在用？**
+离线更简单、可**预先缓存**老师 logits、训练稳定，数据量足够时效果也很好。只有当暴露偏差明显（长序列生成、推理任务）时，on-policy 的优势才拉开。很多流程是「先离线 SFT 打底，再 on-policy 蒸馏收尾」。
 
-**Q:前向和反向 KL 在蒸馏里到底哪个好?**
-实践中**token 级**两者表现接近;差异主要出在**序列级**:前向可直接从老师采样,反向必须从学生采样(所以天然是 on-policy)、常用策略梯度优化。反向的 mode-seeking 更适合让小学生「抓住老师的核心行为」而非摊平到学不像的多样性上。
+**Q：前向和反向 KL 在蒸馏里到底哪个好？**
+实践中**token 级**两者表现接近；差异主要出在**序列级**：前向可直接从老师采样，反向必须从学生采样（所以天然是 on-policy）、常用策略梯度优化。反向的 mode-seeking 更适合让小学生「抓住老师的核心行为」而非摊平到学不像的多样性上。
 
-**Q:学生自己生成,老师要一直在线吗?**
-老师只需**前向推理**(给学生的 token 打分),不需要反向传播、不更新参数,可当成一个「采样/打分服务」。这比训练老师便宜得多。
+**Q：学生自己生成，老师要一直在线吗？**
+老师只需**前向推理**（给学生的 token 打分），不需要反向传播、不更新参数，可当成一个「采样/打分服务」。这比训练老师便宜得多。
 
-**Q:反向 KL 不是会 mode-seeking 丢多样性吗?**
-在 **token 级**这个效应很温和,前向 / 反向表现接近;真正的差异在**序列级**——反向 KL 让学生「认定」老师的一个 mode 而非摊平到所有可能。对蒸馏(我们要学生学会老师在「好答案分布」上的行为)这通常正是想要的;若任务对多样性敏感(创意写作等),可改用 GKD[4] 的 AKL 混合损失,或前向 KL + 老师采样。
+**Q：反向 KL 不是会 mode-seeking 丢多样性吗？**
+在 **token 级**这个效应很温和，前向 / 反向表现接近；真正的差异在**序列级**——反向 KL 让学生「认定」老师的一个 mode 而非摊平到所有可能。对蒸馏（我们要学生学会老师在「好答案分布」上的行为）这通常正是想要的；若任务对多样性敏感（创意写作等），可改用 GKD[4] 的 AKL 混合损失，或前向 KL + 老师采样。
 
-**Q:老师比学生大很多,前向开销吃不消?**
-这正是[实践细节](#-实践细节--实现注意)一节讲的:fp8/int8 降精度、老师分卡、KV-cache 复用、speculative decoding 摊销。Thinking Machines 的「30×」效率提升已经把这些开销摊销进去了——老师大不等于贵。
+**Q：老师比学生大很多，前向开销吃不消？**
+这正是[实践细节](#-实践细节--实现注意)一节讲的：fp8/int8 降精度、老师分卡、KV-cache 复用、speculative decoding 摊销。Thinking Machines 的「30×」效率提升已经把这些开销摊销进去了——老师大不等于贵。
 
 ## ✏️ 动手作业
 
-1. **加剧暴露偏差**:把第一个代码框里 `p_forward` 后段调更低(如 0.2),看学生卡在中间状态的频次如何飙升。
-2. **前向 vs 反向**:在第二个代码框里同时算前向 KL,构造一个「学生在老师低概率处放了大量质量」的例子,看反向 KL 如何重罚(前向却相对宽容)。
-3. **稠密 vs 稀疏**:思考一段长度 $N$ 的序列,RL 提供多少监督比特、on-policy 蒸馏提供多少,解释为什么后者收敛更快。
-4. **观察收敛**:把上面 `OnPolicyDistillLoop` 的训练步数拖到 100,观察学生分布(蓝条)是否完全贴上老师(橙条)——反向 KL 是否真的收敛到 0?为什么还剩一个小残差?(提示:饱和函数 + 现实里优化噪声。)
+1. **加剧暴露偏差**：把第一个代码框里 `p_forward` 后段调更低（如 0.2），看学生卡在中间状态的频次如何飙升。
+2. **前向 vs 反向**：在第二个代码框里同时算前向 KL，构造一个「学生在老师低概率处放了大量质量」的例子，看反向 KL 如何重罚（前向却相对宽容）。
+3. **稠密 vs 稀疏**：思考一段长度 $N$ 的序列，RL 提供多少监督比特、on-policy 蒸馏提供多少，解释为什么后者收敛更快。
+4. **观察收敛**：把上面 `OnPolicyDistillLoop` 的训练步数拖到 100，观察学生分布（蓝条）是否完全贴上老师（橙条）——反向 KL 是否真的收敛到 0？为什么还剩一个小残差？（提示：饱和函数 + 现实里优化噪声。）
 
 ## 🔭 讨论与展望
 
-on-policy 蒸馏在过去两年从「学术想法」变成大模型压缩的工业标配,但它远非定局。这一节先把当前方法的真实局限摆清楚,再看几条正在收尾的研究方向,最后回到一个更根本的问题:**蒸馏到底是终点,还是中途一站?**
+on-policy 蒸馏在过去两年从「学术想法」变成大模型压缩的工业标配，但它远非定局。这一节先把当前方法的真实局限摆清楚，再看几条正在收尾的研究方向，最后回到一个更根本的问题：**蒸馏到底是终点，还是中途一站？**
 
 ### ⚠️ 当前方法的局限
 
-- **老师在线开销是大头,未摊销时不一定比 RL 便宜**。虽然老师只需前向推理,但要跟得上学生每一步的自采样,在大模型上仍是显著的推理成本。「30×」效率是把老师开销摊销后的数字,**未摊销时 on-policy 并不总比 RL 便宜**。当老师极大(数千亿参数)、学生又小(几十亿)时,老师前向可能占训练总开销的大半。
-- **反向 KL 的梯度方差大,稳定化技巧是必需品而非可选项**。策略梯度估计 reverse KL 的方差远高于 SFT 的交叉熵;length normalization、单步裁剪、基线减除这些稳定化技巧**不是可选的,是必需的**——跳过训练会震荡。即便如此,大 vocab 上的逐 token KL 估计仍 noisy。
-- **mode-seeking 会让序列级多样性坍缩**。反向 KL 让学生「认定」老师的一个 mode;在 token 级这温和,但**序列级会让学生的多样性坍缩**——生成同质化。对创意写作、多样性敏感任务不友好,需改用 AKL 混合或前向 KL + 老师采样,代价是损失部分 mode-seeking 的好处。
-- **天花板是老师本身,变不出老师没有的能力**。学生只能学到老师「会」的;若老师本身在某个能力上不行(比如老师不会做某类数学题),on-policy 蒸馏**变不出老师没有的能力**。它是「能力搬运」,不是「能力创造」。(能力上限如此;但测试精度上 student 可靠正则化红利超过老师,见[学生超越老师](/tutorials/student-beats-teacher)篇。)
-- **测评与真实使用之间存在 gap**。论文里看 AIME 这类有标准答案的指标;但学生部署后用户会拿它做老师没见过的事,蒸馏在「分布外泛化」上的退化仍缺系统研究。
+- **老师在线开销是大头，未摊销时不一定比 RL 便宜**。虽然老师只需前向推理，但要跟得上学生每一步的自采样，在大模型上仍是显著的推理成本。「30×」效率是把老师开销摊销后的数字，**未摊销时 on-policy 并不总比 RL 便宜**。当老师极大（数千亿参数）、学生又小（几十亿）时，老师前向可能占训练总开销的大半。
+- **反向 KL 的梯度方差大，稳定化技巧是必需品而非可选项**。策略梯度估计 reverse KL 的方差远高于 SFT 的交叉熵；length normalization、单步裁剪、基线减除这些稳定化技巧**不是可选的，是必需的**——跳过训练会震荡。<Cite n={5} />即便如此，大 vocab 上的逐 token KL 估计仍 noisy.
+- **mode-seeking 会让序列级多样性坍缩**。反向 KL 让学生「认定」老师的一个 mode；在 token 级这温和，但**序列级会让学生的多样性坍缩**——生成同质化。对创意写作、多样性敏感任务不友好，需改用 AKL 混合或前向 KL + 老师采样，代价是损失部分 mode-seeking 的好处。
+- **天花板是老师本身，变不出老师没有的能力**。学生只能学到老师「会」的；若老师本身在某个能力上不行（比如老师不会做某类数学题），on-policy 蒸馏**变不出老师没有的能力**。它是「能力搬运」，不是「能力创造」。（能力上限如此；但测试精度上 student 可靠正则化红利超过老师，见[学生超越老师](/tutorials/student-beats-teacher)篇。）
+- **测评与真实使用之间存在 gap**。论文里看 AIME 这类有标准答案的指标；但学生部署后用户会拿它做老师没见过的事，蒸馏在「分布外泛化」上的退化仍缺系统研究。
 
 ### 🚀 前沿进展
 
-1. **混合蒸馏(mixed / interleaved sampling)**。每个 batch 一部分老师样本(off-policy、稳、便宜)+ 一部分学生样本(on-policy、补暴露偏差),比例可调。GKD[4] 的 mixed 模式、Speculative Knowledge Distillation[10] 的交错采样、DistiLLM[6] 的样本复用都是这条线——**用 off-policy 的成本买 on-policy 的覆盖**。工业流水线里这是当前最实际的折中,详见[混合蒸馏](/tutorials/mixed-distillation)专篇。
-2. **更低方差的反向 KL 估计**。DistiLLM[6] 的 skew KL 把反向 KL 改成有偏但低方差的变体;另一条线是用 control variate / baseline 进一步压方差。目标:让反向 KL 拥有接近交叉熵的稳定性,同时保留 mode-seeking。
-3. **off-policy 修正 + 样本复用**。用学生稍陈旧的样本 + 重要性采样修正 $\pi_{\theta_\text{new}}/\pi_{\theta_\text{old}}$(带 clipping),减少对新鲜样本的依赖——近似 on-policy 又接近 off-policy 的成本。这是把 PPO 的成熟工具搬到蒸馏。
-4. **老师成本摊销**。KV-cache 跨步复用(学生相邻步上下文高度重叠)、老师降精度(fp8/int8)、speculative decoding 让小学生先猜、老师只校验。让 on-policy 的「老师在线」开销逼近 off-policy 的「预缓存」。
-5. **能力边界蒸馏(beyond imitation)**。最新工作开始问:学生能否**超越**老师?通过 RL + 老师提示、或让学生在老师不会的子任务上自己探索 + 老师只在它会的地方打分——把蒸馏从「纯模仿」推向「带探索的模仿」。
+1. **混合蒸馏（mixed / interleaved sampling）**。每个 batch 一部分老师样本（off-policy、稳、便宜）+ 一部分学生样本（on-policy、补暴露偏差），比例可调。GKD[4] 的 mixed 模式、Speculative Knowledge Distillation[10] 的交错采样、DistiLLM[6] 的样本复用都是这条线——**用 off-policy 的成本买 on-policy 的覆盖**。工业流水线里这是当前最实际的折中，详见[混合蒸馏](/tutorials/mixed-distillation)专篇。<Cite n={10} />
+2. **更低方差的反向 KL 估计**.DistiLLM[6] 的 skew KL 把反向 KL 改成有偏但低方差的变体；另一条线是用 control variate / baseline 进一步压方差。目标：让反向 KL 拥有接近交叉熵的稳定性，同时保留 mode-seeking.
+3. **off-policy 修正 + 样本复用**。用学生稍陈旧的样本 + 重要性采样修正 $\pi_{\theta_\text{new}}/\pi_{\theta_\text{old}}$（带 clipping），减少对新鲜样本的依赖——近似 on-policy 又接近 off-policy 的成本。这是把 PPO 的成熟工具搬到蒸馏。
+4. **老师成本摊销**.KV-cache 跨步复用（学生相邻步上下文高度重叠）、老师降精度（fp8/int8）、speculative decoding 让小学生先猜、老师只校验。让 on-policy 的「老师在线」开销逼近 off-policy 的「预缓存」。
+5. **能力边界蒸馏（beyond imitation）**。最新工作开始问：学生能否**超越**老师？通过 RL + 老师提示、或让学生在老师不会的子任务上自己探索 + 老师只在它会的地方打分——把蒸馏从「纯模仿」推向「带探索的模仿」。
 
 ### 🤔 反思
 
-1. **蒸馏是终点,还是中途一站?** 整个生态正越来越依赖少数几个超大模型当老师:开源小模型越来越强,但它们的「强」很多是从某个闭源大模型蒸出来的——**蒸馏在搬运能力,也在集中能力**。如果蒸馏是终点,开源生态的能力上限永远被少数几个老师的上限锁死吗?
+1. **蒸馏是终点，还是中途一站？** 整个生态正越来越依赖少数几个超大模型当老师：开源小模型越来越强，但它们的「强」很多是从某个闭源大模型蒸出来的——**蒸馏在搬运能力，也在集中能力**。如果蒸馏是终点，开源生态的能力上限永远被少数几个老师的上限锁死吗？
 
-2. **能力从哪里来?** Thinking Machines[9] 那个自蒸馏实验的潜台词值得琢磨:蒸馏能复现 RL 老师的能力,但 RL 老师那些能力最初是从哪来的?**总得有人去做最初的探索**。蒸馏是「能力搬运」,还是「能力创造」?它能让 80 分的学生追上 90 分的老师,但能造出那个 90 分老师本身吗?
+2. **能力从哪里来？** Thinking Machines[9] 那个自蒸馏实验的潜台词值得琢磨：蒸馏能复现 RL 老师的能力，但 RL 老师那些能力最初是从哪来的？**总得有人去做最初的探索**。蒸馏是「能力搬运」，还是「能力创造」？它能让 80 分的学生追上 90 分的老师，但能造出那个 90 分老师本身吗？
 
-3. **下一站,怎么让学生自己长出新本事?** 学生通过蒸馏获得「会做题」的基础后,真正的下一站是用 RL / 自对弈 / 环境反馈让学生**自己产生新能力**——把蒸馏从「模仿老师」过渡到「站在老师肩膀上探索老师没去过的地方」。on-policy 蒸馏已经是这条路上的关键一步(它让学生自己生成、自己探索),但探索的「目标」目前仍来自老师——这个目标,有一天能来自学生自己吗?
+3. **下一站，怎么让学生自己长出新本事？** 学生通过蒸馏获得「会做题」的基础后，真正的下一站是用 RL / 自对弈 / 环境反馈让学生**自己产生新能力**——把蒸馏从「模仿老师」过渡到「站在老师肩膀上探索老师没去过的地方」。on-policy 蒸馏已经是这条路上的关键一步（它让学生自己生成、自己探索），但探索的「目标」目前仍来自老师——这个目标，有一天能来自学生自己吗？
 
-> 🎯 **一句话**:on-policy 蒸馏把「能力搬运」做到了实用、便宜、稠密;但搬运的天花板是老师本身——**下一站是怎么让学生自己长出老师没有的本事**。
+> 🎯 **一句话**：on-policy 蒸馏把「能力搬运」做到了实用、便宜、稠密；但搬运的天花板是老师本身——**下一站是怎么让学生自己长出老师没有的本事**。
 
 ## 📌 小结
 
 | 概念 | 含义 |
 |---|---|
-| 暴露偏差 | 训练状态分布 ≠ 生成状态分布,长序列下 $(1-\varepsilon)^N\to 0$,一步错步步错 |
-| on-policy 采样 | 数据来自**学生自己**生成,覆盖它真正会进入的状态 |
-| 逐 token 反向 KL | 老师在学生每一步打分;mode-seeking + zero-forcing + 天然 on-policy,三合一 |
-| 训练算法 | RL 循环把奖励换成「负逐 token 反向 KL」,$\gamma=0$,rollout 不必跑完 |
-| 效率 | 兼具 SFT 的稠密与 RL 的 on-policy,算力约 RL 的 1/10 |
-| GKD / 变体 | 用「数据源 × 损失方向」统一离线/在线/前向/反向;MiniLLM、DistiLLM 是代表变体 |
+| 暴露偏差 | 训练状态分布 ≠ 生成状态分布，长序列下 $(1-\varepsilon)^N\to 0$，一步错步步错 |
+| on-policy 采样 | 数据来自**学生自己**生成，覆盖它真正会进入的状态 |
+| 逐 token 反向 KL | 老师在学生每一步打分；mode-seeking + zero-forcing + 天然 on-policy，三合一 |
+| 训练算法 | RL 循环把奖励换成「负逐 token 反向 KL」，$\gamma=0$，rollout 不必跑完 |
+| 效率 | 兼具 SFT 的稠密与 RL 的 on-policy，算力约 RL 的 1/10 |
+| GKD / 变体 | 用「数据源 × 损失方向」统一离线/在线/前向/反向；MiniLLM、DistiLLM 是代表变体 |
 
-> 🎯 一句话记住:**on-policy 蒸馏 = 让学生自己生成、老师逐 token 纠正,用反向 KL 在学生真正会遇到的状态上学——补上离线蒸馏的暴露偏差,又比 RL 省一个数量级的算力。**
+> 🎯 一句话记住：**on-policy 蒸馏 = 让学生自己生成、老师逐 token 纠正，用反向 KL 在学生真正会遇到的状态上学——补上离线蒸馏的暴露偏差，又比 RL 省一个数量级的算力。**
 
-> ✍️ 到这里,大模型「怎么训练、怎么对齐、怎么压缩」都讲完了。最后一篇回到最日常的问题:训练好的模型是[如何一个字一个字生成文字的](/tutorials/llm-decoding)——贪心、温度、top-k/top-p 采样。
+> ✍️ 到这里，大模型「怎么训练、怎么对齐、怎么压缩」都讲完了。最后一篇回到最日常的问题：训练好的模型是[如何一个字一个字生成文字的](/tutorials/llm-decoding)——贪心、温度、top-k/top-p 采样。
 
 ## 延伸阅读
 
-- **站内论文笔记**:[Kimi K1.5](/papers/kimi-k15) —— 把 on-policy 思想用到多模态推理 RL:long2short 蒸馏把长思维链蒸成短而强的策略,与本篇「能力搬运」互补
+- **站内论文笔记**：[Kimi K1.5](/papers/kimi-k15) —— 把 on-policy 思想用到多模态推理 RL：long2short 蒸馏把长思维链蒸成短而强的策略，与本篇「能力搬运」互补
 
-## 📚 参考文献
+## 参考资料
 
-1. Hinton, Vinyals, Dean (2015). *Distilling the Knowledge in a Neural Network*. arXiv: [1503.02531](https://arxiv.org/abs/1503.02531). —— 知识蒸馏的开山之作:温度软化 softmax + KL 损失,把大模型的「暗知识」(类间相似度)传给小模型。本篇所有蒸馏概念的起点。
-2. Kim & Rush (2016). *Sequence-Level Knowledge Distillation*. arXiv: [1606.07947](https://arxiv.org/abs/1606.07947). —— 序列级蒸馏:用老师 beam search 生成完整序列作为硬标签给学生学,比逐 token 更贴近最终评价指标。离线蒸馏的代表。
-3. Sanh, Debut, Chaumond, Wolf (2019). *DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter*. arXiv: [1910.01108](https://arxiv.org/abs/1910.01108). —— 离线蒸馏在 NLP 的标志性落地:6 层学生学到 BERT-base 97% 的能力、小 40%、快 60%。展示离线蒸馏在「短序列/判别任务」上已足够好。
-4. Agarwal, Vieillard, Zhou, Stanczyk, Ramos, Geist, Bachem (2024). *On-Policy Distillation of Language Models: Learning from Self-Generated Mistakes* (GKD). arXiv: [2306.13649](https://arxiv.org/abs/2306.13649). —— on-policy 蒸馏 + GKD 统一框架(数据源 × 损失方向两个旋钮);证明学生自采样 + 反向 KL 显著优于离线蒸馏,尤其当学生与老师分布偏差大时。本篇「暴露偏差」与「GKD 框架」的直接来源。
-5. Gu, Dong, Wei, Huang (2023). *MiniLLM: On-Policy Distillation of Large Language Models*. arXiv: [2306.08543](https://arxiv.org/abs/2306.08543). —— 早期用策略梯度优化反向 KL 的代表作:reverse KL 期望在学生下、无法直接交叉熵,需 REINFORCE 式估计;提出 length normalization + 单步裁剪 + 方差缩减。本篇「实践细节 / KL 稳定技巧」的来源。
-6. Ko, Kim, Chen, Yun (2024). *DistiLLM: Towards Streamlined Distillation for Large Language Models*. arXiv: [2402.03898](https://arxiv.org/abs/2402.03898). —— 提出 skew KL(有偏反向 KL 变体,梯度方差更低)+ 自适应 off-policy 复用历史学生样本,比纯 on-policy 更省采样。本篇「变体 / skew KL」的来源。
-7. Bengio, Vinyals, Jaitly, Shazeer (2015). *Scheduled Sampling for Sequence Prediction with Recurrent Neural Networks*. arXiv: [1506.03099](https://arxiv.org/abs/1506.03099). —— 暴露偏差 / scheduled sampling 的经典出处:训练时逐步从「用老师 token」切换到「用学生自己的 token」,让学生提前见到自己的错误分布。本篇「暴露偏差」概念的历史根源。
-8. Ranzato, Chopra, Auli, Zaremba (2015). *Sequence Level Training with Recurrent Neural Networks* (MIXER). arXiv: [1511.06732](https://arxiv.org/abs/1511.06732). —— 把序列生成视作 RL,用 REINFORCE 优化 BLEU 等序列级指标;首次系统指出曝光偏差(exposure bias)与 loss-evaluation mismatch。本篇「暴露偏差 + RL 视角」的来源。
-9. Thinking Machines Lab (2025). *On-Policy Distillation* 博客文章. [thinkingmachines.ai/blog/on-policy-distillation](https://thinkingmachines.ai/blog/on-policy-distillation/). —— Qwen3-8B-Base 学生 + Qwen3-32B 老师的实验:数学推理 AIME'24 约 70%,算力约 RL 的 1/10,SFT 摊销后约 9×、含老师采样约 30×;自蒸馏只需 7~10 倍更少梯度步追平 RL 老师。本篇「惊人效率」一节的数据来源。
-10. Yang, Wang, Liu, Wu, Li, Zhang, Wang, Feng, Qin, Chen (2024). *Speculative Knowledge Distillation: Bridging the Teacher-Student Gap Through Interleaved Sampling*. arXiv: [2410.11325](https://arxiv.org/abs/2410.11325). —— 交错采样:学生先草拟一段、老师在此基础上续写并打分,混合 on/off-policy 数据;在保持质量的同时降低老师在线开销。本篇「讨论与展望 / 混合蒸馏」方向的代表。
+<References>
+1. Hinton, Vinyals, Dean (2015). *Distilling the Knowledge in a Neural Network*. arXiv: [1503.02531](https://arxiv.org/abs/1503.02531). —— 知识蒸馏的开山之作：温度软化 softmax + KL 损失，把大模型的「暗知识」（类间相似度）传给小模型。本篇所有蒸馏概念的起点。
+2. Kim & Rush (2016). *Sequence-Level Knowledge Distillation*. arXiv: [1606.07947](https://arxiv.org/abs/1606.07947). —— 序列级蒸馏：用老师 beam search 生成完整序列作为硬标签给学生学，比逐 token 更贴近最终评价指标。离线蒸馏的代表。
+3. Sanh, Debut, Chaumond, Wolf (2019). *DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter*. arXiv: [1910.01108](https://arxiv.org/abs/1910.01108). —— 离线蒸馏在 NLP 的标志性落地：6 层学生学到 BERT-base 97% 的能力、小 40%、快 60%。展示离线蒸馏在「短序列/判别任务」上已足够好。
+4. Agarwal, Vieillard, Zhou, Stanczyk, Ramos, Geist, Bachem (2024). *On-Policy Distillation of Language Models: Learning from Self-Generated Mistakes* (GKD). arXiv: [2306.13649](https://arxiv.org/abs/2306.13649). —— on-policy 蒸馏 + GKD 统一框架（数据源 × 损失方向两个旋钮）；证明学生自采样 + 反向 KL 显著优于离线蒸馏，尤其当学生与老师分布偏差大时。本篇「暴露偏差」与「GKD 框架」的直接来源。
+5. Gu, Dong, Wei, Huang (2023). *MiniLLM: On-Policy Distillation of Large Language Models*. arXiv: [2306.08543](https://arxiv.org/abs/2306.08543). —— 早期用策略梯度优化反向 KL 的代表作：reverse KL 期望在学生下、无法直接交叉熵，需 REINFORCE 式估计；提出 length normalization + 单步裁剪 + 方差缩减。本篇「实践细节 / KL 稳定技巧」的来源。
+6. Ko, Kim, Chen, Yun (2024). *DistiLLM: Towards Streamlined Distillation for Large Language Models*. arXiv: [2402.03898](https://arxiv.org/abs/2402.03898). —— 提出 skew KL（有偏反向 KL 变体，梯度方差更低）+ 自适应 off-policy 复用历史学生样本，比纯 on-policy 更省采样。本篇「变体 / skew KL」的来源。
+7. Bengio, Vinyals, Jaitly, Shazeer (2015). *Scheduled Sampling for Sequence Prediction with Recurrent Neural Networks*. arXiv: [1506.03099](https://arxiv.org/abs/1506.03099). —— 暴露偏差 / scheduled sampling 的经典出处：训练时逐步从「用老师 token」切换到「用学生自己的 token」，让学生提前见到自己的错误分布。本篇「暴露偏差」概念的历史根源。
+8. Ranzato, Chopra, Auli, Zaremba (2015). *Sequence Level Training with Recurrent Neural Networks* (MIXER). arXiv: [1511.06732](https://arxiv.org/abs/1511.06732). —— 把序列生成视作 RL，用 REINFORCE 优化 BLEU 等序列级指标；首次系统指出曝光偏差（exposure bias）与 loss-evaluation mismatch。本篇「暴露偏差 + RL 视角」的来源。
+9. Thinking Machines Lab (2025). *On-Policy Distillation* 博客文章. [thinkingmachines.ai/blog/on-policy-distillation](https://thinkingmachines.ai/blog/on-policy-distillation/). —— Qwen3-8B-Base 学生 + Qwen3-32B 老师的实验：数学推理 AIME'24 约 70%，算力约 RL 的 1/10，SFT 摊销后约 9×、含老师采样约 30×；自蒸馏只需 7~10 倍更少梯度步追平 RL 老师。本篇「惊人效率」一节的数据来源。
+10. Yang, Wang, Liu, Wu, Li, Zhang, Wang, Feng, Qin, Chen (2024). *Speculative Knowledge Distillation: Bridging the Teacher-Student Gap Through Interleaved Sampling*. arXiv: [2410.11325](https://arxiv.org/abs/2410.11325). —— 交错采样：学生先草拟一段、老师在此基础上续写并打分，混合 on/off-policy 数据；在保持质量的同时降低老师在线开销。本篇「讨论与展望 / 混合蒸馏」方向的代表。
+</References>

@@ -4,73 +4,76 @@ export const metadata = paperMetadata("kimi-k2");
 
 <PaperHeader slug="kimi-k2" />
 
-# ⚡ Kimi K2:1T 参数 MoE 的 Agentic 训练
+# Kimi K2：1T 参数 MoE 的 Agentic 训练
 
-2025 年 7 月,月之暗面开源了 Kimi K2:1.04 万亿总参数、320 亿激活的 MoE 模型——参数规模超过 [DeepSeek-V3](https://arxiv.org/abs/2412.19437) 一半,激活参数反而更少,而它瞄准的战场从「数学题推理」换成了 **agentic intelligence**:多步工具调用、真实软件工程、长程交互。这篇笔记拆解三件事:让 15.5T token 预训练**零 loss spike** 的 MuonClip 优化器、教模型用工具的**大规模 agentic 数据合成**、以及可验证奖励与自我批评相结合的 **joint RL**。
+2025 年 7 月，月之暗面开源了 Kimi K2：1.04 万亿总参数、320 亿激活的 MoE 模型——参数规模超过 [DeepSeek-V3](https://arxiv.org/abs/2412.19437) 一半，激活参数反而更少，而它瞄准的战场从「数学题推理」换成了 **agentic intelligence**：多步工具调用、真实软件工程、长程交互。<Cite n={1} />这篇笔记拆解三件事：让 15.5T token 预训练**零 loss spike** 的 MuonClip 优化器、教模型用工具的**大规模 agentic 数据合成**、以及可验证奖励与自我批评相结合的 **joint RL**。
 
-> 📌 前置:K2 的 RL 算法直接继承 [Kimi K1.5](/papers/kimi-k15) 的镜像下降;对比它的定位时,DeepSeek-V3(架构)与 R1(路线)是最好的参照系。
+> 📌 前置：K2 的 RL 算法直接继承 [Kimi K1.5](/papers/kimi-k15) 的镜像下降；对比它的定位时，DeepSeek-V3（架构）与 R1（路线）是最好的参照系。<Cite n={[2,3]} />
 
-## 一、动机:把 token 效率推向极限
+## 一、动机：把 token 效率推向极限
 
-K2 的出发点是一个朴素判断:高质量人类数据见顶,**token 效率**——每个 token 换来的性能提升——成了 scaling 的关键系数。这决定了它在预训练侧的两条路线:换更省 token 的优化器(Muon 家族),以及用合成改写榨干存量数据的剩余信号。
+K2 的出发点是一个朴素判断：高质量人类数据见顶，**token 效率**——每个 token 换来的性能提升——成了 scaling 的关键系数。这决定了它在预训练侧的两条路线：换更省 token 的优化器（Muon 家族），以及用合成改写榨干存量数据的剩余信号。
 
-架构上,K2 是一台极端稀疏的 MoE:61 层、隐藏维 7168、MLA 注意力,设计与 DeepSeek-V3 同源,但按自家 **sparsity scaling law** 重新配比——固定激活参数(即固定 FLOPs)增大总专家数,训练/验证损失一致下降。验证损失做到 1.5 时,sparsity 48 相比 sparsity 8/16/32 分别省 1.69×/1.39×/1.15× FLOPs。于是 K2 用 384 个专家(V3 是 256)、每 token 激活 8 个 + 1 个共享专家,sparsity 48;同时把注意力头砍到 64(V3 是 128)——长上下文下头数翻倍会让推理 FLOPs 涨 83%,而 iso-token 实验里它只换来 0.5%-1.2% 的验证损失改善,不划算。最终:总参 1.04T(+54%),激活 32.6B(−13%),为 agentic 场景的 128k 长上下文推理省下真金白银。
+架构上，K2 是一台极端稀疏的 MoE：61 层、隐藏维 7168、MLA 注意力，设计与 DeepSeek-V3 同源，但按自家 **sparsity scaling law** 重新配比——固定激活参数（即固定 FLOPs）增大总专家数，训练/验证损失一致下降。验证损失做到 1.5 时，sparsity 48 相比 sparsity 8/16/32 分别省 1.69×/1.39×/1.15× FLOPs。于是 K2 用 384 个专家（V3 是 256）、每 token 激活 8 个 + 1 个共享专家，sparsity 48；同时把注意力头砍到 64（V3 是 128）——长上下文下头数翻倍会让推理 FLOPs 涨 83%，而 iso-token 实验里它只换来 0.5%-1.2% 的验证损失改善，不划算。最终：总参 1.04T（+54%），激活 32.6B（−13%），为 agentic 场景的 128k 长上下文推理省下真金白银。<Cite n={1} />
 
-论文原版的 sparsity scaling law 曲线(固定 8 激活专家 + 1 共享专家,变化总专家数):同等训练 FLOPs 下,sparsity 越高验证损失越低——
+论文原版的 sparsity scaling law 曲线（固定 8 激活专家 + 1 共享专家，变化总专家数）：同等训练 FLOPs 下，sparsity 越高验证损失越低——
 
 <figure className="my-6">
-  <img src="./fig-sparsity-scaling-law.png" alt="稀疏度扩展定律:横轴为训练 FLOPs(对数刻度),纵轴为验证损失;固定激活专家数、增加总专家数,sparsity 8/16/32/48/64 五条曲线显示稀疏度越高损失下降越快,同损失下 sparsity 48 比 sparsity 8 省约 1.69 倍 FLOPs" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-sparsity-scaling-law.png" alt="稀疏度扩展定律：横轴为训练 FLOPs（对数刻度），纵轴为验证损失；固定激活专家数、增加总专家数，sparsity 8/16/32/48/64 五条曲线显示稀疏度越高损失下降越快，同损失下 sparsity 48 比 sparsity 8 省约 1.69 倍 FLOPs" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Kimi Team, <em>Kimi K2: Open Agentic Intelligence</em>(arXiv:2507.20534)Figure 5
+    <span className="figure-caption-main">稀疏度扩展定律：横轴为训练 FLOPs（对数刻度），纵轴为验证损失；固定激活专家数、增加总专家数，sparsity 8/16/32/48/64 五条曲线显示稀疏度越高损失下降越快，同损失下 sparsity 48 比 sparsity 8 省约 1.69 倍 FLOPs</span>
+    <span className="figure-caption-source">图源：Kimi Team, <em>Kimi K2: Open Agentic Intelligence</em>（arXiv:2507.20534）Figure 5</span>
   </figcaption>
 </figure>
 
-## 二、MuonClip:Muon 的快,Adam 的稳
+## 二、MuonClip：Muon 的快，Adam 的稳
 
-K2 用 Muon 优化器——它对隐藏层权重做 **Newton-Schulz 迭代近似正交化**:动量缓冲 $\mathbf{M}_t=\mu\mathbf{M}_{t-1}+\mathbf{G}_t$ 之后,不直接用 $\mathbf{M}_t$ 更新,而是先正交化再配 RMS:
+K2 用 Muon 优化器——它对隐藏层权重做 **Newton-Schulz 迭代近似正交化**：动量缓冲 $\mathbf{M}_t=\mu\mathbf{M}_{t-1}+\mathbf{G}_t$ 之后，不直接用 $\mathbf{M}_t$ 更新，而是先正交化再配 RMS:<Cite n={[1,4]} />
 
 $$
 \mathbf{O}_t=\operatorname{NewtonSchulz}(\mathbf{M}_t)\cdot\sqrt{\max(n,m)}\cdot 0.2,\qquad \mathbf{W}_t=\mathbf{W}_{t-1}-\eta\big(\mathbf{O}_t+\lambda\,\mathbf{W}_{t-1}\big)
 $$
 
-正交化让更新矩阵的所有奇异值相等(满有效秩、各方向均速前进),Moonlight 的实验证明同等算力下显著优于 AdamW。代价是:**Muon 更容易 attention logit 爆炸**。论文的假设(附录 E):Adam 的更新谱倾斜、有效秩低,而 Muon 的 $\operatorname{msign}$ 产生满秩更新——权重与更新的奇异向量更容易对齐,奇异值被加性地推大;attention logit 是双线性形式 $q_i\cdot k_j=(x_i\mathbf{W}_q)\cdot(x_j\mathbf{W}_k)$,谱范数在乘积里**平方放大**。中型实验(9B 激活/53B 总参)里,最大 logit 一路冲过 1000,伴随 loss spike 甚至发散。已有的招都不好用:logit soft-cap 截得太晚,QK-Norm 又与 MLA 不兼容(K 矩阵在推理时不完整物化)。
+正交化让更新矩阵的所有奇异值相等（满有效秩、各方向均速前进），Moonlight 的实验证明同等算力下显著优于 AdamW。代价是：**Muon 更容易 attention logit 爆炸**。论文的假设（附录 E）：Adam 的更新谱倾斜、有效秩低，而 Muon 的 $\operatorname{msign}$ 产生满秩更新——权重与更新的奇异向量更容易对齐，奇异值被加性地推大；attention logit 是双线性形式 $q_i\cdot k_j=(x_i\mathbf{W}_q)\cdot(x_j\mathbf{W}_k)$，谱范数在乘积里**平方放大**。中型实验(9B 激活/53B 总参)里，最大 logit 一路冲过 1000，伴随 loss spike 甚至发散。<Cite n={1} />已有的招都不好用：logit soft-cap 截得太晚，QK-Norm 又与 MLA 不兼容（K 矩阵在推理时不完整物化）。
 
-论文原版的对照实验(论文 Figure 2):左侧裸 Muon 中型训练里最大 attention logit 冲破 1000,右侧 K2 加 MuonClip(τ=100)后全程被钳在 100 以内——
+论文原版的对照实验（论文 Figure 2）：左侧裸 Muon 中型训练里最大 attention logit 冲破 1000，右侧 K2 加 MuonClip(τ=100)后全程被钳在 100 以内——
 
 <figure className="my-6 grid gap-4 sm:grid-cols-2">
-  <img src="./fig-muon-logit-explosion.png" alt="裸 Muon 中型训练的最大 attention logit 曲线:横轴为训练步数,纵轴为最大 logit,一路增长冲破 1000,对应数值不稳定与 loss spike" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
-  <img src="./fig-muonclip-max-logits.png" alt="Kimi K2 用 MuonClip 的最大 attention logit 曲线:横轴为训练步数,纵轴为最大 logit,先被钳制在 100,约 30% 训练进度后自然衰减到常规区间,QK-Clip 自我失活" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-muon-logit-explosion.png" alt="裸 Muon 中型训练的最大 attention logit 曲线：横轴为训练步数，纵轴为最大 logit，一路增长冲破 1000，对应数值不稳定与 loss spike" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-muonclip-max-logits.png" alt="Kimi K2 用 MuonClip 的最大 attention logit 曲线：横轴为训练步数，纵轴为最大 logit，先被钳制在 100，约 30% 训练进度后自然衰减到常规区间，QK-Clip 自我失活" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="sm:col-span-2 mt-1 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Kimi Team, <em>Kimi K2: Open Agentic Intelligence</em>(arXiv:2507.20534)Figure 2
+    <span className="figure-caption-main">Kimi K2 用 MuonClip 的最大 attention logit 曲线：横轴为训练步数，纵轴为最大 logit，先被钳制在 100，约 30% 训练进度后自然衰减到常规区间，QK-Clip 自我失活</span>
+    <span className="figure-caption-source">图源：Kimi Team, <em>Kimi K2: Open Agentic Intelligence</em>（arXiv:2507.20534）Figure 2</span>
   </figcaption>
 </figure>
 
-K2 的解法 **QK-Clip** 出奇地简单:前向时顺手记下每个头的最大 logit
+K2 的解法 **QK-Clip** 出奇地简单：前向时顺手记下每个头的最大 logit<Cite n={1} />
 
 $$
 S_{\max}^{h}=\frac{1}{\sqrt{d}}\max_{\mathbf{X}\in B}\max_{i,j}\mathbf{Q}_{i}^{h}\mathbf{K}_{j}^{h\top}
 $$
 
-若 $S_{\max}^{h}$ 超过阈值 $\tau$,更新后**把 Q/K 投影权重缩回去**,使 logit 的理论上界回到 $\tau$ 以下:
+若 $S_{\max}^{h}$ 超过阈值 $\tau$，更新后**把 Q/K 投影权重缩回去**，使 logit 的理论上界回到 $\tau$ 以下：
 
 $$
 \mathbf{W}_{q}^{h}\leftarrow\gamma^{\alpha}\mathbf{W}_{q}^{h},\quad \mathbf{W}_{k}^{h}\leftarrow\gamma^{1-\alpha}\mathbf{W}_{k}^{h},\qquad \gamma=\min\!\big(1,\;\tau/S_{\max}\big)
 $$
 
-($\alpha=0.5$ 时 Q、K 各缩 $\sqrt{\gamma}$,乘积恰好缩 $\gamma$。)关键细节:**逐头**实施——爆炸的只是少数头,一刀切会过度干预;且只动权重、不改当步的前向/反向,不引入额外的梯度路径。放进 Muon 的更新循环,就是 MuonClip。
+($\alpha=0.5$ 时 Q、K 各缩 $\sqrt{\gamma}$，乘积恰好缩 $\gamma$。)关键细节：**逐头**实施——爆炸的只是少数头，一刀切会过度干预；且只动权重、不改当步的前向/反向，不引入额外的梯度路径。放进 Muon 的更新循环，就是 MuonClip。
 
-效果:K2 全程 $\tau=100$,最大 logit 先被钳在 100,约 30% 训练步后自然衰减到常规区间、QK-Clip **自我失活**(前 7 万步只有 12.7% 的头触发过);0.5B/3B 的小模型消融里,激进阈值 $\tau=30$ 也不损害 loss 曲线。15.5T token 预训练,**全程无一次 loss spike**——对万亿参数训练,这本身就是省下真金白银的稳定性。
+效果：K2 全程 $\tau=100$，最大 logit 先被钳在 100，约 30% 训练步后自然衰减到常规区间、QK-Clip **自我失活**（前 7 万步只有 12.7% 的头触发过）；0.5B/3B 的小模型消融里，激进阈值 $\tau=30$ 也不损害 loss 曲线。15.5T token 预训练，**全程无一次 loss spike**——对万亿参数训练，这本身就是省下真金白银的稳定性。<Cite n={1} />
 
-K2 全程的逐步训练 loss 曲线(论文 Figure 3,未平滑、未降采样,15.5T token 无一次 spike):
+K2 全程的逐步训练 loss 曲线（论文 Figure 3，未平滑、未降采样，15.5T token 无一次 spike）:
 
 <figure className="my-6">
-  <img src="./fig-loss-curve.png" alt="Kimi K2 逐步训练损失曲线:横轴为训练 token 数(万亿),纵轴为 loss,未平滑未降采样,全程无 loss spike" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-loss-curve.png" alt="Kimi K2 逐步训练损失曲线：横轴为训练 token 数（万亿），纵轴为 loss，未平滑未降采样，全程无 loss spike" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Kimi Team, <em>Kimi K2: Open Agentic Intelligence</em>(arXiv:2507.20534)Figure 3
+    <span className="figure-caption-main">Kimi K2 逐步训练损失曲线：横轴为训练 token 数（万亿），纵轴为 loss，未平滑未降采样，全程无 loss spike</span>
+    <span className="figure-caption-source">图源：Kimi Team, <em>Kimi K2: Open Agentic Intelligence</em>（arXiv:2507.20534）Figure 3</span>
   </figcaption>
 </figure>
 
-用 numpy 手写一遍 Newton-Schulz 与 QK-Clip,亲手看「正交化更新」和「logit 钳制」各做什么:
+用 numpy 手写一遍 Newton-Schulz 与 QK-Clip，亲手看「正交化更新」和「logit 钳制」各做什么：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -114,55 +117,56 @@ if Smax > tau:
 # 权重被缩放,logit 理论上界回到 tau 以下;正向传播本身未被修改
 `} />
 
-## 三、预训练数据:改写,而非重复
+## 三、预训练数据：改写，而非重复
 
-15.5T token 语料覆盖 Web、代码、数学、知识四个域,处理管线承袭 K1.5。新东西是**合成改写**:同一份高质量文本,与其原样重复多轮(易过拟合),不如让 LLM 换风格、换视角改写后再训——每份语料最多改写两次。知识域用「分块自回归改写」保持长文档全局连贯,再过一道保真校验;数学域按 SwallowMath 的路子把文档改写成「学习笔记」体,并从其他语言翻译英文语料增加多样性。消融很直观:wiki 文本 10 轮重复,SimpleQA 23.76;改写 1 次再 10 轮,27.39;**改写 10 次只训 1 轮,28.94**——同样的 token 预算,多样性比重复值钱。
+15.5T token 语料覆盖 Web、代码、数学、知识四个域，处理管线承袭 K1.5。<Cite n={[1,2]} />新东西是**合成改写**：同一份高质量文本，与其原样重复多轮（易过拟合），不如让 LLM 换风格、换视角改写后再训——每份语料最多改写两次。知识域用「分块自回归改写」保持长文档全局连贯，再过一道保真校验；数学域按 SwallowMath 的路子把文档改写成「学习笔记」体，并从其他语言翻译英文语料增加多样性。消融很直观：wiki 文本 10 轮重复，SimpleQA 23.76；改写 1 次再 10 轮，27.39；**改写 10 次只训 1 轮，28.94**——同样的 token 预算，多样性比重复值钱。
 
-训练配方:MuonClip + WSD 学习率(前 10T 恒定 2e-4,后 5.5T 余弦衰减到 2e-5),全局 batch 67M token,weight decay 0.1;收尾做 annealing 与长上下文激活,用 [YaRN](https://arxiv.org/abs/2309.00071) 扩到 128k。
+训练配方：MuonClip + WSD 学习率（前 10T 恒定 2e-4，后 5.5T 余弦衰减到 2e-5），全局 batch 67M token,weight decay 0.1；收尾做 annealing 与长上下文激活，用 [YaRN](https://arxiv.org/abs/2309.00071) 扩到 128k。<Cite n={1} />
 
-## 四、Agentic 数据合成:把「环境」造出来
+## 四、Agentic 数据合成：把「环境」造出来
 
-agentic 能力(多步工具调用、长程规划)在自然数据里稀缺、人工标注昂贵,K2 的答案是**把环境本身合成出来**。SFT 阶段的数据管线分三步:
+agentic 能力（多步工具调用、长程规划）在自然数据里稀缺、人工标注昂贵，K2 的答案是**把环境本身合成出来**。<Cite n={1} />SFT 阶段的数据管线分三步：
 
-1. **工具仓库**:一边从 GitHub 抓取 3000+ 真实 MCP(Model Context Protocol)工具,一边用层级式 domain evolution 合成 2 万+ 工具——从大类(金融交易、机器人控制)演化出具体域,再为每个域生成接口、描述、操作语义俱全的工具;t-SNE 显示两类工具在嵌入空间互补覆盖。
-2. **智能体与任务**:为每组工具合成数千个不同系统提示的 agent;每个 agent 配套生成由简到繁的任务,并**附一份显式 rubric**——成功标准、期望的工具使用模式、检查点。
-3. **轨迹生成与过滤**:LLM 扮演有性格偏好的用户做多轮对话,工具模拟器(等价于 world model)执行调用、维护状态、注入受控随机性(成功/部分失败/边界情形);最后由 LLM judge 按 rubric 打分,只有达标轨迹留下——相当于大规模拒绝采样。
+1. **工具仓库**：一边从 GitHub 抓取 3000+ 真实 MCP（Model Context Protocol）工具，一边用层级式 domain evolution 合成 2 万+ 工具——从大类（金融交易、机器人控制）演化出具体域，再为每个域生成接口、描述、操作语义俱全的工具；t-SNE 显示两类工具在嵌入空间互补覆盖。<Cite n={[1,5]} />
+2. **智能体与任务**：为每组工具合成数千个不同系统提示的 agent；每个 agent 配套生成由简到繁的任务，并**附一份显式 rubric**——成功标准、期望的工具使用模式、检查点。
+3. **轨迹生成与过滤**：LLM 扮演有性格偏好的用户做多轮对话，工具模拟器（等价于 world model）执行调用、维护状态、注入受控随机性(成功/部分失败/边界情形)；最后由 LLM judge 按 rubric 打分，只有达标轨迹留下——相当于大规模拒绝采样。
 
-论文原版的合成管线两阶段图(论文 Figure 8):(a) 工具仓库 → 智能体与带 rubric 的任务;(b) 用户智能体 × 工具模拟器多轮交互生成轨迹,再由 judge 过滤——
+论文原版的合成管线两阶段图（论文 Figure 8）：（a） 工具仓库 → 智能体与带 rubric 的任务；（b） 用户智能体 × 工具模拟器多轮交互生成轨迹，再由 judge 过滤——
 
 <figure className="my-6 grid gap-4 sm:grid-cols-2">
-  <img src="./fig-tool-repo-synthesis.png" alt="工具仓库合成管线:真实 MCP 工具与合成工具规格汇入工具仓库,按域与应用分类,再为工具组合生成智能体与带 rubric 的任务" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
-  <img src="./fig-tool-traj-synthesis.png" alt="轨迹生成与过滤管线:用户智能体、智能体、工具模拟器多轮交互产生调用轨迹,judge 按任务 rubric 打分,过滤后的数据留下训练" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-tool-repo-synthesis.png" alt="工具仓库合成管线：真实 MCP 工具与合成工具规格汇入工具仓库，按域与应用分类，再为工具组合生成智能体与带 rubric 的任务" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-tool-traj-synthesis.png" alt="轨迹生成与过滤管线：用户智能体、智能体、工具模拟器多轮交互产生调用轨迹，judge 按任务 rubric 打分，过滤后的数据留下训练" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="sm:col-span-2 mt-1 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Kimi Team, <em>Kimi K2: Open Agentic Intelligence</em>(arXiv:2507.20534)Figure 8
+    <span className="figure-caption-main">轨迹生成与过滤管线：用户智能体、智能体、工具模拟器多轮交互产生调用轨迹，judge 按任务 rubric 打分，过滤后的数据留下训练</span>
+    <span className="figure-caption-source">图源：Kimi Team, <em>Kimi K2: Open Agentic Intelligence</em>（arXiv:2507.20534）Figure 8</span>
   </figcaption>
 </figure>
 
-纯模拟有保真度风险,所以关键场景(编程、软件工程)改用**真实沙箱**:从 GitHub 收集海量 PR 与 issue 搭建可执行环境,Kubernetes 上跑一万个并发沙箱,用测试通过率当 ground truth。工具调用本身也有工程细节:工具声明用 TypeScript 表达(比 JSON 省一半 token),推理时用受限解码保证格式合法。
+纯模拟有保真度风险，所以关键场景（编程、软件工程）改用**真实沙箱**：从 GitHub 收集海量 PR 与 issue 搭建可执行环境，Kubernetes 上跑一万个并发沙箱，用测试通过率当 ground truth。<Cite n={1} />工具调用本身也有工程细节：工具声明用 TypeScript 表达（比 JSON 省一半 token），推理时用受限解码保证格式合法。
 
-## 五、Joint RL:可验证 + 自我批评
+## 五、Joint RL：可验证 + 自我批评
 
-RL 阶段沿用 K1.5 的镜像下降目标(组均值基线 $\overline{r}$ + log-ratio 的 L2 正则):
+RL 阶段沿用 K1.5 的镜像下降目标(组均值基线 $\overline{r}$ + log-ratio 的 L2 正则):<Cite n={[1,2]} />
 
 $$
 L_{\mathrm{RL}}(\theta)=\mathbb{E}_{x\sim\mathcal{D}}\Big[\frac{1}{K}\sum_{i=1}^{K}\big(r(x,y_i)-\bar{r}(x)-\tau\log\tfrac{\pi_{\theta}(y_i\mid x)}{\pi_{\mathrm{old}}(y_i\mid x)}\big)^{2}\Big]
 $$
 
-变化在于**奖励与任务的面**。可验证侧搭了一个 Gym 风格的可扩展环境框架:数学/STEM/逻辑(难度用 SFT 模型 pass@k 标定,只留适中难度)、复杂指令遵循(代码解释器确定性验证 + LLM-as-judge,外加一层专抓「口头声称完成」的 hack-check)、忠实性(FACTS Grounding 风格的句级判别模型当奖励)、软件工程(GitHub 环境 + 测试)、安全(攻击模型迭代生成越狱提示,judge 模型给二元标签)。
+变化在于**奖励与任务的面**。可验证侧搭了一个 Gym 风格的可扩展环境框架：数学/STEM/逻辑（难度用 SFT 模型 pass@k 标定，只留适中难度）、复杂指令遵循（代码解释器确定性验证 + LLM-as-judge，外加一层专抓「口头声称完成」的 hack-check）、忠实性（FACTS Grounding 风格的句级判别模型当奖励）、软件工程（GitHub 环境 + 测试）、安全（攻击模型迭代生成越狱提示，judge 模型给二元标签）。
 
-真正的创新是 **self-critique rubric reward**:对创意写作、开放式问答这类**没有可验证答案**的任务,让 K2 自己当 critic——对自己的多个回答做两两比较打分。打分依据三类 rubric:**核心 rubric**(清晰相关、对话流畅、客观克制——「不许开头夸用户问题好」这类价值观) + **处方式 rubric**(明确禁止自我标榜,专防 reward hacking) + 人工标注的任务级 rubric。critic 本身也在闭环中进化:用 RLVR 任务的 on-policy rollout 持续校准 critic,把可验证信号蒸馏进主观判断——策略变,critic 跟着变。这是把 [RLHF](/tutorials/rlhf) 的奖励模型换成了「自我评价、可验证信号锚定」的方案,代价是论文附录自己承认的:rubric 偏爱自信果断的回答,在模糊与主观场景可能系统性压制「恰当的不确定」。
+真正的创新是 **self-critique rubric reward**：对创意写作、开放式问答这类**没有可验证答案**的任务，让 K2 自己当 critic——对自己的多个回答做两两比较打分。<Cite n={1} />打分依据三类 rubric：**核心 rubric**（清晰相关、对话流畅、客观克制——「不许开头夸用户问题好」这类价值观） + **处方式 rubric**（明确禁止自我标榜，专防 reward hacking） + 人工标注的任务级 rubric。critic 本身也在闭环中进化：用 RLVR 任务的 on-policy rollout 持续校准 critic，把可验证信号蒸馏进主观判断——策略变，critic 跟着变。这是把 [RLHF](/tutorials/rlhf) 的奖励模型换成了「自我评价、可验证信号锚定」的方案，代价是论文附录自己承认的：rubric 偏爱自信果断的回答，在模糊与主观场景可能系统性压制「恰当的不确定」。
 
-三个工程补丁同样来自 K1.5 的教训:**budget control**——按任务类型设每回答 token 上限,超限截断并惩罚(RL 让回答变长的通病,K1.5 的长度惩罚在这里升级成预算制);**PTX loss**——RL 目标里混入精选高质量样本的预训练损失,防遗忘、防过拟合到 RL 任务面;**temperature decay**——前期高温探索,后期降温收敛。
+三个工程补丁同样来自 K1.5 的教训：**budget control**——按任务类型设每回答 token 上限，超限截断并惩罚（RL 让回答变长的通病，K1.5 的长度惩罚在这里升级成预算制）；**PTX loss**——RL 目标里混入精选高质量样本的预训练损失，防遗忘、防过拟合到 RL 任务面；**temperature decay**——前期高温探索，后期降温收敛。
 
 ## 六、关键数字与定位
 
-全部在 **non-thinking 模式**下测(不花 test-time compute),对比 DeepSeek-V3-0324 / Qwen3-235B / Claude 4 / GPT-4.1 / Gemini 2.5 Flash:
+全部在 **non-thinking 模式**下测（不花 test-time compute），对比 DeepSeek-V3-0324 / Qwen3-235B / Claude 4 / GPT-4.1 / Gemini 2.5 Flash:<Cite n={1} />
 
 | 基准 | K2-Instruct | DeepSeek-V3-0324 | Claude Sonnet 4 | 说明 |
 |---|---|---|---|---|
-| SWE-bench Verified(agentic) | **65.8** | 38.8 | 72.7 | 多次尝试 71.6;开源断层第一 |
+| SWE-bench Verified(agentic) | **65.8** | 38.8 | 72.7 | 多次尝试 71.6；开源断层第一 |
 | SWE-bench Multilingual | **47.3** | 25.8 | 51.0 | |
-| Tau2-Bench(均值) | **66.1** | 48.8 | — | 多轮工具调用 |
+| Tau2-Bench（均值） | **66.1** | 48.8 | — | 多轮工具调用 |
 | ACEBench(En) | **76.5** | 72.7 | 76.2 | |
 | LiveCodeBench v6 | **53.7** | 46.9 | 48.5 | |
 | AIME 2025(Avg@64) | **49.5** | 46.7 | 33.1 | |
@@ -170,24 +174,34 @@ $$
 | MMLU-Pro | 81.1 | 81.2 | 83.7 | |
 | IFEval | **89.8** | 81.1 | 87.6 | |
 
-Base 模型同样领先:MMLU 87.79 vs V3-Base 87.10,MMLU-Pro 69.17 vs 60.59,SimpleQA 35.25 vs 26.49,EvalPlus 80.33 vs 65.61。LMSYS Arena(2025-07-17)上 K2 是**开源第一、总榜第五**。
+Base 模型同样领先：MMLU 87.79 vs V3-Base 87.10,MMLU-Pro 69.17 vs 60.59,SimpleQA 35.25 vs 26.49,EvalPlus 80.33 vs 65.61。<Cite n={[1,3]} />LMSYS Arena（2025-07-17）上 K2 是**开源第一、总榜第五**。
 
-定位:与 DeepSeek-V3 相比,K2 用 1.5 倍总参换更稀疏的激活与更强的 agentic/代码,方法论上的真正差异是三点——**MuonClip 替代 AdamW**(token 效率)、**合成 agentic 数据替代自然数据**、**self-critique 替代独立奖励模型**。与自家 K1.5 相比,K2 把同一套 RL 算法与 partial rollout 基建从「数学推理」搬到「通用 agentic」,并补上了 K1.5 欠的答案:开源权重。
+定位：与 DeepSeek-V3 相比，K2 用 1.5 倍总参换更稀疏的激活与更强的 agentic/代码，方法论上的真正差异是三点——**MuonClip 替代 AdamW**（token 效率）、**合成 agentic 数据替代自然数据**、**self-critique 替代独立奖励模型**。与自家 K1.5 相比，K2 把同一套 RL 算法与 partial rollout 基建从「数学推理」搬到「通用 agentic」，并补上了 K1.5 欠的答案：开源权重。
 
 ## 七、局限与批判
 
-论文第 5 节自认的问题:难题或工具定义不清时会**生成过量 token**,导致截断或不完整的工具调用;不必要的工具调用反而拉低某些任务成绩;一次性 prompt 建整个项目,成功率远低于放进 agentic 编程框架里跑。更结构性的批判:
+论文第 5 节自认的问题：难题或工具定义不清时会**生成过量 token**，导致截断或不完整的工具调用；不必要的工具调用反而拉低某些任务成绩；一次性 prompt 建整个项目，成功率远低于放进 agentic 编程框架里跑。<Cite n={1} />更结构性的批判：
 
-- **self-critique 的循环风险**:critic 与 actor 同源,虽用 RLVR 信号锚定,「模型评价自己」在分布外的漂移缺乏理论保证——这正是 [RLHF](/tutorials/rlhf) 里「奖励模型被钻空子」问题的变体。
-- **non-thinking 的代价**:所有对比都在非思考模式;K2 主打「不靠测试时计算的智能」,但在前沿推理任务上与 thinking 模型并非同台。
-- **合成数据的保真度上限**:工具模拟器毕竟不是真实世界;论文用真实沙箱补位,但只覆盖代码场景。
-- **上下文外推**:sparsity scaling law 在 384 专家处仍未见顶,但基础设施复杂度随专家数上升——K2 停在「性能与成本」的折中点,而非最优点。
+- **self-critique 的循环风险**：critic 与 actor 同源，虽用 RLVR 信号锚定，「模型评价自己」在分布外的漂移缺乏理论保证——这正是 [RLHF](/tutorials/rlhf) 里「奖励模型被钻空子」问题的变体。
+- **non-thinking 的代价**：所有对比都在非思考模式；K2 主打「不靠测试时计算的智能」，但在前沿推理任务上与 thinking 模型并非同台。
+- **合成数据的保真度上限**：工具模拟器毕竟不是真实世界；论文用真实沙箱补位，但只覆盖代码场景。
+- **上下文外推**:sparsity scaling law 在 384 专家处仍未见顶，但基础设施复杂度随专家数上升——K2 停在「性能与成本」的折中点，而非最优点。
 
 ## 小结
 
-- **MuonClip** = Muon 的 Newton-Schulz 正交化更新 + 逐头 QK-Clip 钳制 attention logit:换来 1.04T 模型 15.5T token 预训练零 loss spike,是「换优化器买 token 效率」路线迄今最大规模的验证。
-- **架构**:超稀疏 MoE(384 专家/8 激活,sparsity 48)+ 64 头 MLA——sparsity scaling law 与推理成本核算共同决定的配比。
-- **agentic 训练**:三步合成管线(2 万+ 工具 → 带 rubric 的任务 → 过滤后的轨迹)+ joint RL(RLVR Gym + self-critique rubric + budget control/PTX/温度衰减)。
-- 数字:SWE-bench Verified 65.8、Tau2-Bench 66.1、AIME 2025 49.5(全部 non-thinking),开源模型第一梯队,权重开放。
+- **MuonClip** = Muon 的 Newton-Schulz 正交化更新 + 逐头 QK-Clip 钳制 attention logit：换来 1.04T 模型 15.5T token 预训练零 loss spike，是「换优化器买 token 效率」路线迄今最大规模的验证。
+- **架构**：超稀疏 MoE(384 专家/8 激活，sparsity 48)+ 64 头 MLA——sparsity scaling law 与推理成本核算共同决定的配比。
+- **agentic 训练**：三步合成管线（2 万+ 工具 → 带 rubric 的任务 → 过滤后的轨迹）+ joint RL(RLVR Gym + self-critique rubric + budget control/PTX/温度衰减)。
+- 数字：SWE-bench Verified 65.8、Tau2-Bench 66.1、AIME 2025 49.5（全部 non-thinking），开源模型第一梯队，权重开放。
 
-K2 的信息量在于:它把「agentic 能力能不能训出来」这个问题,拆成了一整套可复用的工程答案——从优化器稳定性、数据合成、到奖励设计,每一层都有自己的解法。
+K2 的信息量在于：它把「agentic 能力能不能训出来」这个问题，拆成了一整套可复用的工程答案——从优化器稳定性、数据合成、到奖励设计，每一层都有自己的解法。
+
+## 参考资料
+
+<References>
+1. Kimi Team (2025). *Kimi K2: Open Agentic Intelligence*. arXiv: [2507.20534](https://arxiv.org/abs/2507.20534). —— 本文主报告，支撑 1.04T/32B MoE、MuonClip、sparsity scaling law、合成 agentic 数据、joint RL、Figures 2/3/5/8 与 benchmark 数字。
+2. Kimi Team (2025). *Kimi k1.5: Scaling Reinforcement Learning with LLMs*. arXiv: [2501.12599](https://arxiv.org/abs/2501.12599). —— K2 继承的在线镜像下降、partial rollout 与长程 RL 基础设施背景。
+3. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*. arXiv: [2412.19437](https://arxiv.org/abs/2412.19437). —— MLA、MoE 与开源 MoE 对照基线。
+4. Keller Jordan et al. (2024). *Muon optimizer*. [github.com/KellerJordan/Muon](https://github.com/KellerJordan/Muon). —— Muon / Newton-Schulz 正交化优化器背景。
+5. Anthropic (2024). *The Model Context Protocol*. [modelcontextprotocol.io](https://modelcontextprotocol.io/). —— MCP 工具生态背景，用于理解 K2 的工具仓库与 agentic 数据合成场景。
+</References>

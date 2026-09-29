@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="430" viewBox="0 0 940 430" role="img" aria-labelledby="title desc">
+  <title id="title">MiniLLM reverse-KL on-policy distillation</title>
+  <desc id="desc">Student samples its own trajectory; the teacher scores the same prefixes; reverse KL provides token-level update signals.</desc>
+  <rect width="940" height="430" fill="#fafafa"/>
+  <text x="470" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">MiniLLM：学生轨迹上的反向 KL 蒸馏</text>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#059669"/>
+    </marker>
+  </defs>
+  <rect x="60" y="105" width="180" height="95" rx="16" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="150" y="142" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#065f46">Student</text>
+  <text x="150" y="170" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#047857">按当前策略采样</text>
+  <text x="150" y="190" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#047857">y₁, y₂, ..., yₜ</text>
+  <rect x="380" y="105" width="180" height="95" rx="16" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text x="470" y="142" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#1d4ed8">Teacher</text>
+  <text x="470" y="170" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#2563eb">同一前缀上打分</text>
+  <text x="470" y="190" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#2563eb">log pT(yₜ | sₜ)</text>
+  <rect x="700" y="105" width="180" height="95" rx="16" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="790" y="142" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#92400e">Update</text>
+  <text x="790" y="170" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#92400e">降低 DKL(student || teacher)</text>
+  <text x="790" y="190" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#92400e">只纠正学生会说的 token</text>
+  <path d="M240 152 H374" stroke="#059669" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+  <path d="M560 152 H694" stroke="#059669" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+  <path d="M790 205 C790 305 150 305 150 210" stroke="#059669" stroke-width="3" fill="none" marker-end="url(#arrow)" stroke-dasharray="8 6"/>
+  <text x="470" y="265" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#111827">Aₜ = log pT(yₜ | sₜ) − log pθ(yₜ | sₜ)</text>
+  <text x="470" y="298" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#4b5563">teacher 更认可学生采样 token → 提高概率；teacher 不认可 → 降低概率</text>
+  <text x="470" y="374" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">根据 Gu et al. (2024) 的 reverse-KL on-policy distillation 机制重绘</text>
+</svg>

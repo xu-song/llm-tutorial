@@ -3,6 +3,7 @@ import Sidebar from "@/components/Sidebar";
 import PrevNext from "@/components/PrevNext";
 import TableOfContents from "@/components/TableOfContents";
 import Comments from "@/components/Comments";
+import TutorialSectionNumbers from "@/components/TutorialSectionNumbers";
 import { getTutorialsNav } from "@/lib/tutorials";
 
 // 教程区三栏布局:
@@ -21,6 +22,7 @@ export default function TutorialLayout({ children }: { children: ReactNode }) {
       </aside>
 
       <main className="min-w-0 flex-1">
+        <TutorialSectionNumbers />
         <article
           className="
             [&_h1]:text-3xl [&_h1]:font-bold [&_h1]:mb-6 [&_h1]:mt-2 [&_h1]:dark:text-zinc-50
@@ -35,6 +37,7 @@ export default function TutorialLayout({ children }: { children: ReactNode }) {
             [&_strong]:font-semibold [&_strong]:text-zinc-900 [&_strong]:dark:text-zinc-100
             [&_table]:my-4 [&_table]:w-full [&_table]:text-sm [&_th]:border [&_th]:border-zinc-200 [&_th]:dark:border-zinc-700 [&_th]:bg-zinc-50 [&_th]:dark:bg-zinc-800 [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_td]:border [&_td]:border-zinc-200 [&_td]:dark:border-zinc-700 [&_td]:px-3 [&_td]:py-2 [&_td]:text-zinc-700 [&_td]:dark:text-zinc-300
             [&_blockquote]:border-l-4 [&_blockquote]:border-emerald-300 [&_blockquote]:bg-emerald-50 [&_blockquote]:px-4 [&_blockquote]:py-2 [&_blockquote]:rounded-r-lg [&_blockquote]:my-4 [&_blockquote_p]:my-1 [&_blockquote_p]:text-zinc-700 [&_blockquote]:dark:border-emerald-700 [&_blockquote]:dark:bg-emerald-950/40 [&_blockquote_p]:dark:text-zinc-300
+            [&_figcaption]:!mt-3 [&_figcaption]:mx-auto [&_figcaption]:max-w-2xl [&_figcaption]:text-center [&_figcaption]:text-zinc-500 [&_figcaption]:dark:text-zinc-500 [&_.figure-caption-main]:block [&_.figure-caption-main]:!text-[13px] [&_.figure-caption-main]:!leading-5 [&_.figure-caption-main]:text-zinc-500 [&_.figure-caption-main]:dark:text-zinc-500 [&_.figure-caption-source]:mt-1 [&_.figure-caption-source]:block [&_.figure-caption-source]:!text-[11px] [&_.figure-caption-source]:!leading-4 [&_.figure-caption-source]:text-zinc-400 [&_.figure-caption-source]:dark:text-zinc-600
           "
         >
           {children}

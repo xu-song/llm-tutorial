@@ -1,0 +1,151 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("minillm-gu");
+
+<PaperHeader slug="minillm-gu" />
+
+# MiniLLM：用反向 KL 做在线蒸馏
+
+2023 年 6 月，MiniLLM 把一个后来反复出现的问题讲清楚：生成式 LLM 的蒸馏不该只照搬分类模型里的 forward KL。<Cite n={1} />老师给出的低概率区域很多，小学生容量有限，如果强迫它“覆盖”老师分布的每个角落，生成会变得散、长文本会更容易漂。MiniLLM 的选择是 **reverse KL + on-policy optimization**：让学生在自己生成的轨迹上，只学习老师也认可的高概率区域。<Cite n={1} />
+
+> 📌 前置：建议先读 [OPD 总览](/papers/opd-agarwal) 和 [前向 / 反向 KL](/tutorials/forward-reverse-kl)。MiniLLM 是 OPD 路线里“PG / reverse-KL”一支的早期代表，和 [GKD](/papers/opd-agarwal) 的主要差别不在“是否在线”，而在 KL 方向与优化方式。<Cite n={[1,2]} />
+
+## 一、动机：生成模型为什么怕 forward KL？
+
+传统 KD 常写成：
+
+$$
+D_{KL}(p_T\Vert p_\theta)
+$$
+
+也就是让学生 $p_\theta$ 覆盖老师 $p_T$ 的分布。在分类任务里，这很自然：老师对每个类别给一个 soft label，学生学完整暗知识。
+
+但自回归生成不一样。每个时间步都有一个大词表，老师分布的长尾里有许多“语法上可能、语义上勉强、风格上不一定好”的 token。forward KL 会惩罚学生漏掉老师低概率但非零的选项，于是学生容易变得 mean-seeking：覆盖多种可能，却不够果断。
+
+MiniLLM 的核心判断是：**小模型不该摊平去覆盖老师所有模式，而应优先抓住老师最认可、自己也能稳定生成的模式。**<Cite n={1} /> 这正是 reverse KL 的行为：
+
+$$
+D_{KL}(p_\theta\Vert p_T)
+=\mathbb{E}_{y\sim p_\theta}\left[\log p_\theta(y\mid x)-\log p_T(y\mid x)\right]
+$$
+
+期望在学生分布下取，意味着学生会重点修正自己真的会说出口的答案；如果某个 token 老师概率很低，而学生偏偏常说，它会被强烈压低。
+
+## 二、为什么必须 on-policy？
+
+reverse KL 的期望写着 $y\sim p_\theta$，这不是装饰。它要求训练数据来自学生当前策略，否则优化目标就变味了。<Cite n={1} />
+
+离线 SFT / KD 的流程是：
+
+1. 老师或数据集给出固定答案；
+2. 学生在这些答案上算损失；
+3. 学生部署时自己生成，状态分布改变。
+
+MiniLLM 的流程则更像：
+
+1. 学生自己生成回答；
+2. 老师对学生回答里的每个 token 给 logprob；
+3. 学生用这些同状态、同 token 的分数做更新；
+4. 更新后再用新的学生重新采样。
+
+所以 MiniLLM 不是“拿老师答案做 SFT”，而是“学生在自己的错误轨迹上接受老师评分”。<Cite n={1} />这使它直接面对 exposure bias：学生如果走到一个老师答案里不会出现的坏前缀，老师仍然能在这个前缀上告诉它哪些 token 更合理。
+
+<figure className="my-6">
+  <img src="./fig-reverse-kl-opd.svg" alt="MiniLLM 的反向 KL 在线蒸馏流程：学生先按当前策略生成自己的回答轨迹，老师在相同前缀上计算 token logprob，训练信号只作用在学生真实会生成的 token 上" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">MiniLLM 的反向 KL 在线蒸馏流程：学生先按当前策略生成自己的回答轨迹，老师在相同前缀上计算 token logprob，训练信号只作用在学生真实会生成的 token 上</span>
+    <span className="figure-caption-source">图源：根据 Gu et al., <em>MiniLLM: On-Policy Distillation of Large Language Models</em>（arXiv:2306.08543）方法机制重绘</span>
+  </figcaption>
+</figure>
+
+## 三、目标函数：从反向 KL 到策略梯度
+
+完整反向 KL 是：
+
+$$
+D_{KL}(p_\theta\Vert p_T)
+=\sum_y p_\theta(y\mid x)\left[\log p_\theta(y\mid x)-\log p_T(y\mid x)\right]
+$$
+
+难点在于：期望分布本身依赖 $\theta$，不能像普通交叉熵那样只在固定 teacher token 上反传。于是 MiniLLM 推导了 on-policy 优化方式，可以理解为 REINFORCE / policy-gradient 形态：学生采样一个序列，老师给这个序列在各 token 上的概率，学生把“老师是否认可”转成训练信号。<Cite n={1} />
+
+单个 token 的直觉是：
+
+$$
+r_t=\log p_T(y_t\mid x,y_{<t})-\log p_\theta(y_t\mid x,y_{<t})
+$$
+
+如果老师比学生更认可这个 token，$r_t>0$，学生应提高它；如果老师更不认可，$r_t<0$，学生应降低它。这就是后来很多 OPD 实现把 sampled-token reverse KL 写成 token reward 的原因。<Cite n={3} />
+
+用一个小例子看 reverse KL 为什么更“挑剔”：
+
+<CodeRunner defaultCode={String.raw`
+import numpy as np
+
+def kl(p, q):
+    return np.sum(p * (np.log(p + 1e-12) - np.log(q + 1e-12)))
+
+teacher = np.array([0.70, 0.20, 0.08, 0.02])
+student_cover = np.array([0.45, 0.30, 0.18, 0.07])
+student_mode = np.array([0.86, 0.10, 0.03, 0.01])
+
+for name, student in [("覆盖型学生", student_cover), ("择一型学生", student_mode)]:
+    fwd = kl(teacher, student)      # D_KL(teacher || student)
+    rev = kl(student, teacher)      # D_KL(student || teacher)
+    print(f"{name}: forward KL={fwd:.3f}, reverse KL={rev:.3f}")
+
+print("\nforward KL 更怕学生漏掉老师尾部；reverse KL 更怕学生把概率放到老师不认可的地方。")
+`} />
+
+## 四、实验读法：不是只看均分，而是看长文本退化
+
+MiniLLM 的实验覆盖 GPT-2、OPT、LLaMA 等模型家族，student/teacher 规模从 120M 到 13B。<Cite n={1} />论文不只比较最终 Rouge-L 或 GPT-4 feedback score，还专门看 exposure bias、校准和长文本 bucket，因为这些才是生成式蒸馏最容易出问题的地方。
+
+| 证据 | 论文报告的现象 | 解读 |
+|---|---|---|
+| 指令跟随主结果 | OPT-13B teacher 下，MiniLLM OPT-6.7B 在 DollyEval、SelfInst、VicunaEval、S-NI、UnNI 多项接近或超过 teacher；LLaMA-7B student 在 UnNI 上也超过 LLaMA-13B teacher | reverse KL + on-policy 不是只“保住小模型”，而是可能让学生在部分生成指标上更稳定 |
+| 校准 | LLaMA-7B 设置中，MiniLLM 在 SST2 / BoolQ 的 ECE 优于常规 KD / SeqKD student | reverse KL 不鼓励学生覆盖老师长尾，有助于减少过度自信或分布漂移 |
+| 消融 | GPT-2 125M student 上，去掉 length normalization 或 teacher-mixed sampling 后，validation / Dolly Rouge-L 明显下降 | MiniLLM 不是单一 KL 替换，长度归一化和采样混合也参与稳定训练 |
+| 长文本分析 | 论文 Figure 6/7 用 ExAccErr 与按 response length bucket 的 Rouge-L 分析 exposure bias | 长回答越容易暴露离线蒸馏的状态错配，正是 on-policy 方法的用武之地 |
+
+这里“长文本生成”尤其关键。短答案里，离线蒸馏的 exposure bias 不一定明显；但长文本会把错误前缀不断放大：前面一句风格偏了，后面几段都在偏分布上继续采样。MiniLLM 的 on-policy 训练正是在这些学生真实前缀上施加老师信号，因此更适合长回答与指令跟随。
+
+可以把实验结论读成三层：
+
+| 层次 | MiniLLM 想证明什么 |
+|---|---|
+| 损失层 | reverse KL 比 forward KL 更适合生成式蒸馏 |
+| 数据层 | 学生自采样比固定老师轨迹更能覆盖推理时状态 |
+| 行为层 | 更少曝光偏差，更好的长文本与校准表现 |
+
+## 五、和 GKD / OPD 的关系
+
+GKD 与 MiniLLM 都属于 on-policy 蒸馏谱系，但关注点不同：<Cite n={[1,2]} />
+
+| 方法 | 关键词 | 更强调 |
+|---|---|---|
+| GKD | generalized KD | 把 teacher/student 数据来源和多种 divergence 放进统一框架 |
+| MiniLLM | reverse KL | 生成式 LLM 蒸馏应避免 forward KL 的覆盖倾向 |
+| Thinking Machines OPD | token reward | 把 reverse KL 写成逐 token advantage，复用 RL 训练栈 |
+| verl PG OPD | k1 + policy gradient | 工程化地把 teacher logprob 接进 PPO/GRPO actor loss |
+
+也就是说，MiniLLM 最值得记住的不是“它用了在线采样”这个单点，而是它解释了为什么**反向 KL 是生成式蒸馏的自然方向**。<Cite n={1} />
+
+## 六、局限：reverse KL 也不是免费午餐
+
+1. **mode-seeking 会牺牲多样性**：如果任务需要保留多种表达方式，reverse KL 可能过早收缩到老师的一种模式。
+2. **依赖白盒 teacher logprob**：黑盒 API 只能返回文本，无法稳定提供逐 token 分布或 logprob 时，MiniLLM 的核心信号就不可用。
+3. **on-policy 成本更高**：每轮都要学生采样、老师打分；比一次性生成离线数据复杂。
+4. **teacher-student 不匹配会失败**：如果学生容量太小或思考模式与老师差太远，老师的 token 信号未必能被学生吸收。这一点后来被 Rethinking OPD 系统化研究。
+
+## 小结
+
+MiniLLM 是 OPD 早期路线里非常关键的一篇：它把 LLM 蒸馏从“模仿老师答案”改写成“学生自己生成，老师逐 token 纠偏”，并把损失方向从 forward KL 转向 reverse KL。它后来的影响在于：很多 OPD 系统都把老师 logprob 当成 token-level reward，复用 RL 的 policy-gradient 工具链来做蒸馏。
+
+## 参考资料
+
+<References>
+1. Yuxian Gu, Li Dong, Furu Wei, Minlie Huang (2024). *MiniLLM: On-Policy Distillation of Large Language Models*. ICLR 2024, arXiv: [2306.08543](https://arxiv.org/abs/2306.08543). —— 本文主论文，提出面向白盒 LLM 的 reverse-KL on-policy distillation。
+2. Rishabh Agarwal, Nino Vieillard, Yongchao Zhou, Piotr Stanczyk, Sabela Ramos, Matthieu Geist, Olivier Bachem (2024). *On-policy Distillation of Language Models: Learning from Self-Generated Mistakes*. ICLR 2024, arXiv: [2306.13649](https://arxiv.org/abs/2306.13649). —— GKD 框架，把 on-policy/off-policy 与多种 divergence 统一起来。
+3. Kevin Lu, Thinking Machines Lab (2025). *On-Policy Distillation*. [thinkingmachines.ai/blog/on-policy-distillation](https://thinkingmachines.ai/blog/on-policy-distillation/). —— 后续把 reverse KL OPD 写成更接近工程 RL loop 的 token-level advantage。
+</References>

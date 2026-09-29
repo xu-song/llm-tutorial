@@ -1,0 +1,171 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("rethinking-opd");
+
+<PaperHeader slug="rethinking-opd" />
+
+# Rethinking OPD：为什么强老师也可能教不会学生
+
+OPD 的口号很诱人：学生自己 rollout，老师逐 token 打分，既 on-policy 又 dense。<Cite n={[2,3]} />但 2026 年的 *Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe* 提醒我们：这不是“强 teacher 自动提升弱 student”的万能按钮。<Cite n={1} />OPD 成功需要两个条件：学生与老师的思考模式要兼容；老师还必须提供学生没见过、但能在当前状态里吸收的新能力。<Cite n={1} />
+
+> 📌 前置：建议先读 [OPD 总览](/papers/opd-agarwal)、[MiniLLM](/papers/minillm-gu)、[Thinking Machines OPD](/papers/tml-opd)。这篇是对 OPD 热潮的刹车片：它不否定 OPD，而是解释 OPD 什么时候有效、什么时候只是昂贵地原地打转。
+
+## 一、动机：OPD 看似简单，失败却很常见
+
+OPD 的机制看上去很稳：
+
+1. 学生自己生成；
+2. 老师在学生状态上打分；
+3. 每个 token 都有监督；
+4. 训练分布贴近部署分布。
+
+如果只看这个描述，似乎 teacher 越强，student 越该变强。但实践中经常不是这样：更大 teacher 不一定带来更大收益；同模型家族的强模型有时教不动弱模型；有些 prompt 上 OPD 明显涨分，有些 prompt 上几乎没动静。<Cite n={1} />
+
+Rethinking OPD 要回答的正是这些问题：**OPD 的有效信号到底从哪里来？失败时缺的是什么？能不能给出可操作的 recipe？**
+
+<figure className="my-6">
+  <img src="./fig-opd-success-conditions.svg" alt="Rethinking OPD 总结的两个成功条件：学生与老师的思考模式要兼容，且老师必须在学生会访问的状态上提供学生尚未学到的新能力" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">Rethinking OPD 总结的两个成功条件：学生与老师的思考模式要兼容，且老师必须在学生会访问的状态上提供学生尚未学到的新能力</span>
+    <span className="figure-caption-source">图源：根据 Li et al., <em>Rethinking On-Policy Distillation of Large Language Models</em>（arXiv:2604.13016）机制分析重绘</span>
+  </figcaption>
+</figure>
+
+## 二、现象一：思考模式必须兼容
+
+论文总结的第一个条件是 teacher 和 student 需要有兼容的 thinking pattern。<Cite n={1} />
+
+这句话比“模型架构相同”更强。即使两个模型同属一个家族，如果它们在推理路径、格式、分解问题的方式上差别过大，逐 token 对齐也可能变成噪声。因为 OPD 不是在最终答案上做 distillation，而是在学生每个前缀状态上要求老师给出下一步偏好。<Cite n={[1,2]} />
+
+如果学生走的是代数路线，老师偏几何路线，老师在学生前缀上给出的 token 分布未必能形成连续可学的改进路径。它可能在局部不断说“你不该这么走”，却无法把学生平滑地带到另一套完整思路上。
+
+所以 OPD 成功的第一条不是“teacher 更强”，而是：
+
+$$
+\text{student states} \cap \text{teacher useful states} \neq \varnothing
+$$
+
+学生真实访问的状态里，必须存在老师能给出清晰局部指导的区域。
+
+## 三、现象二：老师必须带来新能力
+
+第二个条件更反直觉：teacher 不仅要强，还要对 student 来说有**新增信息**。<Cite n={1} />
+
+如果 teacher 分数更高，但它在 student 访问状态附近给出的高概率 token 和 student 已经差不多，那么 OPD 信号就很弱。论文摘要提到一个现象：同一模型家族里的 1.5B 和 7B teacher，从某些 student 视角看可能在分布上难以区分。<Cite n={1} />
+
+这意味着：
+
+- 参数更大 ≠ token-level 分布一定更有教学价值；
+- benchmark 更高 ≠ 在当前 prompt / 当前学生状态上提供新梯度；
+- teacher 是否有用，要看它在 student-visited states 上是否改变高概率 token 的排序和概率质量。
+
+这也是 OPD 选 teacher 的难点：不能只看 teacher 的排行榜分数，还要看 teacher 与 student 的局部分布差异。
+
+## 四、机制：有效信号集中在少数高概率 token
+
+论文从 token-level 解释 OPD 的机制：成功的 OPD 不是平均地学习整个词表，而是在学生访问的状态上，逐步对齐老师高概率 token 的分布。<Cite n={1} />
+
+摘要里一个关键数字是：一个很小的共享 token 集合承载了约 **97%—99%** 的概率质量。<Cite n={1} />这解释了为什么 top-k OPD 在工程上可行，也解释了为什么 teacher-student overlap 很重要。
+
+可以用一个小实验感受“概率质量集中”这件事：
+
+<CodeRunner defaultCode={String.raw`
+import numpy as np
+
+rng = np.random.default_rng(7)
+V = 50000
+# 模拟语言模型的长尾分布：少数 token 承载绝大多数概率质量。
+logits = -np.log(np.arange(1, V + 1)) * 1.15
+logits += rng.normal(scale=0.02, size=V)
+prob = np.exp(logits - logits.max())
+prob = prob / prob.sum()
+
+for k in [16, 32, 64, 128, 256, 512]:
+    mass = np.sort(prob)[::-1][:k].sum()
+    print(f"top-{k:<3d} 概率质量 = {mass:.2%}")
+
+print("\n如果 teacher 与 student 的高概率 token 集合高度重合，OPD 信号会集中且稳定。")
+print("如果两者高概率集合几乎不重合，逐 token 对齐就更像噪声或拉扯。")
+`} />
+
+这也把 Rethinking OPD 和 verl 文档里的 top-k metrics 连起来了：`teacher_mass`、`student_mass`、`overlap_ratio` 不是普通日志，而是在观察 OPD 是否真的有可学信号。<Cite n={4} />
+
+## 五、weak-to-strong reverse distillation 的启示
+
+论文用 weak-to-strong reverse distillation 来验证这些判断。<Cite n={1} />所谓 reverse，不是说弱教强，而是从 student 的角度检查不同 teacher 是否真的可区分、可学习。
+
+结论可以概括为：有些“大 teacher”对 student 来说并没有形成有效教学信号。原因可能是：
+
+1. teacher 和 student 的局部高概率 token 差异不足；
+2. teacher 的优势只体现在学生到不了的状态；
+3. teacher 的思考模式和 student 当前路径不兼容；
+4. prompt 没有触发 teacher 的特殊能力。
+
+这解释了很多工程现象：换一个更强 teacher 不涨分，未必是 OPD 实现错了；可能是 teacher 没有在这批 prompt 和 student 状态上提供“可被吸收的新信息”。
+
+## 六、Recipe 一：off-policy cold start
+
+第一条修复策略是 **off-policy cold start**。<Cite n={1} />
+
+如果 student 太弱，直接 OPD 会遇到一个尴尬：学生 rollout 的状态太烂，teacher 在这些状态上的局部建议无法组成一条通往正确推理的路径。此时先用 off-policy 数据做冷启动，让 student 进入更接近 teacher 的状态区域，再切到 OPD，会更容易成功。
+
+这和很多 RLVR 流水线相似：
+
+| 阶段 | 目的 |
+|---|---|
+| SFT / off-policy cold start | 教基本格式、领域语言、初始推理轨迹 |
+| OPD | 在学生自己的轨迹附近对齐老师偏好 |
+| RL / RLVR | 用任务奖励继续拉高最终表现 |
+
+所以 off-policy 不是 OPD 的敌人，而是 OPD 的起跑器。真正的问题不是“离线还是在线”，而是何时切换。
+
+## 七、Recipe 二：teacher-aligned prompt selection
+
+第二条策略是 **teacher-aligned prompt selection**：挑选能触发 teacher 优势、且 student 有机会学习的 prompt。<Cite n={1} />
+
+这比“多喂数据”更精确。对 OPD 来说，一个 prompt 是否有价值，取决于它是否满足：
+
+1. student 会生成足够多有差异的轨迹；
+2. teacher 在这些轨迹上给出稳定、有信息量的偏好；
+3. 这些偏好对应目标 benchmark 需要的能力；
+4. student 有容量把这种偏好吸收下来。
+
+如果 prompt 太简单，teacher 和 student 都一样，梯度小；如果 prompt 太难，student 状态太乱，teacher 信号不可学；最有效的是中间地带：student 会犯错，但老师能在学生前缀上指出可行的下一步。
+
+## 八、对 OPD 热潮的修正
+
+这篇论文最有价值的地方，是把 OPD 从“方法名”还原成“条件依赖的机制”。可以把它对 OPD 的修正总结成四句话：
+
+1. **不是 teacher 越强越好**：强要强在 student 可访问状态上。
+2. **不是 token 信号越密越好**：密集信号如果不兼容，也只是密集噪声。
+3. **不是纯 on-policy 永远最好**：弱 student 可能需要 off-policy cold start。
+4. **不是 prompt 越多越好**：teacher-aligned prompts 比随机堆数据更关键。
+
+这也解释了为什么 2026 年的 OPD 工程开始关注 teacher routing、top-k overlap、prompt selection、cold start 和多阶段训练，而不再只讨论“用哪个 KL”。<Cite n={[1,4]} />
+
+## 九、和现有 OPD 实现的连接
+
+把 Rethinking OPD 的结论映射到 verl 指标，可以得到一个实践检查表：
+
+| 观察 | 可能含义 | 应对 |
+|---|---|---|
+| `teacher_mass` 低 | teacher top-k 截断覆盖不足 | 增大 top-k 或换 loss / teacher |
+| `student_mass` 低 | student 不认 teacher 高概率 token | 先 cold start 或降低学习难度 |
+| `overlap_ratio` 低 | teacher-student 高概率集合错位 | 检查 teacher 兼容性、prompt 选择 |
+| loss 不降但 teacher 分数高 | teacher 优势不在 student 状态附近 | 换 prompt、换 teacher 或先 SFT |
+| 短期涨分长期回退 | 多域能力冲突 | 用 MOPD / replay / 分域 routing |
+
+这个表也说明：OPD 的“可观测性”很重要。如果只看最终 benchmark，调参会非常慢；如果能看 token-level overlap 和概率质量，就能更早判断训练是不是在有效对齐。<Cite n={4} />
+
+## 小结
+
+Rethinking OPD 的一句话结论是：**OPD 成功不是因为 teacher 强，而是因为 teacher 在 student 会到达的状态上提供了可吸收的新信息。** 它把 OPD 的成败拆成两个条件——思考模式兼容、老师提供新能力——并给出两个 recipe：off-policy cold start 和 teacher-aligned prompt selection。对工程实践来说，这篇是 OPD 从“高效技巧”走向“可诊断系统”的关键一步。
+
+## 参考资料
+
+<References>
+1. Yaxuan Li, Yuxin Zuo, Bingxiang He, Jinqian Zhang, Chaojun Xiao, Cheng Qian, Tianyu Yu, Huan-ang Gao, Wenkai Yang, Zhiyuan Liu, Ning Ding (2026). *Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe*. arXiv: [2604.13016](https://arxiv.org/abs/2604.13016). —— 本文主论文，系统分析 OPD 成败条件、token-level 机制与修复 recipe。
+2. Rishabh Agarwal, Nino Vieillard, Yongchao Zhou, Piotr Stanczyk, Sabela Ramos, Matthieu Geist, Olivier Bachem (2024). *On-policy Distillation of Language Models: Learning from Self-Generated Mistakes*. ICLR 2024, arXiv: [2306.13649](https://arxiv.org/abs/2306.13649). —— OPD / GKD 的基础框架。
+3. Kevin Lu, Thinking Machines Lab (2025). *On-Policy Distillation*. [thinkingmachines.ai/blog/on-policy-distillation](https://thinkingmachines.ai/blog/on-policy-distillation/). —— OPD 高效实验与工程 recipe 的代表性博客。
+4. veRL contributors (2026). *On-Policy Distillation (OPD)*. [verl.readthedocs.io/en/latest/algo/opd.html](https://verl.readthedocs.io/en/latest/algo/opd.html). —— top-k mass、overlap 等实现指标与多教师 routing 背景。
+</References>

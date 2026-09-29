@@ -4,44 +4,45 @@ export const metadata = tutorialMetadata("gradient-descent");
 
 # ⛰️ 梯度下降
 
-上一篇里,我们靠**手动拖动**滑块去找最优的 $w, b$。但真实模型有成千上万个参数,不可能手调。**梯度下降**就是让模型「自己」找到谷底的算法。
+上一篇里，我们靠**手动拖动**滑块去找最优的 $w, b$。但真实模型有成千上万个参数，不可能手调。**梯度下降**就是让模型「自己」找到谷底的算法。
 
 ## 核心思想
 
-把损失函数想象成一座山谷,你站在山坡上,蒙着眼睛要走到最低点。策略很简单:
+把损失函数想象成一座山谷，你站在山坡上，蒙着眼睛要走到最低点。策略很简单：
 
-> 摸一摸脚下哪个方向最陡,朝**下坡**方向迈一小步,重复,直到走不动为止。
+> 摸一摸脚下哪个方向最陡，朝**下坡**方向迈一小步，重复，直到走不动为止。
 
-「最陡的方向」在数学上就是**梯度**(导数)。参数的更新公式是:
+「最陡的方向」在数学上就是**梯度**（导数）。参数的更新公式是：
 
 $$
 w \leftarrow w - \eta \cdot \frac{\partial L}{\partial w}
 $$
 
-其中 $\eta$(eta)是**学习率**,决定每一步迈多大。
+其中 $\eta$（eta）是**学习率**，决定每一步迈多大。
 
 ## 动手观察
 
-下面是损失函数 $L(w) = (w-3)^2 + 1$,最优解在 $w=3$。点击「开始下降」,看红点如何一步步滚向谷底。**重点:调整学习率 $\eta$**:
+下面是损失函数 $L(w) = (w-3)^2 + 1$，最优解在 $w=3$。点击「开始下降」，看红点如何一步步滚向谷底。**重点：调整学习率 $\eta$**：
 
 <GradientDescentViz />
 
-试试这几种情况,你会发现学习率是个需要权衡的关键超参数:
+试试这几种情况，你会发现学习率是个需要权衡的关键超参数：
 
-- **$\eta$ 太小**(如 0.05):走得很慢,需要很多步才到谷底
-- **$\eta$ 适中**(如 0.3):又快又稳,几步就收敛
-- **$\eta$ 太大**(如 1.05):每步都「冲过头」,反而越走越远 —— **发散**!
+- **$\eta$ 太小**（如 0.05）：走得很慢，需要很多步才到谷底
+- **$\eta$ 适中**（如 0.3）：又快又稳，几步就收敛
+- **$\eta$ 太大**（如 1.05）：每步都「冲过头」，反而越走越远 —— **发散**！
 
 <figure className="my-6">
-  <img src="./sgd-fluctuation.png" alt="SGD 与全批量梯度下降的等高线示意:SGD(红色实线)带噪声地绕最优点波动,全批量 GD(白色实线)平滑直奔最优点" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./sgd-fluctuation.png" alt="SGD 与全批量梯度下降的等高线示意：SGD（红色实线）带噪声地绕最优点波动，全批量 GD（白色实线）平滑直奔最优点" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Ruder, <em>An Overview of Gradient Descent Optimization Algorithms</em>(arXiv:1609.04747)Figure 1(源自 Wikipedia)
+    <span className="figure-caption-main">SGD 与全批量梯度下降的等高线示意：SGD（红色实线）带噪声地绕最优点波动，全批量 GD（白色实线）平滑直奔最优点</span>
+    <span className="figure-caption-source">图源：Ruder, <em>An Overview of Gradient Descent Optimization Algorithms</em>(arXiv:1609.04747)Figure 1（源自 Wikipedia）</span>
   </figcaption>
 </figure>
 
 ## 用代码实现
 
-梯度下降的核心其实只有几行。下面手写实现拟合 $y = wx$ 的过程,你可以改 `lr` 和 `epochs` 看效果:
+梯度下降的核心其实只有几行。下面手写实现拟合 $y = wx$ 的过程，你可以改 `lr` 和 `epochs` 看效果：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -67,24 +68,25 @@ print(f"\\n最终学到 w = {w:.4f}(真实值为 2)")
 
 ## 三种「梯度下降」的区别
 
-每次更新用多少数据来算梯度,衍生出三个常见变体:
+每次更新用多少数据来算梯度，衍生出三个常见变体：
 
 | 变体 | 每步用的数据 | 特点 |
 |---|---|---|
-| **批量(BGD)** | 全部样本 | 梯度准、方向稳,但大数据集慢 |
-| **随机(SGD)** | 1 个样本 | 快、能跳出局部极小,但噪声大、抖动 |
-| **小批量(Mini-batch)** | 一小批(如 32) | 兼顾速度与稳定,**深度学习默认做法** |
+| **批量（BGD）** | 全部样本 | 梯度准、方向稳，但大数据集慢 |
+| **随机（SGD）** | 1 个样本 | 快、能跳出局部极小，但噪声大、抖动 |
+| **小批量（Mini-batch）** | 一小批（如 32） | 兼顾速度与稳定，**深度学习默认做法** |
 
-深度学习实际用的是 SGD/Adam 及其变体。下图对比了六种优化器(SGD、Momentum、NAG、Adagrad、Adadelta、Adam)在同一损失等高线上的下降路径——可以看到动量类方法「冲过」谷底再荡回来,自适应方法(Adam 等)则各有各的走法:
+深度学习实际用的是 SGD/Adam 及其变体。下图对比了六种优化器（SGD、Momentum、NAG、Adagrad、Adadelta、Adam）在同一损失等高线上的下降路径——可以看到动量类方法「冲过」谷底再荡回来，自适应方法（Adam 等）则各有各的走法：
 
 <figure className="my-6">
-  <img src="./optimizer-contours.png" alt="六种优化器(SGD、Momentum、NAG、Adagrad、Adadelta、RMSprop)在损失等高线图上的下降轨迹对比" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./optimizer-contours.png" alt="六种优化器（SGD、Momentum、NAG、Adagrad、Adadelta、RMSprop）在损失等高线图上的下降轨迹对比" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Ruder, <em>An Overview of Gradient Descent Optimization Algorithms</em>(arXiv:1609.04747)Figure 4a(源自 Alec Radford)
+    <span className="figure-caption-main">六种优化器（SGD、Momentum、NAG、Adagrad、Adadelta、RMSprop）在损失等高线图上的下降轨迹对比</span>
+    <span className="figure-caption-source">图源：Ruder, <em>An Overview of Gradient Descent Optimization Algorithms</em>(arXiv:1609.04747)Figure 4a（源自 Alec Radford）</span>
   </figcaption>
 </figure>
 
-下面对比「学习率衰减」的效果 —— 一开始大步快走,后期小步精调:
+下面对比「学习率衰减」的效果 —— 一开始大步快走，后期小步精调：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -105,7 +107,7 @@ print(f"\\n最终 w = {w:.4f}")
 
 ## 画出损失下降曲线
 
-光看数字不够直观。下面用 **matplotlib** 把每一轮的损失画成曲线 —— 你能亲眼看到它一路下滑、逐渐收敛。**图形会直接显示在下方**(改 `lr` 看曲线形状如何变化):
+光看数字不够直观。下面用 **matplotlib** 把每一轮的损失画成曲线 —— 你能亲眼看到它一路下滑、逐渐收敛。**图形会直接显示在下方**（改 `lr` 看曲线形状如何变化）:
 
 <CodeRunner
   packages={["matplotlib"]}
@@ -133,52 +135,52 @@ plt.grid(alpha=0.3)
 plt.show()
 `} />
 
-> 📝 图中文字用英文,是因为浏览器里的 Pyodide 只自带英文字体(DejaVu),中文会显示成方框。正文照常用中文,画图时的标签用英文即可。
+> 📝 图中文字用英文，是因为浏览器里的 Pyodide 只自带英文字体（DejaVu），中文会显示成方框。正文照常用中文，画图时的标签用英文即可。
 
-> 💡 这条平滑下降的曲线是判断训练是否健康的最重要工具:正常应单调下降并趋平;若**震荡或爆炸**,说明学习率太大。
+> 💡 这条平滑下降的曲线是判断训练是否健康的最重要工具：正常应单调下降并趋平；若**震荡或爆炸**，说明学习率太大。
 
 ## 典型应用场景
 
-梯度下降是几乎所有现代机器学习模型的「训练引擎」:
+梯度下降是几乎所有现代机器学习模型的「训练引擎」：
 
-- **神经网络 / 深度学习**:反向传播算出梯度,再用 SGD/Adam 更新数百万参数
-- **逻辑回归、线性回归**:大规模数据下用 SGD 比解析解更省内存
-- **推荐系统**:矩阵分解里用梯度下降学习用户/物品向量
-- **大语言模型**:GPT、Claude 等的预训练本质就是超大规模的小批量梯度下降
+- **神经网络 / 深度学习**：反向传播算出梯度,再用 SGD/Adam 更新数百万参数
+- **逻辑回归、线性回归**：大规模数据下用 SGD 比解析解更省内存
+- **推荐系统**：矩阵分解里用梯度下降学习用户/物品向量
+- **大语言模型**：GPT、Claude 等的预训练本质就是超大规模的小批量梯度下降
 
 ## 常见问题 FAQ
 
-**Q:梯度下降会卡在局部最小值吗?**
-凸函数(如线性回归的 MSE)只有一个全局最小,不会卡。深度网络是非凸的,理论上会,但实践中高维空间里「鞍点」比真正的坏局部极小更常见,加动量、用 SGD 的噪声通常能逃出来。
+**Q：梯度下降会卡在局部最小值吗？**
+凸函数（如线性回归的 MSE）只有一个全局最小，不会卡。深度网络是非凸的，理论上会，但实践中高维空间里「鞍点」比真正的坏局部极小更常见，加动量、用 SGD 的噪声通常能逃出来。
 
-**Q:学习率到底怎么选?**
-没有万能值。常见做法:从 `0.1`、`0.01`、`0.001` 中试,看损失曲线 —— 损失震荡/爆炸说明太大,下降太慢说明太小。配合**学习率衰减**或 Adam 这类自适应优化器更省心。
+**Q：学习率到底怎么选？**
+没有万能值。常见做法：从 `0.1`、`0.01`、`0.001` 中试，看损失曲线 —— 损失震荡/爆炸说明太大，下降太慢说明太小。配合**学习率衰减**或 Adam 这类自适应优化器更省心。
 
-**Q:为什么要标准化特征再做梯度下降?**
-若特征尺度差异大,损失等高线会被拉成「细长椭圆」,梯度方向频繁来回横跳,收敛极慢。标准化后等高线接近圆形,下降路径更直。
+**Q：为什么要标准化特征再做梯度下降？**
+若特征尺度差异大，损失等高线会被拉成「细长椭圆」，梯度方向频繁来回横跳，收敛极慢。标准化后等高线接近圆形，下降路径更直。
 
-**Q:损失先降后升是怎么回事?**
-通常是学习率偏大,后期在最低点附近「冲过头」来回弹。可调小学习率或启用衰减。
+**Q：损失先降后升是怎么回事？**
+通常是学习率偏大，后期在最低点附近「冲过头」来回弹。可调小学习率或启用衰减。
 
 ## 动手作业
 
-1. **复现发散**:把手写代码里的 `lr` 调到 `0.1` 以上,观察损失如何爆炸成 `nan`,记录刚好发散的临界学习率。
-2. **加偏置项**:把模型从 $y=wx$ 改成 $y=wx+b$,同时对 $w$ 和 $b$ 求梯度更新,拟合 `y = 2x + 1`。
-3. **实现动量**:在更新里引入速度项 `v = 0.9*v + grad; w -= lr*v`,对比收敛速度是否变快。
-4. **思考题**:为什么 SGD 的「噪声」有时反而是好事?它和模型泛化能力有什么关系?
+1. **复现发散**：把手写代码里的 `lr` 调到 `0.1` 以上，观察损失如何爆炸成 `nan`，记录刚好发散的临界学习率。
+2. **加偏置项**：把模型从 $y=wx$ 改成 $y=wx+b$，同时对 $w$ 和 $b$ 求梯度更新，拟合 `y = 2x + 1`。
+3. **实现动量**：在更新里引入速度项 `v = 0.9*v + grad; w -= lr*v`，对比收敛速度是否变快。
+4. **思考题**：为什么 SGD 的「噪声」有时反而是好事？它和模型泛化能力有什么关系？
 
 ## 延伸阅读
 
-- **站内教程**:[线性回归](/tutorials/linear-regression)—— 梯度下降最经典的落点:从手调 $w, b$ 到自动求最优;[神经网络](/tutorials/neural-network)—— 反向传播把梯度下降推广到多层网络
-- **经典论文**:Kingma & Ba (2014). *Adam: A Method for Stochastic Optimization*. [arXiv:1412.6980](https://arxiv.org/abs/1412.6980) —— 深度学习最常用的优化器:自适应学习率 + 动量的工程化组合,读它就明白 `torch.optim.Adam` 每一步在做什么
-- **综述**:Ruder (2016). *An Overview of Gradient Descent Optimization Algorithms*. [arXiv:1609.04747](https://arxiv.org/abs/1609.04747) —— 把 BGD/SGD/Momentum/NAG/Adagrad/Adam 一家子放到同一张图里对比,本篇两张图即出自此文
-- **历史文献**:Polyak (1964). *Some methods of speeding up the convergence of iteration methods*(苏联计算数学杂志,无公开链接)—— 「动量」思想的原始出处:把更新看成有惯性的重球在山谷里滚动
+- **站内教程**：[线性回归](/tutorials/linear-regression)—— 梯度下降最经典的落点:从手调 $w, b$ 到自动求最优;[神经网络](/tutorials/neural-network)—— 反向传播把梯度下降推广到多层网络
+- **经典论文**：Kingma & Ba (2014). *Adam: A Method for Stochastic Optimization*. [arXiv:1412.6980](https://arxiv.org/abs/1412.6980) —— 深度学习最常用的优化器：自适应学习率 + 动量的工程化组合，读它就明白 `torch.optim.Adam` 每一步在做什么
+- **综述**：Ruder (2016). *An Overview of Gradient Descent Optimization Algorithms*. [arXiv:1609.04747](https://arxiv.org/abs/1609.04747) —— 把 BGD/SGD/Momentum/NAG/Adagrad/Adam 一家子放到同一张图里对比，本篇两张图即出自此文
+- **历史文献**：Polyak (1964). *Some methods of speeding up the convergence of iteration methods*（苏联计算数学杂志,无公开链接）—— 「动量」思想的原始出处:把更新看成有惯性的重球在山谷里滚动
 
 ## 小结
 
 - 梯度下降通过「沿梯度反方向迭代」自动逼近损失最小值
-- **学习率 $\eta$ 太小则慢,太大则发散**,可配合衰减或自适应优化器
-- 按每步用的数据量分为 **BGD / SGD / Mini-batch**,深度学习默认用小批量
-- 几乎所有深度学习模型(包括神经网络、大语言模型)都靠它的变体来训练
+- **学习率 $\eta$ 太小则慢，太大则发散**，可配合衰减或自适应优化器
+- 按每步用的数据量分为 **BGD / SGD / Mini-batch**，深度学习默认用小批量
+- 几乎所有深度学习模型（包括神经网络、大语言模型）都靠它的变体来训练
 
-> 💡 实际中常用的是 **SGD**、**Adam** 等改进版,它们在基础梯度下降上加了动量、自适应学习率等技巧。
+> 💡 实际中常用的是 **SGD**、**Adam** 等改进版，它们在基础梯度下降上加了动量、自适应学习率等技巧。

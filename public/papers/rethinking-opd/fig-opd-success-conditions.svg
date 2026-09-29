@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="430" viewBox="0 0 940 430" role="img" aria-labelledby="title desc">
+  <title id="title">Rethinking OPD success conditions</title>
+  <desc id="desc">OPD succeeds when teacher and student thinking patterns are compatible and the teacher provides new capability in student-visited states.</desc>
+  <rect width="940" height="430" fill="#fafafa"/>
+  <text x="470" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">OPD 成功的两个必要条件</text>
+  <circle cx="370" cy="205" r="135" fill="#10b981" opacity="0.18" stroke="#059669" stroke-width="3"/>
+  <circle cx="570" cy="205" r="135" fill="#3b82f6" opacity="0.18" stroke="#2563eb" stroke-width="3"/>
+  <text x="285" y="185" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#065f46">兼容思考模式</text>
+  <text x="285" y="214" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#047857">student 的前缀状态</text>
+  <text x="285" y="236" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#047857">teacher 能给连续指导</text>
+  <text x="655" y="185" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#1d4ed8">提供新能力</text>
+  <text x="655" y="214" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#2563eb">改变高概率 token 排序</text>
+  <text x="655" y="236" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#2563eb">而不是重复学生已知分布</text>
+  <rect x="410" y="172" width="120" height="72" rx="14" fill="#ffffff" stroke="#111827" stroke-width="2"/>
+  <text x="470" y="200" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#111827">有效 OPD</text>
+  <text x="470" y="224" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#374151">可吸收的新信息</text>
+  <text x="470" y="355" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">根据 Li et al. (2026) 对 thinking-pattern compatibility 与 new capability 的机制分析重绘</text>
+</svg>

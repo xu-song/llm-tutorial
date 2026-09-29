@@ -4,64 +4,65 @@ export const metadata = paperMetadata("deepseek-v3-2");
 
 <PaperHeader slug="deepseek-v3-2" />
 
-# 🔬 DeepSeek-V3.2:稀疏注意力与可扩展的 RL 后训练
+# DeepSeek-V3.2：稀疏注意力与可扩展的 RL 后训练
 
-2025 年 12 月,DeepSeek 发布 V3.2 技术报告(arXiv:2512.02556),给 2025 年画上句号。这篇报告回答了 R1 之后社区最关心的两个问题:其一,**推理模型与通用模型的分家怎么合并**——V3.1(2025.8)起,一个模型通过聊天模板切换思考/非思考两种模式,R1 作为独立产品线事实上并入 V3 主线;其二,**开源模型靠什么追闭源**——答案是架构上换 DSA 稀疏注意力、后训练上把 RL 算力拉到预训练的 10% 以上。结果:V3.2 在推理基准上比肩 GPT-5,高算力变体 V3.2-Speciale 在 IMO 2025 与 IOI 2025 拿到金牌。争议点也明确:token 效率仍显著落后 Gemini-3.0-Pro(同样的题要多花一半以上的思考 token),知识宽度受预训练 FLOPs 限制。这篇笔记聚焦 V3.2 相对 R1/V3 的三处增量:DSA、GRPO 规模化的稳定配方、把思考装进工具调用。
+2025 年 12 月，DeepSeek 发布 V3.2 技术报告（arXiv:2512.02556），给 2025 年画上句号。这篇报告回答了 R1 之后社区最关心的两个问题：其一，**推理模型与通用模型的分家怎么合并**——V3.1（2025.8）起，一个模型通过聊天模板切换思考/非思考两种模式，R1 作为独立产品线事实上并入 V3 主线；其二，**开源模型靠什么追闭源**——答案是架构上换 DSA 稀疏注意力、后训练上把 RL 算力拉到预训练的 10% 以上。<Cite n={1} />结果：V3.2 在推理基准上比肩 GPT-5，高算力变体 V3.2-Speciale 在 IMO 2025 与 IOI 2025 拿到金牌。<Cite n={1} />争议点也明确：token 效率仍显著落后 Gemini-3.0-Pro（同样的题要多花一半以上的思考 token），知识宽度受预训练 FLOPs 限制。这篇笔记聚焦 V3.2 相对 R1/V3 的三处增量：DSA、GRPO 规模化的稳定配方、把思考装进工具调用。
 
-> 📌 前置:本篇是 [GRPO 与 DeepSeek-R1](/papers/grpo-deepseek-r1) 与 [DeepSeek-V3](/papers/deepseek-v3) 的续篇;RL 部分建议先熟悉 [策略梯度](/tutorials/policy-gradient),蒸馏部分参考[知识蒸馏](/tutorials/knowledge-distillation)。
+> 📌 前置：本篇是 [GRPO 与 DeepSeek-R1](/papers/grpo-deepseek-r1) 与 [DeepSeek-V3](/papers/deepseek-v3) 的续篇；RL 部分建议先熟悉 [策略梯度](/tutorials/policy-gradient)，蒸馏部分参考[知识蒸馏](/tutorials/knowledge-distillation)。
 
-## 一、动机:开源掉队的三处病灶
+## 一、动机：开源掉队的三处病灶
 
-报告开篇的诊断直白:R1 之后,开源与闭源的差距不是缩小而是在**拉大**。DeepSeek 归因于三个结构性短板:
+报告开篇的诊断直白：R1 之后，开源与闭源的差距不是缩小而是在**拉大**。DeepSeek 归因于三个结构性短板：
 
-1. **架构**:主流开源模型仍在用全注意力(vanilla attention),长序列的计算成本随长度平方增长,既拖慢部署,也限制了后训练能用的序列长度——RL 里 rollouts 又长又多,注意力开销直接吃掉 RL 预算。
-2. **后训练算力**:开源模型普遍在后训练上投入不足。V3.2 把 RL 预算提到**超过预训练成本的 10%**,报告声称这是解锁难题能力的关键。
-3. **智能体能力**:开源模型在工具调用的泛化与指令遵循上明显落后(他们引用了 MCP-Mark、Tool-Decathlon 等第三方评测)。
+1. **架构**：主流开源模型仍在用全注意力（vanilla attention），长序列的计算成本随长度平方增长，既拖慢部署，也限制了后训练能用的序列长度——RL 里 rollouts 又长又多，注意力开销直接吃掉 RL 预算。
+2. **后训练算力**：开源模型普遍在后训练上投入不足。V3.2 把 RL 预算提到**超过预训练成本的 10%**，报告声称这是解锁难题能力的关键。
+3. **智能体能力**：开源模型在工具调用的泛化与指令遵循上明显落后（他们引用了 MCP-Mark、Tool-Decathlon 等第三方评测）。
 
-对应的三个解法分别是 DSA(第 2 节)、GRPO 规模化稳定配方(第 3 节)、大规模智能体任务合成(第 4 节)。时间线上,2025 年 8 月的 V3.1 先合并了双模式与长上下文(在原 V3 底座上继续预训练 840B token,32K 阶段扩到 630B、128K 阶段扩到 209B);9 月的 V3.2-Exp 引入 DSA;12 月的 V3.2 正式版完成全流程并发布 Speciale 变体。
+对应的三个解法分别是 DSA（第 2 节）、GRPO 规模化稳定配方（第 3 节）、大规模智能体任务合成（第 4 节）。时间线上，2025 年 8 月的 V3.1 先合并了双模式与长上下文（在原 V3 底座上继续预训练 840B token，32K 阶段扩到 630B、128K 阶段扩到 209B）；9 月的 V3.2-Exp 引入 DSA；12 月的 V3.2 正式版完成全流程并发布 Speciale 变体。<Cite n={1} />
 
-## 二、DSA:用一个「闪电索引器」换掉平方复杂度
+## 二、DSA：用一个「闪电索引器」换掉平方复杂度
 
-### 2.1 结构:lightning indexer + top-k 选 token
+### 2.1 结构：lightning indexer + top-k 选 token
 
-DSA(DeepSeek Sparse Attention)的核心假设:注意力是稀疏的——每个 query 其实只真正关注少数 key。V3.2 加了一个极轻量的**索引器**,先给所有前文 token 打分,再只取 top-k 参与完整注意力:
+DSA（DeepSeek Sparse Attention）的核心假设：注意力是稀疏的——每个 query 其实只真正关注少数 key。V3.2 加了一个极轻量的**索引器**，先给所有前文 token 打分，再只取 top-k 参与完整注意力：<Cite n={1} />
 
 $$
 I_{t,s} = \sum_{j=1}^{H_I} w_{t,j}^{I} \cdot \operatorname{ReLU}\!\left(\mathbf{q}_{t,j}^{I} \cdot \mathbf{k}_s^{I}\right)
 $$
 
-其中 $I_{t,s}$ 是 query token $t$ 对前文 token $s$ 的索引分数;$\mathbf{q}_{t,j}^I$、$w_{t,j}^I$ 由 query 向量导出,$\mathbf{k}_s^I$ 由前文 token 导出。选 ReLU 而不是 softmax 出于吞吐考虑,索引器头数少、可跑 FP8,自身开销很小。然后:
+其中 $I_{t,s}$ 是 query token $t$ 对前文 token $s$ 的索引分数；$\mathbf{q}_{t,j}^I$、$w_{t,j}^I$ 由 query 向量导出，$\mathbf{k}_s^I$ 由前文 token 导出。选 ReLU 而不是 softmax 出于吞吐考虑，索引器头数少、可跑 FP8，自身开销很小。<Cite n={1} />然后：
 
 $$
 \mathbf{u}_t = \operatorname{Attn}\!\left(\mathbf{h}_t,\; \{\mathbf{c}_s \mid I_{t,s} \in \operatorname{Top\text{-}k}(I_{t,:})\}\right)
 $$
 
-即主注意力只在被选中的 top-k 个 KV 条目(MLA 的潜向量 $\mathbf{c}_s$)上计算。**主注意力复杂度从 $\mathcal{O}(L^2)$ 降到 $\mathcal{O}(Lk)$**,$k \ll L$;索引器仍是 $\mathcal{O}(L^2)$ 但计算量远小于 MLA 本体。为配合内核实现(KV 条目需被多个 query 共享),DSA 以 MLA 的 MQA 模式实例化——这正是 V3.1 潜向量缓存结构的直接复用。
+即主注意力只在被选中的 top-k 个 KV 条目(MLA 的潜向量 $\mathbf{c}_s$)上计算。**主注意力复杂度从 $\mathcal{O}(L^2)$ 降到 $\mathcal{O}(Lk)$**,$k \ll L$；索引器仍是 $\mathcal{O}(L^2)$ 但计算量远小于 MLA 本体。<Cite n={1} />为配合内核实现（KV 条目需被多个 query 共享），DSA 以 MLA 的 MQA 模式实例化——这正是 V3.1 潜向量缓存结构的直接复用。
 
-论文原版结构图——绿色部分就是索引器的打分与 top-k 选择,灰色部分是只在被选中的潜向量上计算的主注意力:
+论文原版结构图——绿色部分就是索引器的打分与 top-k 选择，灰色部分是只在被选中的潜向量上计算的主注意力：
 
 <figure className="my-6">
-  <img src="./fig-dsa-arch.png" alt="DSA 注意力架构:轻量索引器给前文 token 打分选出 top-k(绿色),主注意力只在选中的 MLA 潜向量 KV 条目上计算" className="mx-auto h-auto max-w-2xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-dsa-arch.png" alt="DSA 注意力架构：轻量索引器给前文 token 打分选出 top-k（绿色），主注意力只在选中的 MLA 潜向量 KV 条目上计算" className="mx-auto h-auto max-w-2xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:DeepSeek-AI et al., <em>DeepSeek-V3.2 Technical Report</em>(arXiv:2512.02556)Figure 2
+    <span className="figure-caption-main">DSA 注意力架构：轻量索引器给前文 token 打分选出 top-k（绿色），主注意力只在选中的 MLA 潜向量 KV 条目上计算</span>
+    <span className="figure-caption-source">图源：DeepSeek-AI et al., <em>DeepSeek-V3.2 Technical Report</em>（arXiv:2512.02556）Figure 2</span>
   </figcaption>
 </figure>
 
-### 2.2 续训配方:两阶段,不从头训
+### 2.2 续训配方：两阶段，不从头训
 
-DSA 不是从零训练,而是从 V3.1-Terminus(128K 上下文)继续训练,分两步:
+DSA 不是从零训练，而是从 V3.1-Terminus（128K 上下文）继续训练，分两步：
 
-**稠密热身**$(1000$ 步,$2.1$B token$)$:保持稠密注意力、冻结全部参数、只训索引器。训练目标是让索引分数的 softmax 对齐主注意力的注意力分布(所有头求和后 L1 归一化):
+**稠密热身**$(1000$ 步，$2.1$B token$)$：保持稠密注意力、冻结全部参数、只训索引器。训练目标是让索引分数的 softmax 对齐主注意力的注意力分布（所有头求和后 L1 归一化）:<Cite n={1} />
 
 $$
 \mathcal{L}_I = \sum_t \mathbb{D}_{KL}\!\left(p_{t,:} \,\|\, \operatorname{Softmax}(I_{t,:})\right)
 $$
 
-**稀疏训练**$(15000$ 步,$943.7$B token,每 query 选 $k=2048$ 个 token$)$:启用 top-k 选择,放开全部参数。索引器的对齐目标改为只覆盖被选中的集合 $\mathcal{S}_t$,且索引器输入从计算图 detach——**索引器只吃 $\mathcal{L}_I$,主模型只吃语言建模损失**,互不干扰。
+**稀疏训练**$(15000$ 步，$943.7$B token，每 query 选 $k=2048$ 个 token$)$：启用 top-k 选择，放开全部参数。索引器的对齐目标改为只覆盖被选中的集合 $\mathcal{S}_t$，且索引器输入从计算图 detach——**索引器只吃 $\mathcal{L}_I$，主模型只吃语言建模损失**，互不干扰。<Cite n={1} />
 
-效果(论文 §2.2):与 V3.1-Terminus 相比,V3.2-Exp 在标准基准与人类偏好(ChatbotArena Elo)上持平,第三方长上下文评测(AA-LCR 高 4 分)甚至更好;换来的是长上下文推理成本大幅下降,API 定价直接砍半。
+效果（论文 §2.2）：与 V3.1-Terminus 相比，V3.2-Exp 在标准基准与人类偏好（ChatbotArena Elo）上持平，第三方长上下文评测（AA-LCR 高 4 分）甚至更好；换来的是长上下文推理成本大幅下降，API 定价直接砍半。<Cite n={1} />
 
-用 numpy 感受「平方 → 线性」的差距,以及 top-k 稀疏度:
+用 numpy 感受「平方 → 线性」的差距，以及 top-k 稀疏度：
 
 <CodeRunner defaultCode={String.raw`
 import numpy as np
@@ -101,86 +102,97 @@ print(f"未被选中的分数均值: {np.delete(scores, top_idx).mean():.2f} (�
 print(f"注意力只需在这 {k} 个 MLA 潜向量上计算")
 `} />
 
-## 三、规模化 GRPO:让 RL 吃下 10% 预训练算力
+## 三、规模化 GRPO：让 RL 吃下 10% 预训练算力
 
-R1 的 GRPO 在数万步内是稳定的;但当后训练预算放大一个量级,朴素 GRPO 会碎掉。V3.2 的贡献是一套**稳定配方**,在标准 GRPO 目标上叠加四个修正。先回顾目标本身(注意与 R1 论文的一个细节差异:优势估计只减组均值、不再除标准差——正是 Dr.GRPO 对长度偏置的修正方向):
+R1 的 GRPO 在数万步内是稳定的；但当后训练预算放大一个量级，朴素 GRPO 会碎掉。<Cite n={[1,3]} />V3.2 的贡献是一套**稳定配方**，在标准 GRPO 目标上叠加四个修正。先回顾目标本身（注意与 R1 论文的一个细节差异：优势估计只减组均值、不再除标准差——正是 Dr.GRPO 对长度偏置的修正方向）:<Cite n={[1,4]} />
 
 $$
 \mathcal{J}_{GRPO}(\theta) = \mathbb{E}\!\left[\frac{1}{G}\sum_{i=1}^{G}\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}\Big(\min\big(r_{i,t}\hat A_i,\; \operatorname{clip}(r_{i,t},1\!-\!\epsilon,1\!+\!\epsilon)\hat A_i\big)\,M_{i,t} - \beta\,\mathbb{D}_{KL}\Big)\right]
 $$
 
-四个修正(每个都对应一种规模化后才会出现的失效模式):
+四个修正（每个都对应一种规模化后才会出现的失效模式）:
 
-1. **无偏 KL 估计**:修正 K3 估计量,乘上重要性比 $\pi_\theta/\pi_{old}$。原始 K3 在 $\pi_\theta \ll \pi_{ref}$ 时梯度无界,长时间训练积累成噪声,样本质量劣化、训练失稳。他们还发现不同域适合不同 KL 强度——数学域弱化甚至去掉 KL 反而更好。
-2. **离轨序列掩码**$M_{i,t}$:大批量 rollout 拆成多个 mini-batch 多步更新,天然 off-policy;推理框架与训练框架的实现差异雪上加霜。做法:对**负优势**且策略分歧超过阈值 $\delta$ 的序列直接掩掉。直觉:模型从自己的错误中学得最多,但高度离轨的负样本只会误导优化。
-3. **Keep Routing**(MoE 专属):推理框架和训练框架对同一输入可能给出不同的专家路由,等于优化时换了参数子空间。做法:采样时记录路由路径,训练时强制走同一条。论文注明这招从 V3-0324 起就是他们 RL 流水线的标配。
-4. **Keep Sampling Mask**:top-p/top-k 采样截断了动作空间,$\pi_{old}$ 与 $\pi_\theta$ 的支撑集不一致,违反重要性采样前提。做法:保留采样时的截断掩码,训练时同样应用,保证两个策略在相同子空间上比较。
+1. **无偏 KL 估计**：修正 K3 估计量，乘上重要性比 $\pi_\theta/\pi_{old}$。原始 K3 在 $\pi_\theta \ll \pi_{ref}$ 时梯度无界，长时间训练积累成噪声，样本质量劣化、训练失稳。他们还发现不同域适合不同 KL 强度——数学域弱化甚至去掉 KL 反而更好。<Cite n={1} />
+2. **离轨序列掩码**$M_{i,t}$：大批量 rollout 拆成多个 mini-batch 多步更新，天然 off-policy；推理框架与训练框架的实现差异雪上加霜。做法：对**负优势**且策略分歧超过阈值 $\delta$ 的序列直接掩掉。直觉：模型从自己的错误中学得最多，但高度离轨的负样本只会误导优化。
+3. **Keep Routing**（MoE 专属）：推理框架和训练框架对同一输入可能给出不同的专家路由，等于优化时换了参数子空间。做法：采样时记录路由路径，训练时强制走同一条。论文注明这招从 V3-0324 起就是他们 RL 流水线的标配。
+4. **Keep Sampling Mask**：top-p/top-k 采样截断了动作空间，$\pi_{old}$ 与 $\pi_\theta$ 的支撑集不一致，违反重要性采样前提。做法：保留采样时的截断掩码，训练时同样应用，保证两个策略在相同子空间上比较。
 
-这四条没有一条是「新算法」,全是**把 RL 系统在工程意义上的真实性(importance sampling 的前提、MoE 路由的一致性、动作空间的同一性)补齐**——但恰恰是这些让「RL 算力 = 10% 预训练」成为可能。
+这四条没有一条是「新算法」，全是**把 RL 系统在工程意义上的真实性（importance sampling 的前提、MoE 路由的一致性、动作空间的同一性）补齐**——但恰恰是这些让「RL 算力 = 10% 预训练」成为可能。<Cite n={1} />
 
-蒸馏侧沿用 V3 的专家蒸馏思路(Specialist Distillation):从同一底座分别训数学、编程、逻辑推理、通用智能体、代码智能体、搜索智能体六个领域的专家模型(全部支持双模式),再用专家造数据训最终模型,最后混合 RL 把差距抹平——蒸馏模型与专家的差距经 RL 后基本消失。奖励侧:可验证任务用规则结果奖励 + 长度惩罚 + 语言一致性奖励;开放任务用带 per-prompt 评分量表的生成式奖励模型。
+蒸馏侧沿用 V3 的专家蒸馏思路（Specialist Distillation）：从同一底座分别训数学、编程、逻辑推理、通用智能体、代码智能体、搜索智能体六个领域的专家模型（全部支持双模式），再用专家造数据训最终模型，最后混合 RL 把差距抹平——蒸馏模型与专家的差距经 RL 后基本消失。<Cite n={[1,2]} />奖励侧：可验证任务用规则结果奖励 + 长度惩罚 + 语言一致性奖励；开放任务用带 per-prompt 评分量表的生成式奖励模型。
 
-## 四、把思考装进工具调用:85K 任务的环境合成
+## 四、把思考装进工具调用：85K 任务的环境合成
 
-R1 的推理在「一次性解题」上很强,但智能体需要在**多轮工具调用之间维持推理**。V3.2 的处理分三层:
+R1 的推理在「一次性解题」上很强，但智能体需要在**多轮工具调用之间维持推理**。V3.2 的处理分三层：
 
-**思考上下文管理**:R1 的做法是每来一条新消息就丢弃之前的思考链——多轮工具调用场景下,模型每次都要从头重新推理整个问题,token 浪费严重。V3.2 的规则:只在**新用户消息**到来时丢弃历史思考;若只是追加工具输出,思考链全程保留;丢弃思考时,工具调用及其结果仍保留在上下文里。
+**思考上下文管理**：R1 的做法是每来一条新消息就丢弃之前的思考链——多轮工具调用场景下，模型每次都要从头重新推理整个问题，token 浪费严重。V3.2 的规则：只在**新用户消息**到来时丢弃历史思考；若只是追加工具输出，思考链全程保留；丢弃思考时，工具调用及其结果仍保留在上下文里。<Cite n={1} />
 
-论文原版的思考保留机制图,直观对比了 R1 式「每轮全丢」与 V3.2 的「用户消息边界丢弃、工具轮次保留」:
+论文原版的思考保留机制图，直观对比了 R1 式「每轮全丢」与 V3.2 的「用户消息边界丢弃、工具轮次保留」:
 
 <figure className="my-6">
-  <img src="./fig-thinking-retention.jpeg" alt="工具调用场景下的思考保留机制:新用户消息到来时丢弃历史思考,追加工具输出时思考链全程保留,工具调用与结果始终留在上下文中" className="mx-auto h-auto max-w-2xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-thinking-retention.jpeg" alt="工具调用场景下的思考保留机制：新用户消息到来时丢弃历史思考，追加工具输出时思考链全程保留，工具调用与结果始终留在上下文中" className="mx-auto h-auto max-w-2xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:DeepSeek-AI et al., <em>DeepSeek-V3.2 Technical Report</em>(arXiv:2512.02556)Figure 4
+    <span className="figure-caption-main">工具调用场景下的思考保留机制：新用户消息到来时丢弃历史思考，追加工具输出时思考链全程保留，工具调用与结果始终留在上下文中</span>
+    <span className="figure-caption-source">图源：DeepSeek-AI et al., <em>DeepSeek-V3.2 Technical Report</em>（arXiv:2512.02556）Figure 4</span>
   </figcaption>
 </figure>
 
-**冷启动**:用系统提示教模型在推理中穿插工具调用,产出少量(不完全鲁棒的)带思考的工具调用轨迹,作为 RL 的起点。
+**冷启动**：用系统提示教模型在推理中穿插工具调用，产出少量（不完全鲁棒的）带思考的工具调用轨迹，作为 RL 的起点。
 
-**大规模任务合成**:这是最有想象力的部分。对代码/搜索/代码解释器,用真实工具(GitHub issue-PR 对挖掘、真实搜索 API、Jupyter);通用智能体则靠**自动环境合成 agent** 造出 1,827 个环境、4,417 个任务(总口径 85K+ 复杂指令)。工作流:给定任务类别,agent 先用 bash + 搜索往沙箱数据库里灌数据 → 合成任务专属工具集 → 生成「难解但易验」的任务及其 Python 验证函数 → 迭代加难。合成任务的经典例子是行程规划:三天行程不重复酒店/景点/餐厅、第二天住豪华酒店则午餐晚餐合计低于 350 CNY 且餐厅至少 4.0 星……搜索组合空间很难,**但验证一个候选解是否满足约束很容易**——这正是 RLVR 需要的任务形状。
+**大规模任务合成**：这是最有想象力的部分。对代码/搜索/代码解释器，用真实工具（GitHub issue-PR 对挖掘、真实搜索 API、Jupyter）；通用智能体则靠**自动环境合成 agent** 造出 1,827 个环境、4,417 个任务（总口径 85K+ 复杂指令）。<Cite n={1} />工作流：给定任务类别，agent 先用 bash + 搜索往沙箱数据库里灌数据 → 合成任务专属工具集 → 生成「难解但易验」的任务及其 Python 验证函数 → 迭代加难。合成任务的经典例子是行程规划：三天行程不重复酒店/景点/餐厅、第二天住豪华酒店则午餐晚餐合计低于 350 CNY 且餐厅至少 4.0 星……搜索组合空间很难，**但验证一个候选解是否满足约束很容易**——这正是 RLVR 需要的任务形状。
 
-消融结果(论文 Table 5 / Figure 5):合成任务对造它的 V3.2-Exp 本身 pass@1 只有 12%(前沿闭源模型最高 62%),说明难度足够;只在这些合成任务上做 RL(非思考模式),Tau2Bench、MCP-Mark、MCP-Universe 全线大涨,而只在代码+搜索环境做 RL 的对照组不涨——**合成数据的泛化是真的**。
+消融结果(论文 Table 5 / Figure 5)：合成任务对造它的 V3.2-Exp 本身 pass@1 只有 12%（前沿闭源模型最高 62%），说明难度足够；只在这些合成任务上做 RL（非思考模式），Tau2Bench、MCP-Mark、MCP-Universe 全线大涨，而只在代码+搜索环境做 RL 的对照组不涨——**合成数据的泛化是真的**。<Cite n={1} />
 
-论文 Figure 5 的训练曲线——只用合成通用智能体数据做 RL,各基准随训练步数一路上扬:
+论文 Figure 5 的训练曲线——只用合成通用智能体数据做 RL，各基准随训练步数一路上扬：
 
 <figure className="my-6">
-  <img src="./fig-synthesis-rl.png" alt="仅用合成通用智能体数据做 RL 的训练曲线:Tau2Bench、MCP-Mark、MCP-Universe 等基准分数随训练步数持续上升" className="mx-auto h-auto max-w-xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-synthesis-rl.png" alt="仅用合成通用智能体数据做 RL 的训练曲线：Tau2Bench、MCP-Mark、MCP-Universe 等基准分数随训练步数持续上升" className="mx-auto h-auto max-w-xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:DeepSeek-AI et al., <em>DeepSeek-V3.2 Technical Report</em>(arXiv:2512.02556)Figure 5
+    <span className="figure-caption-main">仅用合成通用智能体数据做 RL 的训练曲线：Tau2Bench、MCP-Mark、MCP-Universe 等基准分数随训练步数持续上升</span>
+    <span className="figure-caption-source">图源：DeepSeek-AI et al., <em>DeepSeek-V3.2 Technical Report</em>（arXiv:2512.02556）Figure 5</span>
   </figcaption>
 </figure>
 
-## 五、结果:GPT-5 级推理,IMO/IOI 金牌
+## 五、结果：GPT-5 级推理，IMO/IOI 金牌
 
-V3.2(Thinking)与旗舰对照(温度 1.0,128K 上下文):
+V3.2（Thinking）与旗舰对照（温度 1.0,128K 上下文）:
 
 | 基准 | DeepSeek-V3.2 | GPT-5 High | Gemini-3.0 Pro | Kimi-K2 Thinking |
 |---|---|---|---|---|
 | AIME 2025 | 93.1 | 94.6 | 95.0 | 94.5 |
 | HMMT Feb 2025 | 92.5 | 88.3 | **97.5** | 89.4 |
 | LiveCodeBench (CoT) | 83.3 | 84.5 | **90.7** | 82.6 |
-| HLE(纯文本) | 25.1 | 26.3 | **37.7** | 23.9 |
+| HLE（纯文本） | 25.1 | 26.3 | **37.7** | 23.9 |
 | SWE Verified | 73.1 | 74.9 | 76.2 | 71.3 |
 | Terminal Bench 2.0 | **46.4** | 35.2 | 54.2 | 35.7 |
 | BrowseComp | 51.4 / 67.6* | 54.9 | - | 60.2* |
 
-*为上下文管理后的分数。V3.2 用约 GPT-5 的 token 预算达到接近的成绩;Terminal Bench 用 Claude Code 框架跑分反超所有对手。
+*为上下文管理后的分数。V3.2 用约 GPT-5 的 token 预算达到接近的成绩；Terminal Bench 用 Claude Code 框架跑分反超所有对手。<Cite n={1} />
 
-**V3.2-Speciale** 是放开长度约束(减弱长度惩罚、纯推理数据训练、并入 DeepSeekMath-V2 的证明技术)的变体:AIME 2025 96.0、HMMT Feb 99.2、CodeForces rating 2701,IMO 2025 金牌(35/42)、IOI 2025 金牌(492/600)、ICPC WF 2025 第 2 名。代价在 Table 3 里一目了然:IMOAnswerBench 84.5 分要花 45K 输出 token,Gemini-3.0-Pro 83.3 分只要 18K。官方 V3.2 因此主动收紧长度,把 Speciale 的能力按 token 预算裁剪成「日常款」。
+**V3.2-Speciale** 是放开长度约束（减弱长度惩罚、纯推理数据训练、并入 DeepSeekMath-V2 的证明技术）的变体：AIME 2025 96.0、HMMT Feb 99.2、CodeForces rating 2701，IMO 2025 金牌(35/42)、IOI 2025 金牌(492/600)、ICPC WF 2025 第 2 名。<Cite n={1} />代价在 Table 3 里一目了然：IMOAnswerBench 84.5 分要花 45K 输出 token,Gemini-3.0-Pro 83.3 分只要 18K。<Cite n={1} />官方 V3.2 因此主动收紧长度，把 Speciale 的能力按 token 预算裁剪成「日常款」。
 
 ## 六、局限与批判
 
-1. **token 效率**:论文自己承认,与 Gemini-3.0-Pro 相比 V3.2 需要更长的生成轨迹才能达到同等质量——「推理链的智能密度」仍是短板。Speciale 金牌背后是 2-3 倍的 token 开销。
-2. **知识宽度**:总训练 FLOPs 少于顶级闭源模型,世界知识的广度落后;这也是为什么 HLE、GPQA 这类知识密集基准上差距最明显。计划靠扩大预训练解决。
-3. **智能体场景的冗余自检**:测试中观察到模型频繁做冗余自检、轨迹过长,在 MCP-Mark 的 GitHub/Playwright 类任务上把上下文撑爆 128K 限制——上下文管理被列为未来工作而非已解决问题。
-4. **可复现性的新门槛**:DSA 的 CUDA/TileLang 内核、85K 合成任务、六个领域专家模型,这些都不是普通实验室能复现的资源。论文的方法学(控制回路式稳定化、环境合成范式)可迁移,但结果本身依赖 DeepSeek 级的基建。
+1. **token 效率**：论文自己承认，与 Gemini-3.0-Pro 相比 V3.2 需要更长的生成轨迹才能达到同等质量——「推理链的智能密度」仍是短板。Speciale 金牌背后是 2-3 倍的 token 开销。
+2. **知识宽度**：总训练 FLOPs 少于顶级闭源模型，世界知识的广度落后；这也是为什么 HLE、GPQA 这类知识密集基准上差距最明显。计划靠扩大预训练解决。
+3. **智能体场景的冗余自检**：测试中观察到模型频繁做冗余自检、轨迹过长，在 MCP-Mark 的 GitHub/Playwright 类任务上把上下文撑爆 128K 限制——上下文管理被列为未来工作而非已解决问题。
+4. **可复现性的新门槛**：DSA 的 CUDA/TileLang 内核、85K 合成任务、六个领域专家模型，这些都不是普通实验室能复现的资源。论文的方法学（控制回路式稳定化、环境合成范式）可迁移，但结果本身依赖 DeepSeek 级的基建。
 
 ## 小结
 
-- **DSA**:轻量 ReLU 索引器打分 + 每 query 选 top-2048 个 KV 条目,主注意力 $\mathcal{O}(L^2) \to \mathcal{O}(Lk)$;从 V3.1-Terminus 续训(2.1B 热身 + 943.7B 稀疏训练),性能持平、长上下文成本大降、API 减半。
-- **GRPO 规模化**:无偏 KL、离轨负样本掩码、Keep Routing、Keep Sampling Mask——四条工程级修正保住了重要性采样的前提,RL 算力首次拉到预训练的 10% 以上;优势估计去掉了 std 归一化(吸收 Dr.GRPO 批判)。
-- **思考 + 工具**:只在用户消息边界丢弃思考链;1,827 个合成环境 + 85K 指令,「难解易验」的任务形状让 RLVR 范式扩展到智能体领域,且合成数据学到的东西能泛化到未见过的 MCP 环境。
-- **结果与代价**:推理比肩 GPT-5,Speciale 拿 IMO/IOI 金牌,但 token 效率与知识宽度落后 Gemini-3.0-Pro。
+- **DSA**：轻量 ReLU 索引器打分 + 每 query 选 top-2048 个 KV 条目，主注意力 $\mathcal{O}(L^2) \to \mathcal{O}(Lk)$；从 V3.1-Terminus 续训（2.1B 热身 + 943.7B 稀疏训练），性能持平、长上下文成本大降、API 减半。
+- **GRPO 规模化**：无偏 KL、离轨负样本掩码、Keep Routing、Keep Sampling Mask——四条工程级修正保住了重要性采样的前提，RL 算力首次拉到预训练的 10% 以上；优势估计去掉了 std 归一化（吸收 Dr.GRPO 批判）。
+- **思考 + 工具**：只在用户消息边界丢弃思考链；1,827 个合成环境 + 85K 指令，「难解易验」的任务形状让 RLVR 范式扩展到智能体领域，且合成数据学到的东西能泛化到未见过的 MCP 环境。
+- **结果与代价**：推理比肩 GPT-5，Speciale 拿 IMO/IOI 金牌，但 token 效率与知识宽度落后 Gemini-3.0-Pro。
 
-从 R1 到 V3.2 的两年,DeepSeek 的路线可以读成一句话:**把「推理」从一种特殊模型(R1)变成一种可调的后训练预算**——需要多少思考,就投多少 RL 算力与推理 token,而底座、注意力、RL 系统全都为这条预算曲线服务。读懂 V3.2,基本就读懂了 2025 年开源推理模型的全部工程主轴。
+从 R1 到 V3.2 的两年，DeepSeek 的路线可以读成一句话：**把「推理」从一种特殊模型（R1）变成一种可调的后训练预算**——需要多少思考，就投多少 RL 算力与推理 token，而底座、注意力、RL 系统全都为这条预算曲线服务。读懂 V3.2，基本就读懂了 2025 年开源推理模型的全部工程主轴。
 
+## 参考资料
+
+<References>
+1. DeepSeek-AI (2025). *DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models*. arXiv: [2512.02556](https://arxiv.org/abs/2512.02556). —— 本文主报告，支撑 DSA、GRPO 稳定配方、Specialist Distillation、智能体环境合成、Figures 2/4/5、Table 3/5 与主要 benchmark 数字。
+2. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*. arXiv: [2412.19437](https://arxiv.org/abs/2412.19437). —— V3.2 的底座、MLA、DeepSeekMoE、FP8 与 V3.1 / V3.2 路线对照背景。
+3. DeepSeek-AI (2025). *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. arXiv: [2501.12948](https://arxiv.org/abs/2501.12948). —— GRPO 与 RLVR 背景，帮助理解 V3.2 的大规模后训练路线。
+4. Liu et al. (2025). *Understanding R1-Zero-Like Training: A Critical Perspective*. arXiv: [2503.20783](https://arxiv.org/abs/2503.20783). —— 对 GRPO 长度偏置、优势归一化和训练稳定性的批判背景。
+5. Yu et al. (2025). *DAPO: An Open-Source LLM Reinforcement Learning System at Scale*. arXiv: [2503.14476](https://arxiv.org/abs/2503.14476). —— 与 V3.2 规模化 RL 配方相邻的工程实践参考。
+</References>

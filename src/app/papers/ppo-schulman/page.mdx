@@ -4,49 +4,57 @@ export const metadata = paperMetadata("ppo-schulman");
 
 <PaperHeader slug="ppo-schulman" />
 
-# ✂️ PPO:信赖域的工程化妥协
+# PPO：信赖域的工程化妥协
 
-2017 年,OpenAI 的 Schulman 团队发表了可能是**史上被使用最广的强化学习算法**:PPO(Proximal Policy Optimization)。它要解决的问题很朴素——策略梯度法一步走太大就把策略练崩——而它前辈 [TRPO](/tutorials/policy-gradient) 的解法(二阶近似 + 共轭梯度 + 线搜索)理论漂亮但实现沉重。PPO 的回答是**把信赖域硬约束换成对概率比的一阶裁剪**:十几行代码、一组鲁棒的默认超参(裁剪幅度 $\varepsilon=0.2$ 几乎通吃所有任务),训练却同样稳。七年后的今天,RLHF 的 RL 阶段、以及 GRPO 一系的可验证奖励训练,底层仍然是这个裁剪目标。这篇笔记拆解:ratio 裁剪的公式与直觉、PPO-Clip 与 KL 惩罚两变体的取舍,以及它如何被后续算法逐步改写。
+2017 年，OpenAI 的 Schulman 团队发表了可能是**史上被使用最广的强化学习算法**：PPO（Proximal Policy Optimization）。<Cite n={1} />它要解决的问题很朴素——策略梯度法一步走太大就把策略练崩——而它前辈 [TRPO](/tutorials/policy-gradient) 的解法（二阶近似 + 共轭梯度 + 线搜索）理论漂亮但实现沉重。<Cite n={2} />PPO 的回答是**把信赖域硬约束换成对概率比的一阶裁剪**：十几行代码、一组鲁棒的默认超参（裁剪幅度 $\varepsilon=0.2$ 几乎通吃所有任务），训练却同样稳。<Cite n={1} />七年后的今天，RLHF 的 RL 阶段、以及 GRPO 一系的可验证奖励训练，底层仍然是这个裁剪目标。<Cite n={[4,5]} />这篇笔记拆解：ratio 裁剪的公式与直觉、PPO-Clip 与 KL 惩罚两变体的取舍，以及它如何被后续算法逐步改写。
 
-> 📌 前置:本站[策略梯度](/tutorials/policy-gradient)教程完整覆盖了 TRPO→PPO 的推导链(信赖域、GAE、裁剪偏差界);本篇从论文视角提炼要点,并与 [GRPO](/papers/grpo-deepseek-r1)、[DPO](/papers/dpo-rafailov) 连成演进链。
+> 📌 前置：本站[策略梯度](/tutorials/policy-gradient)教程完整覆盖了 TRPO→PPO 的推导链（信赖域、GAE、裁剪偏差界）；本篇从论文视角提炼要点，并与 [GRPO](/papers/grpo-deepseek-r1)、[DPO](/papers/dpo-rafailov) 连成演进链。
 
-## 一、动机:TRPO 太重,朴素策略梯度太脆
+## 一、动机：TRPO 太重，朴素策略梯度太脆
 
-策略梯度(PG)家族的共同软肋:**更新步长没有安全边界**。学习率稍大,新策略就可能急剧偏离采样策略——采样数据全部作废,性能断崖式下跌。TRPO(2015)的解法在分布空间画「信任圈」:约束新策略与旧策略的平均 KL 散度 $\bar D_{\mathrm{KL}}\le\delta$,并证明圈内更新有单调提升下界。但为解这个带约束的更新,它要算 **Fisher 信息矩阵-向量积(二阶)、共轭梯度迭代、回溯线搜索**——实现复杂、每步开销大、超参($\delta$、阻尼、CG 迭代数)全都敏感。
+策略梯度（PG）家族的共同软肋：**更新步长没有安全边界**。学习率稍大，新策略就可能急剧偏离采样策略——采样数据全部作废，性能断崖式下跌。TRPO（2015）的解法在分布空间画「信任圈」：约束新策略与旧策略的平均 KL 散度 $\bar D_{\mathrm{KL}}\le\delta$，并证明圈内更新有单调提升下界。<Cite n={2} />但为解这个带约束的更新，它要算 **Fisher 信息矩阵-向量积（二阶）、共轭梯度迭代、回溯线搜索**——实现复杂、每步开销大、超参($\delta$、阻尼、CG 迭代数)全都敏感。
 
-PPO 的判断是:**信赖域的思想是对的,实现可以砍到一阶**。既然要约束的只是「策略别走太远」,那就直接约束新旧策略的**概率比**——一个每个样本上都能便宜算出来的一阶量,然后用普通的 minibatch SGD/Adam 优化。
+PPO 的判断是：**信赖域的思想是对的，实现可以砍到一阶**。<Cite n={1} />既然要约束的只是「策略别走太远」，那就直接约束新旧策略的**概率比**——一个每个样本上都能便宜算出来的一阶量，然后用普通的 minibatch SGD/Adam 优化。
 
-## 二、Ratio 裁剪:目标函数里的保险丝
+## 二、Ratio 裁剪：目标函数里的保险丝
 
-定义概率比(importance ratio):
+定义概率比（importance ratio）:<Cite n={1} />
 
 $$
 r_t(\theta)=\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\text{old}}}(a_t\mid s_t)}
 $$
 
-$r_t=1$ 表示新旧策略对这个动作的看法没变;$r_t$ 偏离 1 越远,策略挪得越远。PPO-Clip 的替代目标:
+$r_t=1$ 表示新旧策略对这个动作的看法没变；$r_t$ 偏离 1 越远，策略挪得越远。PPO-Clip 的替代目标：
 
 $$
 L^{\text{CLIP}}(\theta)=\hat{\mathbb{E}}_t\Big[\min\!\big(r_t(\theta)\,\hat A_t,\;\operatorname{clip}(r_t(\theta),\,1-\varepsilon,\,1+\varepsilon)\,\hat A_t\big)\Big]
 $$
 
-它做了三件事,每件都值得咀嚼:
+它做了三件事，每件都值得咀嚼：
 
-**裁剪即信赖域**。$\operatorname{clip}$ 把 $r_t$ 强行按在 $[1-\varepsilon,\,1+\varepsilon]$ 内($\varepsilon=0.2$ 是论文默认),等价于说「单样本上,策略对任何动作的概率变化不超过 ±20%」——这就是 TRPO 的 KL 信赖域在样本级的粗翻译,却只需要一个 `np.clip`。
+**裁剪即信赖域**。$\operatorname{clip}$ 把 $r_t$ 强行按在 $[1-\varepsilon,\,1+\varepsilon]$ 内($\varepsilon=0.2$ 是论文默认)，等价于说「单样本上，策略对任何动作的概率变化不超过 ±20%」——这就是 TRPO 的 KL 信赖域在样本级的粗翻译，却只需要一个 `np.clip`。<Cite n={1} />
 
-**$\min$ 保证只挡「过头」,不挡「回头」**。以 $\hat A_t>0$(好动作)为例:$r_t$ 想被推高,但超过 $1+\varepsilon$ 后 min 取裁剪支、梯度归零——**好动作的过度加码被截停**;而 $r_t$ 从高处回落到区间内时,两项都未裁剪,梯度照常把它拉回来。若反过来 $\hat A_t<0$(坏动作),被截停的是 $r_t<1-\varepsilon$ 的方向——坏动作被压到够低后不再继续踩。**方向性截断**让 PPO 优于天真的对称裁剪:既防崩,又不丢失纠正信号。
+**$\min$ 保证只挡「过头」，不挡「回头」**。以 $\hat A_t>0$（好动作）为例：$r_t$ 想被推高，但超过 $1+\varepsilon$ 后 min 取裁剪支、梯度归零——**好动作的过度加码被截停**；而 $r_t$ 从高处回落到区间内时，两项都未裁剪，梯度照常把它拉回来。若反过来 $\hat A_t<0$（坏动作），被截停的是 $r_t<1-\varepsilon$ 的方向——坏动作被压到够低后不再继续踩。**方向性截断**让 PPO 优于天真的对称裁剪：既防崩，又不丢失纠正信号。<Cite n={1} />
 
-**换来的代价是有偏**。被裁剪的样本梯度为零,替代目标不再是真实策略梯度的无偏估计。论文的实验(以及后续大量分析)表明:在 $\varepsilon=0.2$ 下这点偏差远小于「不裁剪导致崩溃」的方差代价——[策略梯度教程](/tutorials/policy-gradient)给出了这个偏差界的正式形式,并指出它与 GAE 偏差是流水线上前后相接的两层。
+**换来的代价是有偏**。被裁剪的样本梯度为零，替代目标不再是真实策略梯度的无偏估计。论文的实验（以及后续大量分析）表明：在 $\varepsilon=0.2$ 下这点偏差远小于「不裁剪导致崩溃」的方差代价——[策略梯度教程](/tutorials/policy-gradient)给出了这个偏差界的正式形式，并指出它与 GAE 偏差是流水线上前后相接的两层。
 
-实际训练中还叠两个件:价值损失 $L^{VF}(\theta)=\hat{\mathbb{E}}_t\big[(V_\theta(s_t)-\hat R_t)^2\big]$ 与熵奖励 $S$(防过早收敛),合成总目标:
+实际训练中还叠两个件：价值损失 $L^{VF}(\theta)=\hat{\mathbb{E}}_t\big[(V_\theta(s_t)-\hat R_t)^2\big]$ 与熵奖励 $S$（防过早收敛），合成总目标：
 
 $$
 L^{\text{CLIP+VF+S}}(\theta)=\hat{\mathbb{E}}_t\Big[L^{\text{CLIP}}_t-c_1 L^{VF}_t+c_2 S[\pi_\theta](s_t)\Big]
 $$
 
-优势 $\hat A_t$ 用 [GAE](/tutorials/policy-gradient)($\lambda=0.95$、$\gamma=0.99$)估计——GAE 与 PPO 同一团队、早一年发表,两者从诞生起就是标配。
+优势 $\hat A_t$ 用 [GAE](/tutorials/policy-gradient)（$\lambda=0.95$、$\gamma=0.99$）估计——GAE 与 PPO 同一团队、早一年发表，两者从诞生起就是标配。<Cite n={3} />
 
-用 numpy 把这个损失曲面画出来——扫一遍 $r$ 与 $A$ 的组合,亲眼看 $\min$ 如何制造不对称的「悬崖」:
+<figure className="my-6">
+  <img src="./fig-ppo-clip.svg" alt="PPO-Clip 目标的直觉：当优势为正时，概率比超过 1+ε 后继续增大不再获得收益；当优势为负时，概率比低于 1−ε 后继续减小不再获得收益，中间区间保留正常策略梯度" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">PPO-Clip 目标的直觉：当优势为正时，概率比超过 1+ε 后继续增大不再获得收益；当优势为负时，概率比低于 1−ε 后继续减小不再获得收益，中间区间保留正常策略梯度</span>
+    <span className="figure-caption-source">图源：根据 Schulman et al., <em>Proximal Policy Optimization Algorithms</em>（arXiv:1707.06347）裁剪替代目标重绘</span>
+  </figcaption>
+</figure>
+
+用 numpy 把这个损失曲面画出来——扫一遍 $r$ 与 $A$ 的组合，亲眼看 $\min$ 如何制造不对称的“悬崖”：
 
 <CodeRunner defaultCode={String.raw`
 import numpy as np
@@ -87,40 +95,189 @@ print()
 print("被裁剪区间外的样本梯度为 0 —— 有偏,但换来的是不会一步迈崩")
 `} />
 
-## 三、另一个变体:KL 惩罚,及为什么输了
+## 三、另一个变体：KL 惩罚，及为什么输了
 
-论文同场发布了 **PPO-Penalty**:不裁剪,把「偏离旧策略」写成软惩罚:
+论文同场发布了 **PPO-Penalty**：不裁剪，把「偏离旧策略」写成软惩罚：<Cite n={1} />
 
 $$
 L^{\text{KLPEN}}(\theta)=\hat{\mathbb{E}}_t\Big[r_t(\theta)\hat A_t-\beta\,\operatorname{KL}[\pi_{\theta_{\text{old}}},\,\pi_\theta]\Big]
 $$
 
-$\beta$ 自适应调节:估计 KL $\hat d$ 超过 $1.5\,d_{\text{tgt}}$ 则 $\beta\leftarrow1.5\beta$(约束没管住,拽紧),低于 $d_{\text{tgt}}/1.5$ 则 $\beta\leftarrow\beta/1.5$(约束太松,放松)。
+$\beta$ 自适应调节：估计 KL $\hat d$ 超过 $1.5\,d_{\text{tgt}}$ 则 $\beta\leftarrow1.5\beta$（约束没管住，拽紧），低于 $d_{\text{tgt}}/1.5$ 则 $\beta\leftarrow\beta/1.5$（约束太松，放松）。
 
-7 个 MuJoCo 环境 × 3 个种子的平均归一化得分(随机策略=0、最优=1)给出了清晰的裁决:**不裁剪不惩罚 −0.39**(直接崩);**裁剪 $\varepsilon=0.1/0.2/0.3$ 得 0.76/0.82/0.70**;自适应 KL(d_targ=0.003/0.01/0.03)0.68/0.74/0.71;固定 KL 全部落后。**$\varepsilon=0.2$ 的裁剪全面胜出**。裁剪的优势:少一个要调的 $\beta$/d_targ,样本级生效比分布级 KL 更局部稳定。
+7 个 MuJoCo 环境 × 3 个种子的平均归一化得分(随机策略=0、最优=1)给出了清晰的裁决：**不裁剪不惩罚 −0.39**（直接崩）；**裁剪 $\varepsilon=0.1/0.2/0.3$ 得 0.76/0.82/0.70**；自适应 KL(d_targ=0.003/0.01/0.03)0.68/0.74/0.71；固定 KL 全部落后。**$\varepsilon=0.2$ 的裁剪全面胜出**。<Cite n={1} />裁剪的优势：少一个要调的 $\beta$/d_targ，样本级生效比分布级 KL 更局部稳定。
 
-PPO 因此有一套几乎不变的默认配方:$\varepsilon=0.2$、GAE $\lambda=0.95$、$\gamma=0.99$、Adam、每批数据 3-10 个 epoch 的 minibatch 复用(MuJoCo 表:horizon 2048、10 epochs、minibatch 64;Atari 表:3 epochs)。**「多 epoch 复用同一批数据」正是裁剪买来的样本效率**:朴素 PG 每条数据只能用一次(on-policy),PPO 靠 ratio 把旧数据的重要性加权修正到当前策略,裁剪保证复用不发散。
+PPO 因此有一套几乎不变的默认配方：$\varepsilon=0.2$、GAE $\lambda=0.95$、$\gamma=0.99$、Adam、每批数据 3-10 个 epoch 的 minibatch 复用（MuJoCo 表：horizon 2048、10 epochs、minibatch 64；Atari 表：3 epochs）。<Cite n={1} />**「多 epoch 复用同一批数据」正是裁剪买来的样本效率**：朴素 PG 每条数据只能用一次（on-policy），PPO 靠 ratio 把旧数据的重要性加权修正到当前策略，裁剪保证复用不发散。
 
-## 四、实验结果与影响
+## 四、实验结果：PPO 不是最“理论”，但最稳
 
-- **连续控制**:7 个 MuJoCo 环境(HalfCheetah、Hopper、Walker2d 等)上,PPO-clip 胜过 TRPO、朴素 PG、交叉熵方法(CEM)「几乎所有环境」;
-- **Atari**:49 个游戏、4 千万帧,训练平均奖励 PPO 赢 30 场 vs ACER 18 场、A2C 1 场;单游戏如 BattleZone 17366.7 vs A2C 的 3080.0、BankHeist 1280.6 全面领先——对比表里 ACER 依靠 Air Raid 一个离群游戏拉高均值,PPO 在中位数上更稳;
-- **生态**:PPO 发布当月就成为 OpenAI 默认 RL 算法,Spinning Up、Stable-Baselines3 等教程库以它为教学标准;2019 年 **InstructGPT/ChatGPT 的 RLHF 采取 PPO 做策略优化**,把它从「游戏算法」变成「大模型对齐的地基」——论文本身只字未提语言模型,这是它作者也没预料到的第二人生。
+PPO 论文的实验证据分两层：先用消融证明 clip 目标比 KL 惩罚更省心，再用 MuJoCo 与 Atari 说明它能替代 TRPO 成为默认策略优化器。<Cite n={1} />
+
+| 证据 | 设置 | 论文结论 |
+|---|---|---|
+| Clip vs KL penalty | 7 个 MuJoCo 连续控制环境，比较无约束 surrogate、clip、固定 KL、自适应 KL | 无约束 surrogate 平均分为负；clip 在 $\varepsilon=0.2$ 附近最稳，优于多个 KL penalty 设定 |
+| 与 TRPO / CEM 等比较 | MuJoCo locomotion 任务，统一用神经网络策略 | PPO-Clip 在多数任务上达到或超过 TRPO，同时实现更简单、单步开销更小 |
+| Atari | 49 个 Atari 游戏，约 4 千万帧训练 | 论文报告 PPO 在训练平均奖励上赢 30 个游戏，ACER 赢 18 个，A2C 赢 1 个；中位数表现更稳 |
+
+这些结果的重点不是某个 benchmark 的单点分数，而是**默认超参迁移性**：$\varepsilon=0.2$、GAE $\lambda=0.95$、多 epoch minibatch 复用，跨连续控制与离散动作游戏都能工作。对后来的 RLHF 来说，这比理论最优更重要——人们需要一个在巨大模型、昂贵采样和嘈杂奖励下不容易炸的优化器。
+
+生态影响也来自这里。PPO 发布后很快成为 OpenAI Baselines、Spinning Up、Stable-Baselines3 等教程与工程库的默认算法；2019 年开始，语言模型 RLHF 流水线普遍用 PPO 优化策略，把它从“游戏/机器人算法”推成“大模型对齐地基”。<Cite n={[1,4]} />论文本身没有讨论语言模型，但它留下的 ratio clipping 和 KL 约束直觉后来被 [GRPO](/papers/grpo-deepseek-r1)、DAPO、Dr.GRPO 等方法反复继承和改造。
 
 ## 五、局限与演进链
 
-1. **无收敛性证明**:TRPO 至少有单调提升下界;PPO 裁剪有偏、无形式化保证,稳定性是「工程上极其鲁棒」而非「理论上可证」。这交换正是标题所说「工程化妥协」;
-2. **仍然要 critic**:总目标里 $L^{VF}$ 要求训练一个与策略相当规模的价值网络——在 LLM 场景这意味着显存近乎翻倍、给「半句话」估值本身困难。这正是 [GRPO](/papers/grpo-deepseek-r1) 的出发点:**砍掉 critic,用同题一组采样的组内标准化当基线**——它保留了 PPO 的 ratio 裁剪形状,只替换优势来源;
-3. **on-policy 约束**:多 epoch 复用是「轻度 off-policy」,大规模 RL 下 ratio 仍会发散,DeepSeek-V3.2 为此补了离轨序列掩码等四条修正;[Kimi K1.5](/papers/kimi-k15) 则整个换掉裁剪,改用 log-ratio 的 L2 正则(镜像下降视角);
-4. **RLHF 时代的挑战者**:PPO 流水线(奖励模型 + 在线采样 + critic)复杂昂贵,[DPO](/papers/dpo-rafailov) 用闭式解跳过整个 RL 阶段——但 DPO 是离线的、对数据分布敏感,在线 PPO/GRPO 在可验证奖励任务上仍是主力。
+1. **无收敛性证明**：TRPO 至少有单调提升下界；PPO 裁剪有偏、无形式化保证，稳定性是「工程上极其鲁棒」而非「理论上可证」。这交换正是标题所说「工程化妥协」；
+2. **仍然要 critic**：总目标里 $L^{VF}$ 要求训练一个与策略相当规模的价值网络——在 LLM 场景这意味着显存近乎翻倍、给「半句话」估值本身困难。这正是 [GRPO](/papers/grpo-deepseek-r1) 的出发点：**砍掉 critic，用同题一组采样的组内标准化当基线**——它保留了 PPO 的 ratio 裁剪形状，只替换优势来源；<Cite n={5} />
+3. **on-policy 约束**：多 epoch 复用是「轻度 off-policy」，大规模 RL 下 ratio 仍会发散，DeepSeek-V3.2 为此补了离轨序列掩码等四条修正；[Kimi K1.5](/papers/kimi-k15) 则整个换掉裁剪，改用 log-ratio 的 L2 正则（镜像下降视角）；
+4. **RLHF 时代的挑战者**：PPO 流水线（奖励模型 + 在线采样 + critic）复杂昂贵，[DPO](/papers/dpo-rafailov) 用闭式解跳过整个 RL 阶段——但 DPO 是离线的、对数据分布敏感，在线 PPO/GRPO 在可验证奖励任务上仍是主力。
 
-这条演进链读下来,你会看到 PPO 的裁剪思想被反复继承:GRPO 保留 $L^{\text{CLIP}}$ 的形状、只换 $\hat A$;Dr.GRPO/DAPO 修它的归一化偏置;K1.5 换正则形式;V3.2 给它补工程前提。**每一代都在改 PPO,每一代都没能完全离开它。**
+这条演进链读下来，你会看到 PPO 的裁剪思想被反复继承：GRPO 保留 $L^{\text{CLIP}}$ 的形状、只换 $\hat A$；Dr.GRPO/DAPO 修它的归一化偏置；K1.5 换正则形式；V3.2 给它补工程前提。**每一代都在改 PPO，每一代都没能完全离开它。**
+
+## 六、源码走读：两个标准实现
+
+PPO 论文本身没有官方代码库，但它的目标函数大概是强化学习史上被复现次数最多的十几行代码。下面从两个标准实现里节选核心片段：**Stable-Baselines3（SB3）** 是通用 RL 库里最广泛使用的 PPO 实现（代码以 MuJoCo/Gym 类环境为对象）；**TRL PPOTrainer** 是 HuggingFace 面向 LLM RLHF 场景的版本（RLHF 时代的 PPO 主力之一）。对照阅读，正好看到「同一公式，两种工程形态」——前者是论文目标的直译，后者为语言模型补了 value head、KL 惩罚与 token 级奖励：
+
+| 实现 | 定位 | 适合谁读 |
+|---|---|---|
+| [SB3 `ppo.py`](https://github.com/DLR-RM/stable-baselines3/blob/master/sb3/ppo/ppo.py)（DLR-RM） | 通用 RL 库的标准实现，论文目标的最小完整形态 | 想看 PPO-Clip 直译、GAE 与 minibatch 复用如何在百行内组装的人 |
+| [TRL `ppo_trainer.py`](https://github.com/huggingface/trl/blob/v1.12.0/trl/experimental/ppo/ppo_trainer.py)（HuggingFace） | RLHF/LLM 场景的 PPO：序列生成 + 奖励模型 + KL 惩罚 | 想理解 RLHF 流水线里 PPO 被改成了什么样的人 |
+
+### 1. SB3 的 `policy_loss`：ratio 裁剪的代码形态
+
+`PPO.train()` 里的策略损失是论文式 $L^{\text{CLIP}}=\min(r\hat A,\operatorname{clip}(r,1-\varepsilon,1+\varepsilon)\hat A)$ 的逐字翻译<Cite n={6} />——注意代码算的是**负**目标（最大化目标 = 最小化损失），所以 `min` 变成了 `-th.min(...)`：
+
+```python
+# 节选自 stable_baselines3/ppo/ppo.py 的 PPO.train()（节选，注释为本站所加）
+for epoch in range(self.n_epochs):            # 论文配方：每批数据复用 3-10 个 epoch
+    for rollout_data in self.rollout_buffer.get(self.batch_size):  # 切 minibatch（默认 64）
+        ...
+        values, log_prob, entropy = self.policy.evaluate_actions(
+            rollout_data.observations, actions
+        )                                      # 当前策略 θ 重新评估旧动作的对数概率
+        # 优势归一化（论文未写，工程标配）：稳定不同 batch 的梯度尺度
+        advantages = rollout_data.advantages
+        if self.normalize_advantage and len(advantages) > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # ratio = π_θ(a|s) / π_θold(a|s) = exp(logπ_new − logπ_old)
+        # 第一次前向时 log_prob == old_log_prob，ratio 恰为 1
+        ratio = th.exp(log_prob - rollout_data.old_log_prob)
+
+        # 论文式 L^CLIP 的两支：未裁剪支 与 clip(r, 1−ε, 1+ε) 支
+        policy_loss_1 = advantages * ratio
+        policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
+        # 取 min（最大化目标，故取负号）：非对称截断——只挡「过头」，保留「回头」的梯度
+        policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
+```
+
+三个细节值得对照第二节的公式细看：
+
+- **`min` 的非对称性是精髓**。$\hat A>0$（好动作）且 $r>1+\varepsilon$ 时，$\min$ 取裁剪支、梯度为零——加码被截停；$r$ 从区间外回落时两支都活着，梯度照常把它拉回。若写成对称裁剪 $\operatorname{clip}(r\hat A,\cdot)$，会把「纠正过头」也一并截掉。这正是第二节图里那个不对称「悬崖」的代码来源；
+- **ratio 由对数概率差指数化**得到。LLM 场景动作空间是整个词表（数万维 softmax），直接存概率乘除会下溢，存 `log_prob` 再 `exp(diff)` 是通行做法——TRL 的写法相同；
+- **`clip_fraction` 的监控**（紧跟其后的一行日志代码）统计 $|r-1|>\varepsilon$ 的样本比例。实践里这个值长期接近 0 通常意味着学习率太小；长期偏高则说明策略每步都撞信赖域边界，$\varepsilon$ 或学习率需要调整。
+
+### 2. GAE 与 minibatch 复用：`compute_returns_and_advantage`
+
+`train()` 之前的 rollout 阶段，SB3 把整批数据先算好优势（GAE，$\lambda=0.95$）再供多轮 epoch 取用<Cite n={3} /><Cite n={6} />。优势估计在 `RolloutBuffer.compute_returns_and_advantage()` 里，从后往前一个循环：
+
+```python
+# 节选自 stable_baselines3/common/buffers.py 的 RolloutBuffer（节选，注释为本站所加）
+last_gae_lam = 0
+for step in reversed(range(self.buffer_size)):     # 从轨迹末端倒序累积
+    if step == self.buffer_size - 1:
+        next_non_terminal = 1.0 - dones.astype(np.float32)  # 末端用 V(s_last) 自举
+        next_values = last_values
+    else:
+        next_non_terminal = 1.0 - self.episode_starts[step + 1]
+        next_values = self.values[step + 1]
+    # TD 误差 δ_t = r_t + γV(s_{t+1}) − V(s_t)（GAE 论文 Eq(16) 的核心项）
+    delta = self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step]
+    # GAE(λ)：A_t = δ_t + γλ·A_{t+1} 的递推形式（GAE 论文 Eq(16)）
+    last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
+    self.advantages[step] = last_gae_lam
+# TD(λ) 目标：returns = A + V，作为价值损失的回归目标（论文 L^VF）
+self.returns = self.advantages + self.values
+```
+
+`episode_starts` 的作用是跨 episode 边界时切断自举——第 $t+1$ 步是新 episode 的起点，则 $V(s_{t+1})$ 不该为第 $t$ 步的未来买单。算好的 `advantages` 与 `returns` 静静躺在 buffer 里，供外层 `for epoch in range(self.n_epochs)` 反复以随机 minibatch 消费——**「多 epoch 复用」与「ratio 裁剪」是一对**：前者要样本效率，后者保证复用不发散（第三节）。
+
+### 3. TRL PPOTrainer：LLM 场景的 PPO 长什么样
+
+把 PPO 搬进 RLHF，输入从「状态向量」变成「prompt + 生成的 token 序列」，SB3 那套 buffer 不再适用。TRL 的 `PPOTrainer` 重写了整条流水线：每个 batch 采样 `query + response`，用参考模型算 token 级对数概率，用奖励模型给序列打分，再拆成 KL 惩罚奖励与 GAE 优势做 PPO 更新<Cite n={7} />。值得一提的是，TRL 已于 2026 年 9 月从 main 分支移除 PPOTrainer——RLHF 的 RL 阶段逐步让位给 [GRPO](/papers/grpo-deepseek-r1) 一系——本文代码节选自最后一个包含它的 v1.12.0。下面是它的「构造奖励」环节——LLM 版 PPO 最有特色的一步：
+
+```python
+# 节选自 trl/experimental/ppo/ppo_trainer.py 的 PPOTrainer.train()（节选，注释为本站所加）
+# 4. compute rewards
+# k1 / k3 两种 KL 估计子（Schulman 博客的近似式），逐 token 计算 π_θold 与 π_ref 的 KL
+logr = ref_logprobs - logprobs
+kl = -logr if args.kl_estimator == "k1" else (logr.exp() - 1) - logr
+# 非分数奖励 = −kl_coef · KL：把「别偏离 SFT 参考策略」摊到每个 token 的奖励里
+# —— 这正是论文变体 L^KLPEN 的软惩罚思想，在 RLHF 里成了默认项
+non_score_reward = -args.kl_coef * kl
+rewards = non_score_reward.clone()
+actual_start = torch.arange(rewards.size(0), device=rewards.device)
+actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths)
+# 奖励模型的序列级分数只加在最后一个有效 token 上（稀疏奖励）
+rewards[actual_start, actual_end] += scores
+
+# 6. compute advantages and returns
+lastgaelam = 0
+advantages_reversed = []
+gen_length = responses.shape[1]
+for t in reversed(range(gen_length)):          # GAE 递推与 SB3 完全同构
+    nextvalues = values[:, t + 1] if t < gen_length - 1 else 0.0
+    delta = rewards[:, t] + args.gamma * nextvalues - values[:, t]
+    lastgaelam = delta + args.gamma * args.lam * lastgaelam
+    advantages_reversed.append(lastgaelam)
+advantages = torch.stack(advantages_reversed[::-1], axis=1)
+returns = advantages + values
+advantages = masked_whiten(advantages, ~padding_mask)   # 只对有效 token 归一化
+advantages = torch.masked_fill(advantages, padding_mask, 0)
+```
+
+这段代码里能看到 RLHF 对 PPO 的三处关键改造：
+
+- **KL 惩罚进入奖励而非损失**。论文的 $L^{\text{KLPEN}}$ 变体把 KL 放在目标函数里；TRL 则把 $-\beta\,\mathrm{KL}$ 直接摊进每个 token 的奖励（`non_score_reward`），约束对象也从「上一步的策略」换成**冻结的 SFT 参考策略**——目的从「防训练崩」变成「防奖励模型钻空子导致语言能力退化」；
+- **序列级分数 → token 级奖励**。奖励模型给整条回复一个分数，代码把它加在最后一个有效 token 的位置上，KL 项负责填满前面每一步——之后 GAE 的 $\gamma$、$\lambda$ 沿 token 维做时间折扣，把 PPO 的「时间步」翻译成了「生成第几个 token」；
+- **value head 的形态**。SB3 里 critic 是独立网络；TRL 的价值模型复用策略（或独立的）transformer 主干，末端接一个 `nn.Linear(hidden_size, 1)` 把每个位置隐状态投影成该前缀的估值（`PolicyAndValueWrapper` + `ValueHead`）——「给半句话估值」在工程上就这么朴素。
+
+而到了 PPO 更新本身，TRL 与 SB3 殊途同归——同一套 ratio 裁剪：
+
+```python
+# 节选自 trl/experimental/ppo/ppo_trainer.py 的 PPOTrainer.train()（节选，注释为本站所加）
+logprobs_diff = new_logprobs - mb_logprobs        # log π_θ − log π_θold
+ratio = torch.exp(logprobs_diff)                  # 概率比 r_t
+# 论文式 L^CLIP：损失 = max(−r·A, −clip(r,1−ε,1+ε)·A)，与 SB3 的 −min(...) 等价
+pg_losses = -mb_advantage * ratio
+pg_losses2 = -mb_advantage * torch.clamp(ratio, 1.0 - args.cliprange, 1.0 + args.cliprange)
+pg_loss_max = torch.max(pg_losses, pg_losses2)
+pg_loss = masked_mean(pg_loss_max, ~padding_mask[micro_batch_inds])  # 只对有效 token 求均值
+loss = pg_loss + args.vf_coef * vf_loss           # 价值损失同样用 clip 版（对旧值裁剪）
+```
+
+`torch.max(两支负目标)` 与 SB3 的 `-th.min(两支正目标)` 是同一个式子的两种写法。多出来的是 `masked_mean`：LLM 的 batch 由不等长序列 padding 而成，所有统计都必须在 `~padding_mask` 上做，否则补齐位置的零会稀释损失。加上价值损失的裁剪版（`clamp(vpred, old_v ± cliprange_value)`，取 max 对应论文未提的工程加固）——**七年前论文里的那行 $\min(r\hat A,\operatorname{clip}(r)\hat A)$，穿过 RLHF 的全部改造后原样存活**。
+
+### 源码链接
+
+- SB3：[sb3/ppo/ppo.py](https://github.com/DLR-RM/stable-baselines3/blob/master/sb3/ppo/ppo.py)（`PPO.train()`）与 [sb3/common/buffers.py](https://github.com/DLR-RM/stable-baselines3/blob/master/sb3/common/buffers.py)（`RolloutBuffer.compute_returns_and_advantage()`）
+- TRL：[trl/experimental/ppo/ppo_trainer.py](https://github.com/huggingface/trl/blob/v1.12.0/trl/experimental/ppo/ppo_trainer.py)（v1.12.0，`PPOTrainer.train()`；旧路径 `trl/trainer/ppo_trainer.py` 于 2026 年初迁至 experimental，2026 年 9 月起 PPOTrainer 已从 main 分支移除，此处链接定版在最后一个包含它的 tag）；value head 见 [trl/experimental/ppo/modeling_value_head.py](https://github.com/huggingface/trl/blob/v1.12.0/trl/experimental/ppo/modeling_value_head.py)
 
 ## 小结
 
-- **PPO-Clip** $=\min\big(r\hat A,\operatorname{clip}(r,1-\varepsilon,1+\varepsilon)\hat A\big)$:把 TRPO 的 KL 信赖域翻译成概率比的一阶裁剪;$\min$ 的非对称性保证只挡「过头」、保留「回头」的梯度。
-- **代价与收益**:有偏(越界样本梯度为零)换来「不崩 + 可多 epoch 复用数据 + 全一阶实现」;MuJoCo 消融里 $\varepsilon=0.2$ 拿到 0.82 平均分,优于所有 KL 惩罚变体。
-- **配方**:$\varepsilon=0.2$、GAE $\lambda=0.95$、价值损失 + 熵奖励、Adam、3-10 epoch minibatch——一组几乎跨任务通用的默认值,这是它成为「默认 RL 算法」的真正原因。
-- **演进链**:TRPO(理论)→ PPO(工程)→ RLHF 的主力 → GRPO(去 critic)→ Dr.GRPO/DAPO(修偏置)→ 镜像下降系(换正则)——读 PPO 是读这条链的起点。
+- **PPO-Clip** $=\min\big(r\hat A,\operatorname{clip}(r,1-\varepsilon,1+\varepsilon)\hat A\big)$：把 TRPO 的 KL 信赖域翻译成概率比的一阶裁剪；$\min$ 的非对称性保证只挡「过头」、保留「回头」的梯度。
+- **代价与收益**：有偏（越界样本梯度为零）换来「不崩 + 可多 epoch 复用数据 + 全一阶实现」；MuJoCo 消融里 $\varepsilon=0.2$ 拿到 0.82 平均分，优于所有 KL 惩罚变体。
+- **配方**:$\varepsilon=0.2$、GAE $\lambda=0.95$、价值损失 + 熵奖励、Adam、3-10 epoch minibatch——一组几乎跨任务通用的默认值，这是它成为「默认 RL 算法」的真正原因。
+- **演进链**：TRPO（理论）→ PPO（工程）→ RLHF 的主力 → GRPO（去 critic）→ Dr.GRPO/DAPO（修偏置）→ 镜像下降系（换正则）——读 PPO 是读这条链的起点。
 
-PPO 论文只有 12 页、没有一个定理证明正确性,却比同年所有带证明的算法加起来都更常用。它的教训值得每个做系统的人记着:**理论告诉你该约束什么,工程决定你用什么约束它——后者的选择往往比前者更影响世界。**
+PPO 论文只有 12 页、没有一个定理证明正确性，却比同年许多带证明的算法更常用。它的教训值得每个做系统的人记着：**理论告诉你该约束什么，工程决定你用什么约束它——后者的选择往往比前者更影响世界。**
+
+## 参考资料
+
+<References>
+1. Schulman et al. (2017). *Proximal Policy Optimization Algorithms*. arXiv: [1707.06347](https://arxiv.org/abs/1707.06347). —— PPO-Clip / PPO-Penalty 目标、MuJoCo 消融、Atari 对比与默认训练配方。
+2. Schulman et al. (2015). *Trust Region Policy Optimization*. arXiv: [1502.05477](https://arxiv.org/abs/1502.05477). —— PPO 要简化的 KL 信赖域思想与二阶约束优化背景。
+3. Schulman et al. (2015). *High-Dimensional Continuous Control Using Generalized Advantage Estimation*. arXiv: [1506.02438](https://arxiv.org/abs/1506.02438). —— GAE 的优势估计来源，解释 PPO 中 $\lambda=0.95$ 配方。
+4. Ouyang et al. (2022). *Training language models to follow instructions with human feedback*. arXiv: [2203.02155](https://arxiv.org/abs/2203.02155). —— PPO 在 InstructGPT/RLHF 流水线中的使用背景。
+5. DeepSeek-AI (2025). *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. arXiv: [2501.12948](https://arxiv.org/abs/2501.12948). —— GRPO 如何继承 PPO ratio clipping 并移除 critic。
+6. Raffin et al. *Stable-Baselines3*. GitHub: [DLR-RM/stable-baselines3](https://github.com/DLR-RM/stable-baselines3)，实现位于 [sb3/ppo/ppo.py](https://github.com/DLR-RM/stable-baselines3/blob/master/sb3/ppo/ppo.py) 与 [sb3/common/buffers.py](https://github.com/DLR-RM/stable-baselines3/blob/master/sb3/common/buffers.py)。 —— 支撑源码走读第 1、2 节：PPO-Clip 策略损失、优势归一化、GAE 递推与 minibatch 多 epoch 复用的代码形态。
+7. HuggingFace. *TRL PPOTrainer*. GitHub: [huggingface/trl](https://github.com/huggingface/trl)，实现位于 [trl/experimental/ppo/ppo_trainer.py](https://github.com/huggingface/trl/blob/v1.12.0/trl/experimental/ppo/ppo_trainer.py)（v1.12.0 定版；PPOTrainer 已于 2026 年 9 月从 main 移除）。 —— 支撑源码走读第 3 节：RLHF 场景下的 KL 惩罚奖励、token 级 GAE、value head 与 masked 裁剪损失。
+</References>

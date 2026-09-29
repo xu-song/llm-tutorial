@@ -1,7 +1,10 @@
+import { Children, cloneElement, ComponentPropsWithoutRef, isValidElement, ReactNode } from "react";
 import type { MDXComponents } from "mdx/types";
 import CodeRunner from "@/components/CodeRunner";
 import CodeTabs from "@/components/CodeTabs";
 import PaperHeader from "@/components/PaperHeader";
+import References from "@/components/References";
+import Cite from "@/components/Cite";
 import LinePlayground from "@/components/viz/LinePlayground";
 import GradientDescentViz from "@/components/viz/GradientDescentViz";
 import ScatterClassifier from "@/components/viz/ScatterClassifier";
@@ -79,13 +82,67 @@ import BornAgainCurve from "@/components/viz/BornAgainCurve";
 import WeakToStrongBar from "@/components/viz/WeakToStrongBar";
 import ConfidenceReweightViz from "@/components/viz/ConfidenceReweightViz";
 
+type FigureProps = ComponentPropsWithoutRef<"figure">;
+type FigcaptionProps = ComponentPropsWithoutRef<"figcaption">;
+type FigcaptionWithAltProps = FigcaptionProps & { "data-figure-alt"?: string };
+type ImgProps = ComponentPropsWithoutRef<"img">;
+
+function textFromNode(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textFromNode).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return textFromNode(node.props.children);
+  return "";
+}
+
+function Figure({ children, className = "", ...props }: FigureProps) {
+  const childArray = Children.toArray(children);
+  const image = childArray.find(
+    (child): child is React.ReactElement<ImgProps> => isValidElement(child) && child.type === "img",
+  );
+  const alt = typeof image?.props.alt === "string" ? image.props.alt : undefined;
+
+  return (
+    <figure className={className} {...props}>
+      {childArray.map((child) => {
+        if (!isValidElement<FigcaptionWithAltProps>(child) || child.type !== "figcaption") return child;
+        return cloneElement(child, { "data-figure-alt": alt });
+      })}
+    </figure>
+  );
+}
+
+function FigureCaption({ children, className = "", ...props }: FigcaptionWithAltProps) {
+  const text = textFromNode(children).trim();
+  const alt = props["data-figure-alt"];
+  const sourceOnly = /^图源[:：]/.test(text) || /^图片来源[:：]/.test(text) || /^来源[:：]/.test(text);
+
+  return (
+    <figcaption className={`${className} figure-caption !mt-3 mx-auto max-w-2xl text-center text-zinc-500 dark:text-zinc-500`} {...props}>
+      {sourceOnly && alt ? (
+        <span className="figure-caption-main block !text-[13px] !leading-5">{alt}</span>
+      ) : (
+        children
+      )}
+      {sourceOnly ? (
+        <span className="figure-caption-source mt-1 block !text-[11px] !leading-4 text-zinc-400 dark:text-zinc-600">
+          {children}
+        </span>
+      ) : null}
+    </figcaption>
+  );
+}
+
 // 在所有 MDX 文件中全局可用的组件。
 // 这样教程作者无需 import,直接写 <CodeRunner /> / <LinePlayground /> 等即可。
 export function useMDXComponents(components: MDXComponents): MDXComponents {
   return {
+    figure: Figure,
+    figcaption: FigureCaption,
     CodeRunner,
     CodeTabs,
     PaperHeader,
+    References,
+    Cite,
     LinePlayground,
     GradientDescentViz,
     ScatterClassifier,

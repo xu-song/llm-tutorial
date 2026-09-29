@@ -12,6 +12,11 @@ export default function sitemap(): MetadataRoute.Sitemap {
     changeFrequency: "monthly" as const,
     priority: 1,
   };
+  const about = {
+    url: `${SITE_URL}/about`,
+    changeFrequency: "monthly" as const,
+    priority: 0.6,
+  };
   const tutorialEntries = tutorials.map((t) => ({
     url: `${SITE_URL}/tutorials/${t.slug}`,
     changeFrequency: "monthly" as const,
@@ -27,5 +32,5 @@ export default function sitemap(): MetadataRoute.Sitemap {
     changeFrequency: "monthly" as const,
     priority: 0.7,
   }));
-  return [home, ...tutorialEntries, paperIndex, ...paperEntries];
+  return [home, about, ...tutorialEntries, paperIndex, ...paperEntries];
 }

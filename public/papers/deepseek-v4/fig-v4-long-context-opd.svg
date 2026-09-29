@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="540" viewBox="0 0 1040 540" role="img" aria-labelledby="title desc">
+  <title id="title">DeepSeek-V4 long-context efficiency and OPD</title>
+  <desc id="desc">A schematic of DeepSeek-V4 combining long-context efficient attention, MoE variants, full-vocabulary OPD and teacher scheduling.</desc>
+  <rect width="1040" height="540" fill="#fafafa"/>
+  <text x="520" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="#111827">DeepSeek-V4：百万上下文效率 + full-vocabulary OPD</text>
+  <rect x="58" y="92" width="250" height="164" rx="22" fill="#eef2ff" stroke="#4f46e5" stroke-width="2"/>
+  <text x="183" y="130" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#3730a3">长上下文架构</text>
+  <text x="183" y="166" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#4338ca">CSA + HCA 混合注意力</text>
+  <text x="183" y="196" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#4338ca">目标：1M context</text>
+  <text x="183" y="226" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#4338ca">降低 FLOPs 与 KV cache</text>
+  <rect x="58" y="306" width="250" height="126" rx="22" fill="#f0f9ff" stroke="#0284c7" stroke-width="2"/>
+  <text x="183" y="344" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#075985">MoE 双路线</text>
+  <text x="183" y="378" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#0369a1">V4-Pro：1.6T / 49B</text>
+  <text x="183" y="408" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#0369a1">V4-Flash：284B / 13B</text>
+  <path d="M308 174 H430" stroke="#6b7280" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M308 369 H430" stroke="#6b7280" stroke-width="3" marker-end="url(#arrow)"/>
+  <rect x="430" y="122" width="250" height="230" rx="22" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="555" y="160" text-anchor="middle" font-family="Arial, sans-serif" font-size="21" font-weight="700" fill="#065f46">后训练选择</text>
+  <text x="555" y="198" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#047857">mixed RL 阶段被 OPD 替换</text>
+  <text x="555" y="228" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#047857">学生 rollout 覆盖真实长前缀</text>
+  <text x="555" y="258" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#047857">full-vocabulary teacher logits</text>
+  <text x="555" y="288" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#047857">efficient teacher scheduling</text>
+  <text x="555" y="318" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#047857">用密集信号降低长轨迹 RL 成本</text>
+  <path d="M680 237 H790" stroke="#6b7280" stroke-width="3" marker-end="url(#arrow)"/>
+  <rect x="790" y="102" width="198" height="270" rx="22" fill="#fff7ed" stroke="#ea580c" stroke-width="2"/>
+  <text x="889" y="140" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#9a3412">单位成本智能</text>
+  <text x="889" y="178" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#c2410c">更低 single-token FLOPs</text>
+  <text x="889" y="208" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#c2410c">更低 KV cache</text>
+  <text x="889" y="238" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#c2410c">百万上下文可部署</text>
+  <text x="889" y="268" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#c2410c">多能力稳定合并</text>
+  <text x="889" y="298" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#c2410c">Pro / Flash 分层服务</text>
+  <path d="M889 372 C810 474 321 472 183 432" fill="none" stroke="#9ca3af" stroke-width="2" stroke-dasharray="8 8" marker-end="url(#arrow)"/>
+  <text x="520" y="468" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#4b5563">V4 的重点不是窗口长度本身，而是用架构效率和 OPD 把长上下文后训练成本压到可持续范围</text>
+  <text x="520" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">根据 DeepSeek-V4 Technical Report 与 OPD 工程机制重绘</text>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/>
+    </marker>
+  </defs>
+</svg>

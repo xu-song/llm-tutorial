@@ -1,0 +1,133 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("qwen3");
+
+<PaperHeader slug="qwen3" />
+
+# Qwen3：混合推理与在线蒸馏
+
+Qwen3 技术报告最值得读的地方，不只是模型家族又变大了，而是它把 **thinking / non-thinking 混合推理、off-policy 蒸馏、强化学习和 on-policy distillation** 放进同一条后训练路线里。<Cite n={1} />对 OPD 来说，Qwen3 是一个很重要的工业证据：当老师已经足够强、学生已经有基础推理能力时，在学生自己的 rollout 上做逐 token 对齐，可能比继续用稀疏奖励 RL 更省算力、更稳。<Cite n={1} />
+
+> 📌 前置：建议先读 [OPD 总览](/papers/opd-agarwal)、[Thinking Machines OPD](/papers/tml-opd)、[GRPO 与 DeepSeek-R1](/papers/grpo-deepseek-r1)。Qwen3 不是单纯的方法论文，而是把这些后训练组件放到模型家族里的技术报告。
+
+## 一、动机：为什么 Qwen3 是后训练分水岭
+
+2025 年的推理模型已经不满足于“会长思考”。真实产品里，模型还要同时满足两类需求：
+
+1. 复杂数学、代码、规划任务需要展开 thinking；
+2. 简单问答、检索整理、常规对话需要快速 non-thinking。
+
+如果把这两种行为交给两个模型，部署和路由都复杂；如果只训一个长思考模型，简单任务会浪费 token；如果只训一个短答模型，高难推理又不够强。Qwen3 的路线是：在一个模型家族里同时维护 thinking 与 non-thinking 能力，并通过后训练把强老师的推理行为迁移到更便宜的学生模型上。<Cite n={1} />
+
+这也是它和 OPD 的连接点。OPD 不是为了“模仿老师输出长答案”而存在，而是为了在学生真实会走到的前缀状态上，让老师告诉它下一步分布应该怎么偏移。<Cite n={[2,3]} />
+
+## 二、模型家族：Dense 与 MoE 共同服务部署梯度
+
+Qwen3 覆盖 dense 与 MoE 两类模型，报告中的 dense 系列从 0.6B、1.7B、4B、8B、14B 到 32B；MoE 系列包括 Qwen3-30B-A3B 与 Qwen3-235B-A22B。<Cite n={1} />dense 模型更直观、部署栈简单；MoE 模型用较低激活参数承载更高总容量，更适合在高性能与成本之间做折中。上下文长度也分层：较小 dense 模型报告 32K，4B 及以上 dense 与 MoE 模型报告 128K。<Cite n={1} />
+
+从 OPD 视角看，这种家族化设计很关键：
+
+| 角色 | 典型作用 | 对 OPD 的意义 |
+|---|---|---|
+| 大 teacher | 保留强推理、强泛化和更稳定的 token 分布 | 提供学生当前状态上的局部指导 |
+| 中等 student | 追求性价比、吞吐和部署可用性 | 用学生自己的 rollout 暴露真实错误 |
+| 同家族 tokenizer / 格式 | 降低 logit 对齐工程复杂度 | 避免 vocab mismatch 与格式错位 |
+
+因此 Qwen3 的 OPD 不是孤立算法，而是模型家族设计的一部分：先有强老师，再有可部署学生，再用后训练把两者接起来。
+
+## 三、混合推理：一个模型为什么要同时会想和不想
+
+Qwen3 报告强调 thinking / non-thinking 的混合模式。<Cite n={1} />它背后的产品问题很简单：不是每个请求都值得付出长推理成本。
+
+- 数学证明、竞赛代码、复杂规划：需要 thinking，模型可以花更多 token 搜索解法。
+- 事实问答、摘要、格式转换：最好 non-thinking，直接给结果。
+- 介于两者之间的任务：需要能根据提示、系统策略或训练偏好切换。
+
+这给后训练带来一个难点：如果 teacher 总是长思考，student 可能在简单任务上学得太啰嗦；如果 teacher 总是短答，student 又学不到复杂推理过程。Qwen3 的价值在于把推理模式也纳入后训练对象，而不只是把 benchmark 分数作为唯一目标。
+
+## 四、后训练流水线：从离线蒸馏到在线蒸馏
+
+Qwen3 报告中的 strong-to-weak 蒸馏可以拆成两段：<Cite n={1} />
+
+| 阶段 | 数据状态 | 老师角色 | 主要问题 |
+|---|---|---|---|
+| Off-policy distillation | 老师或固定数据轨迹 | 提供高质量答案与推理格式 | 学生生成时可能进入没见过的状态 |
+| Reinforcement learning | 学生采样 | 用结果奖励拉高最终正确率 | 奖励稀疏，信用分配昂贵 |
+| On-policy distillation | 学生自己 rollout | 在学生前缀上提供 logits / KL 对齐目标 | 老师在线打分有成本，但监督更密 |
+
+在线蒸馏的关键变化是：**老师不替学生生成轨迹，而是在学生已经生成的状态上打分。**<Cite n={[1,2]} /> 这让训练分布更贴近部署分布，也让每个 token 都得到比最终奖励更密集的监督。
+
+可以把它和普通离线蒸馏的差别写成一句话：离线蒸馏学的是“老师会怎么走”，在线蒸馏学的是“当学生已经走到这里时，老师认为下一步该怎么修正”。
+
+<figure className="my-6">
+  <img src="./fig-post-training-pipeline.svg" alt="Qwen3 后训练路线示意：Long-CoT cold start、Reasoning RL、Thinking Mode Fusion、General RL 之后，通过 strong-to-weak distillation 和 OPD 把强老师能力迁移到更小学生模型" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">Qwen3 后训练路线示意：Long-CoT cold start、Reasoning RL、Thinking Mode Fusion、General RL 之后，通过 strong-to-weak distillation 和 OPD 把强老师能力迁移到更小学生模型</span>
+    <span className="figure-caption-source">图源：根据 Yang et al., <em>Qwen3 Technical Report</em>（arXiv:2505.09388）Figure 1 与 Table 21 重绘</span>
+  </figcaption>
+</figure>
+
+## 五、成本账：为什么 OPD 比继续 RL 更高效
+
+Qwen3 报告的表 21 给了一个很有代表性的对比。<Cite n={1} />以 8B 级学生的数学推理后训练为例：
+
+| 训练路线 | AIME’24 | AIME’25 | MATH500 | LiveCodeBench v5 | MMLU-Redux | GPQA-Diamond | GPU Hours |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Off-policy Distillation | 55.0 | 42.8 | 92.4 | 42.0 | 86.4 | 55.6 | — |
+| + Reinforcement Learning | 67.6 | 55.5 | 94.8 | 52.9 | 86.9 | 61.3 | 17,920 |
+| + On-policy Distillation | 74.4 | 65.5 | 97.0 | 60.3 | 88.3 | 63.3 | 1,800 |
+
+报告表中 AIME 还同时给出 pass@64：OPD 对 AIME’24 为 93.3，AIME’25 为 86.7。<Cite n={1} />这里的比较从同一个 off-policy distilled 8B checkpoint 出发，主要面向 math/code-related queries，因此不能外推成“所有任务上 OPD 都优于 RL”。
+
+RL 的优势是探索：模型可能发现 teacher 没有覆盖的新策略。OPD 的优势是复制：当已有强策略值得继承时，它把稀疏的结果偏好变成 dense token-level 指导。
+
+## 六、和 Thinking Machines OPD 的关系
+
+[Thinking Machines OPD](/papers/tml-opd) 把这件事讲成更工程化的 recipe：学生 rollout，老师打分，把 sampled-token reverse KL 写成 token-level advantage，再复用 RL 风格的训练循环。<Cite n={2} />
+
+Qwen3 报告提供的是模型技术报告里的证据：
+
+1. teacher/student 可以来自同一个模型家族；
+2. OPD 可以作为 RL 之后或替代继续 RL 的训练阶段；
+3. 在数学推理上，OPD 的成本 / 效果比足以进入工业报告主线；
+4. 评估要同时看分数和 GPU hours，而不是只看 benchmark 峰值。
+
+这也解释了为什么 OPD 在 2025—2026 年突然变热：它不是新瓶装旧 SFT，而是补上了“强策略已经存在，但继续 RL 太贵”的训练空位。<Cite n={[2,3]} />
+
+## 七、结果该怎么读
+
+读 Qwen3 的结果表时，最容易忽略的是评测口径。推理模型的 benchmark 分数常常受这些因素影响：
+
+- 是否开启 thinking；
+- token budget 是多少；
+- 是否做多次采样、投票或重排；
+- 是否允许工具；
+- student 是 dense 还是 MoE；
+- teacher 与 student 是否同家族。
+
+所以 Qwen3 的 OPD 结果最好不要被读成单点排行榜，而应读成一条训练经验：当目标是把强 teacher 的推理偏好迁移到学生模型时，on-policy 的状态覆盖和 token-level 的密集监督可以显著改善成本结构。<Cite n={[1,2]} />
+
+## 八、局限：OPD 不是免费增强器
+
+Qwen3 也提醒我们，OPD 的成功依赖前提：
+
+1. **老师足够强**：如果 teacher 本身没有目标能力，在线打分只会稳定复制平庸行为。
+2. **学生不能太弱**：学生 rollout 太差时，老师在坏状态上的局部建议可能不可学。
+3. **格式要兼容**：thinking 模式、答案格式、tokenizer 和模型家族差异都会影响 KL 信号。
+4. **老师打分仍然贵**：OPD 省的是相对继续 RL 的探索成本，不是完全没有 teacher compute。
+5. **复制不等于探索**：OPD 更擅长继承既有强策略，不能替代所有 RL。
+
+这和 [Rethinking OPD](/papers/rethinking-opd) 的结论一致：OPD 成功不是因为老师强，而是因为老师在学生会到达的状态上提供了可吸收的新信息。
+
+## 小结
+
+Qwen3 的意义，是把 OPD 从算法论文推进到大模型技术报告的核心训练阶段：off-policy 蒸馏负责冷启动和格式学习，RL 负责探索，on-policy distillation 负责用强老师在学生状态上提供密集修正。它最重要的经验不是某个固定 loss，而是训练分布的变化：**让学生在自己会犯错的轨迹上被老师纠正。**
+
+## 参考资料
+
+<References>
+1. An Yang et al. (2025). *Qwen3 Technical Report*. arXiv: [2505.09388](https://arxiv.org/abs/2505.09388). —— 本文主报告，包含 Qwen3 模型家族、混合推理模式与 strong-to-weak distillation / OPD 对比。
+2. Kevin Lu, Thinking Machines Lab (2025). *On-Policy Distillation*. [thinkingmachines.ai/blog/on-policy-distillation](https://thinkingmachines.ai/blog/on-policy-distillation/). —— 从工程角度解释 OPD 的 loss、rollout 与成本优势。
+3. Rishabh Agarwal et al. (2024). *On-policy Distillation of Language Models: Learning from Self-Generated Mistakes*. ICLR 2024, arXiv: [2306.13649](https://arxiv.org/abs/2306.13649). —— GKD / OPD 基础论文。
+4. veRL contributors (2026). *On-Policy Distillation (OPD)*. [verl.readthedocs.io/en/latest/algo/opd.html](https://verl.readthedocs.io/en/latest/algo/opd.html). —— OPD 工程实现、teacher scoring、top-k metrics 与多教师扩展。
+</References>

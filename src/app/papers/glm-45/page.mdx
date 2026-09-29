@@ -4,40 +4,41 @@ export const metadata = paperMetadata("glm-45");
 
 <PaperHeader slug="glm-45" />
 
-# 🧬 GLM-4.5:Mixture-of-Experts 的 Agentic 智能体训练
+# GLM-4.5：Mixture-of-Experts 的 Agentic 智能体训练
 
-2025 年 8 月,智谱开源了 GLM-4.5:355B 总参数、每 token 仅激活 32B 的 MoE 模型——总参不到 [DeepSeek-V3](/papers/deepseek-v3) 的六成、约为 [Kimi K2](/papers/kimi-k2) 的三分之一,却在 12 项主流基准上综合排名第三、agentic 基准排名第二(TAU-Bench 70.1、SWE-bench Verified 64.2)。它的技术报告回答了一个 2025 年最热的工程问题:**agentic 能力(多步工具调用、真实软件工程)能不能像推理能力一样被系统性地训练出来?** 这篇笔记拆解三件事:深而窄的 MoE 架构、把「专家模型迭代」做成后训练主轴的两阶段流水线、以及 agentic RL 的具体配方。
+2025 年 8 月，智谱开源了 GLM-4.5：355B 总参数、每 token 仅激活 32B 的 MoE 模型——总参不到 [DeepSeek-V3](/papers/deepseek-v3) 的六成、约为 [Kimi K2](/papers/kimi-k2) 的三分之一，却在 12 项主流基准上综合排名第三、agentic 基准排名第二（TAU-Bench 70.1、SWE-bench Verified 64.2）。<Cite n={[1,2,3]} />它的技术报告回答了一个 2025 年最热的工程问题：**agentic 能力（多步工具调用、真实软件工程）能不能像推理能力一样被系统性地训练出来？** 这篇笔记拆解三件事：深而窄的 MoE 架构、把「专家模型迭代」做成后训练主轴的两阶段流水线、以及 agentic RL 的具体配方。
 
-> 📌 前置:RL 部分直接继承 [GRPO](/papers/grpo-deepseek-r1) 的框架(去 critic、组内优势);架构部分与 [DeepSeek-V3](/papers/deepseek-v3)、[Kimi K2](/papers/kimi-k2) 的 MoE 对照阅读收获最大。
+> 📌 前置：RL 部分直接继承 [GRPO](/papers/grpo-deepseek-r1) 的框架（去 critic、组内优势）；架构部分与 [DeepSeek-V3](/papers/deepseek-v3)、[Kimi K2](/papers/kimi-k2) 的 MoE 对照阅读收获最大。
 
-## 一、动机:同样的 32B 激活,买什么?
+## 一、动机：同样的 32B 激活，买什么？
 
-2025 年开源 MoE 的「标配」已经收敛:数百专家、每 token 激活 8 个左右、加一个共享专家。在激活参数(约等于每 token FLOPs)被推理成本钉死的前提下,**总参数怎么花**就成了各家分歧所在。K2 的答案是横向铺开(1.04T 总参、384 专家,靠 sparsity scaling law);GLM-4.5 的答案是**纵深**:89 层 MoE(K2 是 61 层),故意做得**比 DeepSeek-V3 和 K2 更深、更窄**——报告的依据是深模型展现出更好的推理能力。
+2025 年开源 MoE 的「标配」已经收敛：数百专家、每 token 激活 8 个左右、加一个共享专家。<Cite n={[1,2,3]} />在激活参数（约等于每 token FLOPs）被推理成本钉死的前提下，**总参数怎么花**就成了各家分歧所在。K2 的答案是横向铺开（1.04T 总参、384 专家，靠 sparsity scaling law）；GLM-4.5 的答案是**纵深**：89 层 MoE（K2 是 61 层），故意做得**比 DeepSeek-V3 和 K2 更深、更窄**——报告的依据是深模型展现出更好的推理能力。<Cite n={[1,3]} />
 
-注意力侧同样反潮流:**96 个注意力头**,约 2.5 倍于同规模模型的常见配置。iso-loss 实验里,头数翻倍几乎不改善验证损失,但 MMLU/BBH 这类基准明显变好;再配合 GQA(8 个 KV 头)+ partial RoPE + QK-Norm 稳定训练。另外保留一个 MoE 层做 **MTP(多 token 预测)**层,推理时可做投机解码(MTP 损失权重前 15T token 为 0.3、后 8T 降到 0.1)。
+注意力侧同样反潮流：**96 个注意力头**，约 2.5 倍于同规模模型的常见配置。iso-loss 实验里，头数翻倍几乎不改善验证损失，但 MMLU/BBH 这类基准明显变好；再配合 GQA（8 个 KV 头）+ partial RoPE + QK-Norm 稳定训练。<Cite n={1} />另外保留一个 MoE 层做 <strong>MTP（多 token 预测）</strong> 层，推理时可做投机解码（MTP 损失权重前 15T token 为 0.3、后 8T 降到 0.1）。<Cite n={[1,2]} />
 
-完整配置:160 路由专家 + 1 共享专家、每 token 激活 8 路由、专家中间维 1536、隐藏维 5120;轻量版 GLM-4.5-Air 为 106B/12B(128 专家、45 层)。预训练 23T token,序列长度分三段爬升:4K(通用预训练)→ 32K(仓库级代码训练)→ 128K(长上下文与 agent 轨迹)。
+完整配置：160 路由专家 + 1 共享专家、每 token 激活 8 路由、专家中间维 1536、隐藏维 5120；轻量版 GLM-4.5-Air 为 106B/12B（128 专家、45 层）。<Cite n={1} />预训练 23T token，序列长度分三段爬升：4K（通用预训练）→ 32K（仓库级代码训练）→ 128K（长上下文与 agent 轨迹）。<Cite n={1} />
 
-论文原版的训练阶段图——预训练 15T 通用语料后,仓库级代码、推理与 agent 合成数据在 mid-training 依次登场,序列长度从 4K 爬到 128K:
+论文原版的训练阶段图——预训练 15T 通用语料后，仓库级代码、推理与 agent 合成数据在 mid-training 依次登场，序列长度从 4K 爬到 128K:
 
 <figure className="my-6">
-  <img src="./fig-pretrain.svg" alt="GLM-4.5 预训练与 mid-training 阶段:预训练 15T 通用语料(4K),mid-training 加入仓库级代码、合成推理数据与 agent 数据,序列长度扩展到 128K" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-pretrain.svg" alt="GLM-4.5 预训练与 mid-training 阶段：预训练 15T 通用语料（4K），mid-training 加入仓库级代码、合成推理数据与 agent 数据，序列长度扩展到 128K" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:GLM-4.5 Team, <em>GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models</em>(arXiv:2508.06471)Figure 3
+    <span className="figure-caption-main">GLM-4.5 预训练与 mid-training 阶段：预训练 15T 通用语料（4K），mid-training 加入仓库级代码、合成推理数据与 agent 数据，序列长度扩展到 128K</span>
+    <span className="figure-caption-source">图源：GLM-4.5 Team, <em>GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models</em>（arXiv:2508.06471）Figure 3</span>
   </figcaption>
 </figure>
 
-## 二、MoE 路由:sigmoid 门控 + 无辅助损失的均衡
+## 二、MoE 路由：sigmoid 门控 + 无辅助损失的均衡
 
-GLM-4.5 的 MoE 与 DeepSeek-V3 同源:sigmoid 门控 + **loss-free balance**。每个 token 对专家 $i$ 的亲和度用 sigmoid 而非 softmax 计算,再在被选中的 top-8 内归一化为门控权重:
+GLM-4.5 的 MoE 与 DeepSeek-V3 同源：sigmoid 门控 + **loss-free balance**。<Cite n={[1,2]} />每个 token 对专家 $i$ 的亲和度用 sigmoid 而非 softmax 计算，再在被选中的 top-8 内归一化为门控权重：
 
 $$
 s_{i,t}=\operatorname{Sigmoid}(\mathbf{u}_t^\top\mathbf{e}_i),\qquad g_{i,t}=\frac{s_{i,t}}{\sum_{j\in\operatorname{TopK}}s_{j,t}},\qquad \mathbf{h}'_t=\mathbf{u}_t+\operatorname{FFN}^{\text{shared}}(\mathbf{u}_t)+\sum_{i=1}^{8}g_{i,t}\operatorname{FFN}_i(\mathbf{u}_t)
 $$
 
-负载均衡靠 per-expert bias 只干预「选不选」、不进梯度:每个训练步末,过载专家 $b_i\leftarrow b_i-\gamma$、欠载 $b_i\leftarrow b_i+\gamma$(前 15T token $\gamma=0.001$,之后归零),另留一个极小的序列级辅助损失(权重 $10^{-4}$)防单序列极端失衡。这套机制的完整拆解见 [DeepSeek-V3 笔记](/papers/deepseek-v3)。
+负载均衡靠 per-expert bias 只干预「选不选」、不进梯度：每个训练步末，过载专家 $b_i\leftarrow b_i-\gamma$、欠载 $b_i\leftarrow b_i+\gamma$(前 15T token $\gamma=0.001$，之后归零)，另留一个极小的序列级辅助损失(权重 $10^{-4}$)防单序列极端失衡。<Cite n={[1,2]} />这套机制的完整拆解见 [DeepSeek-V3 笔记](/papers/deepseek-v3)。
 
-用 numpy 把「深而窄 + 稀疏激活」的参数账算一遍,并模拟一次 top-8 路由:
+用 numpy 把「深而窄 + 稀疏激活」的参数账算一遍，并模拟一次 top-8 路由：
 
 <CodeRunner defaultCode={String.raw`
 import numpy as np
@@ -72,53 +73,55 @@ print("归一化门控权重 g:      ", g.round(3))
 print("其余 152 个专家完全不参与前向 —— 这就是 355B 总参只激活 32B 的机制")
 `} />
 
-## 三、后训练:专家模型迭代
+## 三、后训练：专家模型迭代
 
-GLM-4.5 后训练的骨架不是常见的「SFT → RL」单线,而是**两阶段专家模型迭代**:
+GLM-4.5 后训练的骨架不是常见的「SFT → RL」单线，而是**两阶段专家模型迭代**：<Cite n={1} />
 
-**阶段 1(专家训练)**:并行训练三个领域专家——**推理专家**(数学/代码/科学,可验证奖励)、**Agent 专家**(网页搜索 QA + 真实软件工程任务)、**通用对话专家**(Holistic RL、指令遵循、函数调用、病态行为矫正)。每个专家先做冷启动 SFT(带长思维链的小样本集),再各自做 RL。
+**阶段 1（专家训练）**：并行训练三个领域专家——**推理专家**(数学/代码/科学，可验证奖励)、**Agent 专家**（网页搜索 QA + 真实软件工程任务）、**通用对话专家**（Holistic RL、指令遵循、函数调用、病态行为矫正）。每个专家先做冷启动 SFT（带长思维链的小样本集），再各自做 RL。
 
-**阶段 2(统一训练)**:用**自蒸馏**把三个专家合并成一个模型——从各专家采样数百万样本,在 128K 上下文上做整体 SFT,刻意平衡「带完整思维链」与「不带显式思考」的数据比例,使最终模型同时支持 **thinking 模式**(复杂推理、工具调用)与 **non-thinking 模式**(即时响应)。
+**阶段 2（统一训练）**：用**自蒸馏**把三个专家合并成一个模型——从各专家采样数百万样本，在 128K 上下文上做整体 SFT，刻意平衡「带完整思维链」与「不带显式思考」的数据比例，使最终模型同时支持 **thinking 模式**（复杂推理、工具调用）与 **non-thinking 模式**（即时响应）。
 
-这个设计的妙处:RL 只需要在「单领域专家」上做(奖励信号清晰、任务面窄),蒸馏负责把能力拼回一个模型——**RL 管深度,蒸馏管广度**。对 agentic RL 还有一层迭代:RL 到平台期后,用 RL 模型的输出替换冷启动数据、重新 SFT、再从更高难度继续 RL,如此往复。
+这个设计的妙处：RL 只需要在「单领域专家」上做（奖励信号清晰、任务面窄），蒸馏负责把能力拼回一个模型——**RL 管深度，蒸馏管广度**。<Cite n={1} />对 agentic RL 还有一层迭代：RL 到平台期后，用 RL 模型的输出替换冷启动数据、重新 SFT、再从更高难度继续 RL，如此往复。
 
-SFT 数据侧的工程细节同样值得记:拒绝采样时**丢掉按回答长度排序垫底的 50% prompt**,给数学/科学带来 2-4% 提升;对难题每题采 4 个回答再训,再加 1-2%——「短而准」的数据比「长而全」值钱。
+SFT 数据侧的工程细节同样值得记：拒绝采样时**丢掉按回答长度排序垫底的 50% prompt**，给数学/科学带来 2-4% 提升；对难题每题采 4 个回答再训，再加 1-2%——「短而准」的数据比「长而全」值钱。<Cite n={1} />
 
-## 四、Agentic 数据与 RL:把「环境」造出来
+## 四、Agentic 数据与 RL：把「环境」造出来
 
-agentic SFT 数据的自动合成管线分四步:
+agentic SFT 数据的自动合成管线分四步：
 
-1. **框架与工具收集**:聚合开源 agentic 框架、真实工具 API 与 MCP 服务器,再用 LLM 自动「构造并模拟」一批工具补齐覆盖面;
-2. **任务合成**:从框架/工具自动生成单步与多步工具调用任务;
-3. **轨迹生成**:LLM 生成工具调用轨迹,并由一个 LLM 用户模拟器把多步任务转成多轮对话;
-4. **质量过滤**:多个 judge agent 评估任务是否真正完成,只保留成功轨迹。
+1. **框架与工具收集**：聚合开源 agentic 框架、真实工具 API 与 MCP 服务器，再用 LLM 自动「构造并模拟」一批工具补齐覆盖面；
+2. **任务合成**：从框架/工具自动生成单步与多步工具调用任务；
+3. **轨迹生成**：LLM 生成工具调用轨迹，并由一个 LLM 用户模拟器把多步任务转成多轮对话；
+4. **质量过滤**：多个 judge agent 评估任务是否真正完成，只保留成功轨迹。
 
-RL 阶段延续 [GRPO](/papers/grpo-deepseek-r1) 的组式策略优化,**去掉 KL 项**,叠加四个针对性设计:
+RL 阶段延续 [GRPO](/papers/grpo-deepseek-r1) 的组式策略优化，**去掉 KL 项**，叠加四个针对性设计：<Cite n={[1,5]} />
 
-- **难度课程**:第一阶段用中等难度保住奖励方差,第二阶段切到「pass@8 = 0 且 pass@512 > 0」的极难题池——模型从「够不着但多试几次能对」的题上学得最多;
+- **难度课程**：第一阶段用中等难度保住奖励方差，第二阶段切到「pass@8 = 0 且 pass@512 > 0」的极难题池——模型从「够不着但多试几次能对」的题上学得最多；<Cite n={1} />
 
-论文原版的两张 RL 消融曲线(注意:来自更小的实验模型,非 GLM-4.5 本身)。左图是难度课程:蓝线在第二阶段切到极难题池(sampling 512 次/题)后继续爬升,红线停留在中等难度上平台化。右图是 64K 单阶段:红线直接在 64K 输出长度上单阶段训练取胜,蓝线的渐进式长度爬升在早期留下不可逆的掉分:
+论文原版的两张 RL 消融曲线（注意：来自更小的实验模型，非 GLM-4.5 本身）。左图是难度课程：蓝线在第二阶段切到极难题池(sampling 512 次/题)后继续爬升，红线停留在中等难度上平台化。右图是 64K 单阶段：红线直接在 64K 输出长度上单阶段训练取胜，蓝线的渐进式长度爬升在早期留下不可逆的掉分：
 
 <figure className="my-6 grid gap-4 sm:grid-cols-2">
-  <img src="./fig-curriculum-rl.svg" alt="两阶段难度课程在 AIME 24 上的效果:第二阶段切换到极难题后继续提升,基线在中等难度上平台化" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
-  <img src="./fig-multi-stage-rl.svg" alt="单阶段与多阶段 RL 对比:64K 单阶段训练性能更优,多阶段渐进长度爬升出现不可逆下降" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-curriculum-rl.svg" alt="两阶段难度课程在 AIME 24 上的效果：第二阶段切换到极难题后继续提升，基线在中等难度上平台化" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-multi-stage-rl.svg" alt="单阶段与多阶段 RL 对比：64K 单阶段训练性能更优，多阶段渐进长度爬升出现不可逆下降" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="sm:col-span-2 mt-1 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:GLM-4.5 Team, <em>GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models</em>(arXiv:2508.06471)Figure 5(左)与 Figure 6(右)
+    <span className="figure-caption-main">单阶段与多阶段 RL 对比：64K 单阶段训练性能更优，多阶段渐进长度爬升出现不可逆下降</span>
+    <span className="figure-caption-source">图源：GLM-4.5 Team, <em>GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models</em>（arXiv:2508.06471）Figure 5（左）与 Figure 6（右）</span>
   </figcaption>
 </figure>
 
-- **64K 单阶段 RL**:直接在目标输出长度上训练,不做渐进式长度爬升——报告发现短长度 RL 阶段会让模型「不可逆地遗忘」长上下文能力;
-- **动态采样温度**:平均奖励收敛时逐步升温换多样性,阈值由「验证集掉分不超过 1%」自动标定;
-- **过程格式惩罚(process action format penalty)**:工具调用格式错误则轨迹立刻终止、奖励归零;损失只算模型生成的 token,环境反馈(工具输出)不进损失。
+- **64K 单阶段 RL**：直接在目标输出长度上训练，不做渐进式长度爬升——报告发现短长度 RL 阶段会让模型「不可逆地遗忘」长上下文能力；
+- **动态采样温度**：平均奖励收敛时逐步升温换多样性，阈值由「验证集掉分不超过 1%」自动标定；
+- **过程格式惩罚（process action format penalty）**：工具调用格式错误则轨迹立刻终止、奖励归零；损失只算模型生成的 token，环境反馈（工具输出）不进损失。
 
-代码 RL 还把序列级平均换成 **token-weighted mean loss**——按 token 而非按序列归一化,梯度更细、收敛更快,还能抑制「又短又重复的偷懒解」。
+代码 RL 还把序列级平均换成 **token-weighted mean loss**——按 token 而非按序列归一化，梯度更细、收敛更快，还能抑制「又短又重复的偷懒解」。<Cite n={1} />
 
-论文原版消融图:左侧对比代码 RL 的两种损失归一化,token-weighted mean 收敛明显更快;右侧对比科学 RL 的数据来源,专家校验的选择题数据胜过混杂数据:
+论文原版消融图：左侧对比代码 RL 的两种损失归一化，token-weighted mean 收敛明显更快；右侧对比科学 RL 的数据来源，专家校验的选择题数据胜过混杂数据：
 
 <figure className="my-6">
-  <img src="./fig-code-science.svg" alt="代码与科学 RL 消融:代码 RL 中 token-weighted mean 损失比 sequence-mean 收敛更快;科学 RL 中专家校验的选择题数据优于混合质量数据" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-code-science.svg" alt="代码与科学 RL 消融：代码 RL 中 token-weighted mean 损失比 sequence-mean 收敛更快；科学 RL 中专家校验的选择题数据优于混合质量数据" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:GLM-4.5 Team, <em>GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models</em>(arXiv:2508.06471)Figure 7
+    <span className="figure-caption-main">代码与科学 RL 消融：代码 RL 中 token-weighted mean 损失比 sequence-mean 收敛更快；科学 RL 中专家校验的选择题数据优于混合质量数据</span>
+    <span className="figure-caption-source">图源：GLM-4.5 Team, <em>GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models</em>（arXiv:2508.06471）Figure 7</span>
   </figcaption>
 </figure>
 
@@ -134,29 +137,40 @@ RL 阶段延续 [GRPO](/papers/grpo-deepseek-r1) 的组式策略优化,**去掉 
 | GPQA-Diamond | 79.1 | — | 81.3 | |
 | IFEval | 86.1 | 89.8 | — | |
 
-CC-Bench 真实编程对战:对 Kimi K2 胜率 53.9%,对 Qwen3-Coder 80.8%,对 Claude Sonnet 4 胜率 40.4%;工具调用成功率 90.6%。Base 模型侧,EvalPlus 78.1 大幅领先 DeepSeek-V3-Base(65.6),LiveCodeBench-Base 28.1 也领先,但 MMLU(86.1 vs 87.8)与 GSM8K 落后 K2-Base——预训练的 token 花在了代码与 agentic 上,这正是 ARC 定位的取舍。
+CC-Bench 真实编程对战：对 Kimi K2 胜率 53.9%，对 Qwen3-Coder 80.8%，对 Claude Sonnet 4 胜率 40.4%；工具调用成功率 90.6%。<Cite n={1} />Base 模型侧，EvalPlus 78.1 大幅领先 DeepSeek-V3-Base(65.6),LiveCodeBench-Base 28.1 也领先，但 MMLU（86.1 vs 87.8）与 GSM8K 落后 K2-Base——预训练的 token 花在了代码与 agentic 上，这正是 ARC 定位的取舍。
 
-定位一句话:**GLM-4.5 用「参数效率」换「领域聚焦」**——同是 32B 激活,它把省下的参数押在深度(89 层)与代码/agentic 数据上;与 K2 的超稀疏(1T 总参)构成 2025 年开源 MoE 的两条路线。agentic 基准第二、参数只有竞品零头,是它在 SWE-bench-vs-参数 Pareto 前沿上的位置:
+定位一句话：**GLM-4.5 用「参数效率」换「领域聚焦」**——同是 32B 激活，它把省下的参数押在深度（89 层）与代码/agentic 数据上；与 K2 的超稀疏（1T 总参）构成 2025 年开源 MoE 的两条路线。agentic 基准第二、参数只有竞品零头，是它在 SWE-bench-vs-参数 Pareto 前沿上的位置：
 
 <figure className="my-6">
-  <img src="./fig-swe-parameter.png" alt="SWE-bench Verified 分数随模型参数的变化:GLM-4.5 以远小于竞品的参数量位于 Pareto 前沿,闭源模型列在右侧参数未知处" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-swe-parameter.png" alt="SWE-bench Verified 分数随模型参数的变化：GLM-4.5 以远小于竞品的参数量位于 Pareto 前沿，闭源模型列在右侧参数未知处" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:GLM-4.5 Team, <em>GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models</em>(arXiv:2508.06471)Figure 2
+    <span className="figure-caption-main">SWE-bench Verified 分数随模型参数的变化：GLM-4.5 以远小于竞品的参数量位于 Pareto 前沿，闭源模型列在右侧参数未知处</span>
+    <span className="figure-caption-source">图源：GLM-4.5 Team, <em>GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models</em>（arXiv:2508.06471）Figure 2</span>
   </figcaption>
 </figure>
 
 ## 六、局限与后续
 
-1. **报告的「蜻蜓点水」**:训练配方列举了大量技巧(动态温度、token-weighted loss、格式惩罚……)但多数没给消融数字,复现门槛高;RL 改进的消融曲线全部来自更小的实验模型,而非 GLM-4.5 本身。
-2. **无 RL 前后的对照**:agentic RL 对 SWE-bench/TAU-Bench 的具体增量未披露,只有「web 搜索与 SWE 上的 RL 泛化到了 Terminal-Bench 等未见任务」的定性结论。
-3. **知识面让位**:SimpleQA 30.0 落后 K2-Base(35.3),MMLU/C-Eval 也普遍落后——23T token 的预算在「agentic + 代码」上的倾斜,代价是事实性知识宽度。
-4. **迭代很快**:发布两个月后 GLM-4.6(同 355B/32B 架构,上下文扩到 200K,支持推理中工具调用)与 GLM-4.7(73.8% SWE-bench、引入 interleaved/preserved thinking)相继发布——4.5 的价值在于确立了「专家迭代 + agentic RL」的方法骨架,后续版本都是在这副骨架上调参加料。
+1. **报告的「蜻蜓点水」**：训练配方列举了大量技巧（动态温度、token-weighted loss、格式惩罚……）但多数没给消融数字，复现门槛高；RL 改进的消融曲线全部来自更小的实验模型，而非 GLM-4.5 本身。
+2. **无 RL 前后的对照**：agentic RL 对 SWE-bench/TAU-Bench 的具体增量未披露，只有「web 搜索与 SWE 上的 RL 泛化到了 Terminal-Bench 等未见任务」的定性结论。
+3. **知识面让位**：SimpleQA 30.0 落后 K2-Base（35.3）,MMLU/C-Eval 也普遍落后——23T token 的预算在「agentic + 代码」上的倾斜，代价是事实性知识宽度。
+4. **迭代很快**：发布两个月后 GLM-4.6(同 355B/32B 架构，上下文扩到 200K，支持推理中工具调用)与 GLM-4.7(73.8% SWE-bench、引入 interleaved/preserved thinking)相继发布——4.5 的价值在于确立了「专家迭代 + agentic RL」的方法骨架，后续版本都是在这副骨架上调参加料。
 
 ## 小结
 
-- **架构**:深而窄的 MoE(89 层、160 专家选 8 + 1 共享、sigmoid 门控 + loss-free 均衡),96 头 GQA + QK-Norm,附 MTP 层支持投机解码;355B 总参只激活 32B,参数效率是同级 MoE 中最高的。
-- **后训练**:两阶段专家模型迭代——三个领域专家各自「冷启动 SFT + 领域 RL」,再自蒸馏统一成 thinking/non-thinking 双模式模型;RL 管 depth、蒸馏管 breadth。
-- **agentic 配方**:四步合成管线(框架收集 → 任务合成 → 轨迹生成 → 多 judge 过滤)+ 无 KL 的 GRPO(难度课程、64K 单阶段、动态温度、格式惩罚、token-weighted loss)。
-- **结果**:TAU-Bench 70.1、SWE-bench Verified 64.2、AIME 24 91.0,agentic 基准开源第二、综合第三,MIT 协议全量开源。
+- **架构**：深而窄的 MoE（89 层、160 专家选 8 + 1 共享、sigmoid 门控 + loss-free 均衡），96 头 GQA + QK-Norm，附 MTP 层支持投机解码；355B 总参只激活 32B，参数效率是同级 MoE 中最高的。
+- **后训练**：两阶段专家模型迭代——三个领域专家各自「冷启动 SFT + 领域 RL」，再自蒸馏统一成 thinking/non-thinking 双模式模型；RL 管 depth、蒸馏管 breadth。
+- **agentic 配方**：四步合成管线（框架收集 → 任务合成 → 轨迹生成 → 多 judge 过滤）+ 无 KL 的 GRPO（难度课程、64K 单阶段、动态温度、格式惩罚、token-weighted loss）。
+- **结果**：TAU-Bench 70.1、SWE-bench Verified 64.2、AIME 24 91.0，agentic 基准开源第二、综合第三，MIT 协议全量开源。
 
-GLM-4.5 报告的方法学可以浓缩成一句话:**把「训一个 agentic 模型」拆解成「训三个可验证奖励的领域专家,再蒸馏合并」**——单领域 RL 的奖励信号干净,蒸馏负责把它们拼成一个能用的通用模型。这条「专家迭代」路线后来也被 [DeepSeek-V3.2](/papers/deepseek-v3-2) 的六领域专家蒸馏继承,成了 2025 年后训练的主流骨架之一。
+GLM-4.5 报告的方法学可以浓缩成一句话：**把「训一个 agentic 模型」拆解成「训三个可验证奖励的领域专家，再蒸馏合并」**——单领域 RL 的奖励信号干净，蒸馏负责把它们拼成一个能用的通用模型。这条「专家迭代」路线后来也被 [DeepSeek-V3.2](/papers/deepseek-v3-2) 的六领域专家蒸馏继承，成了 2025 年后训练的主流骨架之一。<Cite n={4} />
+
+## 参考资料
+
+<References>
+1. GLM-4.5 Team (2025). *GLM-4.5: Agentic, Reasoning, and Coding (ARC) Foundation Models*. arXiv: [2508.06471](https://arxiv.org/abs/2508.06471). —— 本文主报告，支撑 MoE 架构、预训练阶段、专家模型迭代、agentic RL、Figures 2/3/5/6/7 与主要 benchmark 数字。
+2. DeepSeek-AI (2024). *DeepSeek-V3 Technical Report*. arXiv: [2412.19437](https://arxiv.org/abs/2412.19437). —— 对照阅读：DeepSeekMoE、sigmoid 路由、auxiliary-loss-free load balancing、MTP 与 FP8 训练工程。
+3. Kimi Team (2025). *Kimi K2: Open Agentic Intelligence*. arXiv: [2507.20534](https://arxiv.org/abs/2507.20534). —— 对照阅读：1T 级 MoE、MuonClip、agentic 数据合成与软件工程 benchmark。
+4. DeepSeek-AI (2025). *DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models*. arXiv: [2512.02556](https://arxiv.org/abs/2512.02556). —— 对照阅读：多领域专家蒸馏、大规模 GRPO 与后训练能力合并路线。
+5. DeepSeek-AI (2025). *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. arXiv: [2501.12948](https://arxiv.org/abs/2501.12948). —— GRPO / RLVR 背景，用于理解 GLM-4.5 后训练中的组式策略优化。
+</References>

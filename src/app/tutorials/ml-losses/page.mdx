@@ -2,41 +2,41 @@ import { tutorialMetadata } from "@/lib/tutorials";
 
 export const metadata = tutorialMetadata("ml-losses");
 
-# 🎯 实战:分类与语言模型的损失
+# 🎯 实战：分类与语言模型的损失
 
-前几篇([熵与信息](/tutorials/information-theory)、[交叉熵与 KL 散度](/tutorials/cross-entropy-kl)、[交叉熵 = KL = NLL](/tutorials/ce-kl-nll-equivalence)、[前向 KL vs 反向 KL](/tutorials/forward-reverse-kl))讲的是理论。这一篇把交叉熵落到真实模型里——你会看到它其实是**同一个公式**在不同任务下的三种面孔。
+前几篇（[熵与信息](/tutorials/information-theory)、[交叉熵与 KL 散度](/tutorials/cross-entropy-kl)、[交叉熵 = KL = NLL](/tutorials/ce-kl-nll-equivalence)、[前向 KL vs 反向 KL](/tutorials/forward-reverse-kl)）讲的是理论。这一篇把交叉熵落到真实模型里——你会看到它其实是**同一个公式**在不同任务下的三种面孔。
 
-## ① 二分类:二元交叉熵(BCE)
+## ① 二分类：二元交叉熵（BCE）
 
-垃圾邮件、点击预测、疾病诊断——只有「是/否」两类。模型输出一个概率 $\hat{y}=P(\text{正类})$,损失为:
+垃圾邮件、点击预测、疾病诊断——只有「是/否」两类。模型输出一个概率 $\hat{y}=P(\text{正类})$，损失为：
 
 $$
 \text{BCE} = -\big[\,y\log \hat{y} + (1-y)\log(1-\hat{y})\,\big]
 $$
 
-真实标签 $y\in\{0,1\}$,只有一项存活:$y=1$ 时是 $-\log\hat{y}$,$y=0$ 时是 $-\log(1-\hat{y})$。这正是[逻辑回归](/tutorials/logistic-regression)的损失函数。
+真实标签 $y\in\{0,1\}$，只有一项存活：$y=1$ 时是 $-\log\hat{y}$，$y=0$ 时是 $-\log(1-\hat{y})$。这正是[逻辑回归](/tutorials/logistic-regression)的损失函数。
 
-## ② 多分类:类别交叉熵(Categorical CE)
+## ② 多分类：类别交叉熵（Categorical CE）
 
-手写数字(10 类)、图像分类(1000 类)。模型经 **softmax** 输出各类概率,真实标签是 one-hot。交叉熵在 one-hot 下退化成 $-\log Q_{\text{正确类}}$——**只惩罚「分配给正确类的概率」**。
+手写数字（10 类）、图像分类（1000 类）。模型经 **softmax** 输出各类概率，真实标签是 one-hot。交叉熵在 one-hot 下退化成 $-\log Q_{\text{正确类}}$——**只惩罚「分配给正确类的概率」**。
 
-> 🟰 为什么会这样退化,以及此时交叉熵、KL 散度、NLL 三个量为何**完全相等**(软标签下又为何分开),有一篇专门的四步推导:[一个恒等式:交叉熵 = KL = NLL](/tutorials/ce-kl-nll-equivalence)。
+> 🟰 为什么会这样退化，以及此时交叉熵、KL 散度、NLL 三个量为何**完全相等**（软标签下又为何分开），有一篇专门的四步推导：[一个恒等式:交叉熵 = KL = NLL](/tutorials/ce-kl-nll-equivalence)。
 
-## ③ 语言模型(GPT):下一个词预测
+## ③ 语言模型（GPT）：下一个词预测
 
-大语言模型的训练目标,本质就是一个**超大规模的多分类**:词表有几万个词,每一步都是在几万个类里选「下一个 token」。对每个位置,模型输出词表上的概率分布,损失是它分配给**真实下一个 token** 的概率的负对数,再对所有位置求平均:
+大语言模型的训练目标，本质就是一个**超大规模的多分类**：词表有几万个词，每一步都是在几万个类里选「下一个 token」。对每个位置，模型输出词表上的概率分布，损失是它分配给**真实下一个 token** 的概率的负对数，再对所有位置求平均：
 
 $$
 \mathcal{L} = -\frac{1}{N}\sum_{t=1}^{N} \log P_\theta(x_t \mid x_{<t})
 $$
 
-语言模型习惯把这个平均交叉熵(用自然对数)再取指数,得到更好懂的**困惑度(Perplexity, PPL)**:
+语言模型习惯把这个平均交叉熵（用自然对数）再取指数，得到更好懂的**困惑度（Perplexity, PPL）**：
 
 $$
 \text{PPL} = \exp\!\Big(\!-\tfrac{1}{N}\textstyle\sum_t \log P_\theta(x_t\mid x_{<t})\Big) = e^{\mathcal{L}}
 $$
 
-**PPL 的直觉:模型平均在多少个词之间「纠结」。** 完美预测时 PPL=1;在 $V$ 个词里瞎猜时 PPL=$V$。所以困惑度越低,语言模型越好。
+**PPL 的直觉：模型平均在多少个词之间「纠结」。** 完美预测时 PPL=1；在 $V$ 个词里瞎猜时 PPL=$V$。所以困惑度越低，语言模型越好。
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -67,62 +67,63 @@ V = 50257  # GPT-2 词表大小
 print(f"   参考:在 {V} 个词里瞎猜 -> PPL={V}, CE={np.log(V):.2f} nat")
 `} />
 
-拖动模型对「正确下一词」的信心,看 NLL 与困惑度如何联动——下方的灰格数量直观展示「困惑度 = 相当于在多少个等可能选项里犹豫」:
+拖动模型对「正确下一词」的信心，看 NLL 与困惑度如何联动——下方的灰格数量直观展示「困惑度 = 相当于在多少个等可能选项里犹豫」：
 
 <PerplexityViz />
 
-> 💡 **看点**:困惑度是 NLL 的**指数**($\text{PPL}=e^{\text{NLL}}=1/P$),所以信心从 0.5 掉到 0.2,NLL 只从 0.69 涨到 1.61,困惑度却从 2 跳到 5——**指数级放大**让困惑度对「模型有多不确定」更敏感、更好读。这也是为什么论文报告语言模型质量时爱用困惑度而非裸交叉熵:「PPL=17」就是「平均在 17 个词里纠结」,一句话能想象。
+> 💡 **看点**：困惑度是 NLL 的**指数**（$\text{PPL}=e^{\text{NLL}}=1/P$），所以信心从 0.5 掉到 0.2，NLL 只从 0.69 涨到 1.61，困惑度却从 2 跳到 5——**指数级放大**让困惑度对「模型有多不确定」更敏感、更好读。这也是为什么论文报告语言模型质量时爱用困惑度而非裸交叉熵：「PPL=17」就是「平均在 17 个词里纠结」，一句话能想象。
 
-> 🔗 从香农 1948 年的编码理论,到今天训练 GPT——**都是同一个交叉熵**。语言模型每训练一步,都在降低「用当前信念编码真实文本」的 bit 数。GPT-2 最大模型在维基百科长文本上的困惑度约 17–18,而更大的现代模型能压到个位数附近,这直接对应文本生成质量的飞跃。
+> 🔗 从香农 1948 年的编码理论，到今天训练 GPT——**都是同一个交叉熵**。语言模型每训练一步，都在降低「用当前信念编码真实文本」的 bit 数。GPT-2 最大模型在维基百科长文本上的困惑度约 17–18，而更大的现代模型能压到个位数附近，这直接对应文本生成质量的飞跃。
 
-这个「损失」到底是什么样子?把交叉熵(在分类网络上)看作参数的函数,就是一张高维的**损失景观(loss landscape)**。下面两张图来自一篇著名的可视化研究:同一个 ResNet-56,去掉跳跃连接(左)后损失面变得崎岖、被高损失墙隔开;保留跳跃连接(右)则开阔平滑,训练容易滑进宽谷。深度学习里的「损失」不是抽象数字,而是这样一片真实的地形:
+这个「损失」到底是什么样子？把交叉熵（在分类网络上）看作参数的函数，就是一张高维的**损失景观（loss landscape）**。下面两张图来自一篇著名的可视化研究：同一个 ResNet-56，去掉跳跃连接（左）后损失面变得崎岖、被高损失墙隔开；保留跳跃连接（右）则开阔平滑，训练容易滑进宽谷。深度学习里的「损失」不是抽象数字，而是这样一片真实的地形：
 
 <figure className="my-6 grid gap-4 sm:grid-cols-2">
-  <img src="./loss-surface-noshort.png" alt="去掉跳跃连接的 ResNet-56 损失景观:3D 表面图显示崎岖的地形,被高损失的墙分隔出多个深坑" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
-  <img src="./loss-surface-short.png" alt="保留跳跃连接的 ResNet-56 损失景观:3D 表面图显示开阔平滑的盆地,最低点连成一片" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./loss-surface-noshort.png" alt="去掉跳跃连接的 ResNet-56 损失景观：3D 表面图显示崎岖的地形，被高损失的墙分隔出多个深坑" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./loss-surface-short.png" alt="保留跳跃连接的 ResNet-56 损失景观：3D 表面图显示开阔平滑的盆地，最低点连成一片" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="sm:col-span-2 mt-1 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Li, Xu & Taylor, <em>Visualizing the Loss Landscape of Neural Nets</em>(arXiv:1712.09913)Figure 1 左(无跳跃连接)与右(有跳跃连接)
+    <span className="figure-caption-main">保留跳跃连接的 ResNet-56 损失景观：3D 表面图显示开阔平滑的盆地，最低点连成一片</span>
+    <span className="figure-caption-source">图源：Li, Xu & Taylor, <em>Visualizing the Loss Landscape of Neural Nets</em>(arXiv:1712.09913)Figure 1 左（无跳跃连接）与右（有跳跃连接）</span>
   </figcaption>
 </figure>
 
 ## 在机器学习里随处可见
 
-这套信息论工具支撑了大量 ML 方法:
+这套信息论工具支撑了大量 ML 方法：
 
-- **交叉熵损失**:几乎所有分类模型(逻辑回归、神经网络、Transformer)的默认损失函数
-- **决策树**:用**信息增益**(熵的减少量)来选择分裂特征
-- **变分自编码器(VAE)**、**扩散模型**:用 KL 散度约束分布
-- **知识蒸馏**:用 KL 散度让小模型模仿大模型的输出分布
+- **交叉熵损失**：几乎所有分类模型（逻辑回归、神经网络、Transformer）的默认损失函数
+- **决策树**：用**信息增益**（熵的减少量）来选择分裂特征
+- **变分自编码器（VAE）**、**扩散模型**：用 KL 散度约束分布
+- **知识蒸馏**：用 KL 散度让小模型模仿大模型的输出分布
 
-> ⚠️ 这些损失在真实代码里直接照公式写常会算出 `NaN`/`inf`(概率接近 0 时 $\log$ 爆掉、softmax 上溢)。如何稳定地计算它们,见[数值计算与稳定性](/tutorials/numerical-computing)。
+> ⚠️ 这些损失在真实代码里直接照公式写常会算出 `NaN`/`inf`（概率接近 0 时 $\log$ 爆掉、softmax 上溢）。如何稳定地计算它们，见[数值计算与稳定性](/tutorials/numerical-computing)。
 
 ## 常见问题 FAQ
 
-**Q:one-hot 标签下交叉熵会简化吗?**
-会。真实分布 $P$ 是 one-hot 时,$\sum_i P_i \log Q_i$ 只剩正确类那一项,交叉熵退化成 $-\log Q_{\text{正确类}}$ —— 这正是分类代码里最常见的形式。
+**Q：one-hot 标签下交叉熵会简化吗？**
+会。真实分布 $P$ 是 one-hot 时，$\sum_i P_i \log Q_i$ 只剩正确类那一项，交叉熵退化成 $-\log Q_{\text{正确类}}$ —— 这正是分类代码里最常见的形式。
 
-**Q:困惑度和交叉熵是什么关系?为什么大家爱用困惑度?**
-困惑度就是交叉熵取指数:$\text{PPL}=e^{\mathcal{L}}$(交叉熵用自然对数时)。两者单调对应,优化谁都一样。用困惑度是因为它有直观含义——「模型平均在多少个词之间纠结」,PPL=10 比「loss=2.3」好理解得多。
+**Q：困惑度和交叉熵是什么关系？为什么大家爱用困惑度？**
+困惑度就是交叉熵取指数：$\text{PPL}=e^{\mathcal{L}}$（交叉熵用自然对数时）。两者单调对应，优化谁都一样。用困惑度是因为它有直观含义——「模型平均在多少个词之间纠结」，PPL=10 比「loss=2.3」好理解得多。
 
-**Q:BCE 和多分类 CE 是两个不同的损失吗?**
-是同一个交叉熵的特例。二分类时类别只有两个,概率是 $\hat{y}$ 和 $1-\hat{y}$,写开来就是 BCE;多分类时对所有类求和。框架里 `BCEWithLogitsLoss` 与 `CrossEntropyLoss` 分别对应这两种情形。
+**Q：BCE 和多分类 CE 是两个不同的损失吗？**
+是同一个交叉熵的特例。二分类时类别只有两个，概率是 $\hat{y}$ 和 $1-\hat{y}$，写开来就是 BCE；多分类时对所有类求和。框架里 `BCEWithLogitsLoss` 与 `CrossEntropyLoss` 分别对应这两种情形。
 
-**Q:为什么语言模型报告困惑度而不是准确率?**
-下一个词往往有多个合理选项(「今天天气很__」可以是好/热/冷…),要求模型精确命中唯一答案不合理。困惑度衡量模型给真实词分配的概率有多高,是更平滑、更能反映语言建模质量的指标。
+**Q：为什么语言模型报告困惑度而不是准确率？**
+下一个词往往有多个合理选项（「今天天气很__」可以是好/热/冷…），要求模型精确命中唯一答案不合理。困惑度衡量模型给真实词分配的概率有多高，是更平滑、更能反映语言建模质量的指标。
 
 ## 动手作业
 
-1. **BCE 曲线**:固定真实标签 $y=1$,遍历预测概率 $\hat{y}$ 从 0.01 到 0.99,画出 BCE 损失曲线,观察 $\hat{y}\to 0$ 时损失如何飙升。
-2. **多分类 vs 二分类**:验证「两类的多分类 CE」和「BCE」数值上相等(取同一组概率)。
-3. **困惑度**:给定一串「模型对真实 token 的预测概率」,算出平均交叉熵和困惑度;把某个概率调到接近 0,观察困惑度如何爆炸。
-4. **随机基线**:一个对 $V$ 类均匀瞎猜的模型,困惑度应等于 $V$、交叉熵应等于 $\log V$——用代码验证。
-5. **思考题**:为什么「自信地预测错」(真实类概率预测成 0.001)会让交叉熵损失趋于无穷大?这对训练有什么好处和风险?
+1. **BCE 曲线**：固定真实标签 $y=1$，遍历预测概率 $\hat{y}$ 从 0.01 到 0.99，画出 BCE 损失曲线，观察 $\hat{y}\to 0$ 时损失如何飙升。
+2. **多分类 vs 二分类**：验证「两类的多分类 CE」和「BCE」数值上相等（取同一组概率）。
+3. **困惑度**：给定一串「模型对真实 token 的预测概率」，算出平均交叉熵和困惑度；把某个概率调到接近 0，观察困惑度如何爆炸。
+4. **随机基线**：一个对 $V$ 类均匀瞎猜的模型，困惑度应等于 $V$、交叉熵应等于 $\log V$——用代码验证。
+5. **思考题**：为什么「自信地预测错」（真实类概率预测成 0.001）会让交叉熵损失趋于无穷大？这对训练有什么好处和风险？
 
 ## 延伸阅读
 
-- **站内教程**:[过拟合与正则化](/tutorials/overfitting-regularization)—— 损失降过头就是过拟合,正则化在损失里加惩罚项;[逻辑回归](/tutorials/logistic-regression)—— BCE 损失的第一个真实用户;[数值计算与稳定性](/tutorials/numerical-computing)—— 这些损失直接照公式写会算出 NaN 的原因与修法
-- **可视化研究**:Li, Xu & Taylor (2018). *Visualizing the Loss Landscape of Neural Nets*. [arXiv:1712.09913](https://arxiv.org/abs/1712.09913) —— 提出滤波归一化(filter normalization)让不同网络的损失面可以公平对比,本篇配图出自此文
-- **奠基论文**:Hinton, Vinyals & Dean (2015). *Distilling the Knowledge in a Neural Network*. [arXiv:1503.02531](https://arxiv.org/abs/1503.02531) —— 知识蒸馏的原始论文:把 soft 标签的交叉熵用到极致,是「交叉熵 = 老师分布与学生的差距」的最佳实践案例
+- **站内教程**：[过拟合与正则化](/tutorials/overfitting-regularization)—— 损失降过头就是过拟合,正则化在损失里加惩罚项;[逻辑回归](/tutorials/logistic-regression)—— BCE 损失的第一个真实用户;[数值计算与稳定性](/tutorials/numerical-computing)—— 这些损失直接照公式写会算出 NaN 的原因与修法
+- **可视化研究**：Li, Xu & Taylor (2018). *Visualizing the Loss Landscape of Neural Nets*. [arXiv:1712.09913](https://arxiv.org/abs/1712.09913) —— 提出滤波归一化（filter normalization）让不同网络的损失面可以公平对比，本篇配图出自此文
+- **奠基论文**：Hinton, Vinyals & Dean (2015). *Distilling the Knowledge in a Neural Network*. [arXiv:1503.02531](https://arxiv.org/abs/1503.02531) —— 知识蒸馏的原始论文：把 soft 标签的交叉熵用到极致，是「交叉熵 = 老师分布与学生的差距」的最佳实践案例
 
 ## 小结
 
@@ -131,6 +132,6 @@ print(f"   参考:在 {V} 个词里瞎猜 -> PPL={V}, CE={np.log(V):.2f} nat")
 | 二分类 | BCE | $-[y\log\hat{y}+(1-y)\log(1-\hat{y})]$ |
 | 多分类 | 类别交叉熵 | one-hot 下 $=-\log Q_{\text{正确类}}$ |
 | 语言模型 | 平均交叉熵 | $-\frac1N\sum\log P_\theta(x_t\mid x_{<t})$ |
-| 语言模型指标 | 困惑度 PPL | $e^{\mathcal{L}}$,越低越好 |
+| 语言模型指标 | 困惑度 PPL | $e^{\mathcal{L}}$，越低越好 |
 
-> 🎯 一句话记住:**BCE、多分类 CE、语言模型 loss 都是同一个交叉熵的不同外衣。** 训练分类器和训练 GPT,数学根子是一样的——最小化「用模型信念编码真实数据」的比特数。
+> 🎯 一句话记住：**BCE、多分类 CE、语言模型 loss 都是同一个交叉熵的不同外衣。** 训练分类器和训练 GPT，数学根子是一样的——最小化「用模型信念编码真实数据」的比特数。

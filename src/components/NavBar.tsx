@@ -38,14 +38,7 @@ export default function NavBar() {
           {link("/", "首页")}
           {link(`/tutorials/${getFirstTutorial().slug}`, "教程", "/tutorials/")}
           {link("/papers", "论文", "/papers/")}
-          <a
-            href="https://pyodide.org"
-            target="_blank"
-            rel="noreferrer"
-            className="rounded-md px-3 py-1.5 text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-          >
-            关于
-          </a>
+          {link("/about", "关于")}
           <ThemeToggle />
         </nav>
       </div>

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="460" viewBox="0 0 980 460" role="img" aria-labelledby="title desc">
+  <title id="title">Thinking Machines OPD loop</title>
+  <desc id="desc">OPD combines on-policy student rollouts with dense teacher token-level scoring.</desc>
+  <rect width="980" height="460" fill="#fafafa"/>
+  <text x="490" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#111827">OPD：on-policy 状态 + dense teacher signal</text>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#0f766e"/>
+    </marker>
+  </defs>
+  <rect x="70" y="105" width="180" height="88" rx="16" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="160" y="140" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#065f46">Student rollout</text>
+  <text x="160" y="168" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#047857">生成轨迹并记录 logprob</text>
+  <rect x="400" y="105" width="180" height="88" rx="16" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text x="490" y="140" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#1d4ed8">Teacher scoring</text>
+  <text x="490" y="168" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#2563eb">同一 token 上算 logprob</text>
+  <rect x="730" y="105" width="180" height="88" rx="16" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="820" y="140" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#92400e">Policy update</text>
+  <text x="820" y="168" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#92400e">importance-sampling loss</text>
+  <path d="M250 149 H394" stroke="#0f766e" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+  <path d="M580 149 H724" stroke="#0f766e" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+  <path d="M820 198 C820 330 160 330 160 200" stroke="#0f766e" stroke-width="3" stroke-dasharray="8 6" fill="none" marker-end="url(#arrow)"/>
+  <rect x="115" y="255" width="750" height="76" rx="14" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="490" y="285" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#111827">token advantage = log p_teacher(yₜ | sₜ) − log p_student(yₜ | sₜ)</text>
+  <text x="490" y="313" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#4b5563">比 RL 的终局 reward 更密，比 SFT 的固定轨迹更贴近部署状态</text>
+  <text x="490" y="404" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">根据 Thinking Machines Lab, “On-Policy Distillation” 博客算法流程重绘</text>
+</svg>

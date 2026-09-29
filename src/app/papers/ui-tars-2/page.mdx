@@ -4,83 +4,85 @@ export const metadata = paperMetadata("ui-tars-2");
 
 <PaperHeader slug="ui-tars-2" />
 
-# 🖥️ UI-TARS-2:GUI Agent 的多轮强化学习
+# UI-TARS-2：GUI Agent 的多轮强化学习
 
-2025 年 9 月,字节跳动 Seed 团队发布 UI-TARS-2:一个以截图为输入、以界面动作为输出的原生 GUI Agent(不依赖 DOM 等底层信息),底座是 Seed1.6(532M 视觉编码器 + 230B 总参/23B 激活的 MoE)。它的技术报告回答的问题是:**多步、长程、视觉密集的 GUI 操作能力,能不能靠 RL 系统性地训出来?** 核心答案是「多轮 RL」——把「观察-思考-行动」的完整任务轨迹作为训练单元,而非单步动作。OSWorld 47.5、AndroidWorld 73.3、Online-Mind2Web 88.2,均为当时开源 SOTA。这篇笔记拆解四件事:native agent 形式化、数据飞轮与交互式标注、多轮 RL 基础设施与算法、推理时扩展。
+2025 年 9 月，字节跳动 Seed 团队发布 UI-TARS-2：一个以截图为输入、以界面动作为输出的原生 GUI Agent（不依赖 DOM 等底层信息），底座是 Seed1.6(532M 视觉编码器 + 230B 总参/23B 激活的 MoE)。<Cite n={1} />它的技术报告回答的问题是：**多步、长程、视觉密集的 GUI 操作能力，能不能靠 RL 系统性地训出来？** 核心答案是「多轮 RL」——把「观察-思考-行动」的完整任务轨迹作为训练单元，而非单步动作。<Cite n={1} />OSWorld 47.5、AndroidWorld 73.3、Online-Mind2Web 88.2，均为当时开源 SOTA。<Cite n={1} />这篇笔记拆解四件事：native agent 形式化、数据飞轮与交互式标注、多轮 RL 基础设施与算法、推理时扩展。
 
-> 📌 前置:RL 算法部分对照 [PPO](/papers/ppo-schulman) 与 [GRPO/R1](/papers/grpo-deepseek-r1) 阅读收获最大;agentic 数据合成的另一条路线见 [Kimi K2](/papers/kimi-k2)。
+> 📌 前置：RL 算法部分对照 [PPO](/papers/ppo-schulman) 与 [GRPO/R1](/papers/grpo-deepseek-r1) 阅读收获最大；agentic 数据合成的另一条路线见 [Kimi K2](/papers/kimi-k2)。
 
-## 一、形式化:Agent 就是一条轨迹上的策略
+## 一、形式化：Agent 就是一条轨迹上的策略
 
-UI-TARS-2 采用 **native agent** 视角:Agent 是一个参数化策略,把历史上下文、记忆状态与当前环境映射为行为输出。遵循 ReAct 范式,一个 step 是一轮完整的「思考-行动-观察」循环,任务轨迹为
+UI-TARS-2 采用 **native agent** 视角：Agent 是一个参数化策略，把历史上下文、记忆状态与当前环境映射为行为输出。遵循 ReAct 范式，一个 step 是一轮完整的「思考-行动-观察」循环，任务轨迹为<Cite n={[1,6]} />
 
 $$
 \tau=\{(t_0,a_0,o_0),\;(t_1,a_1,o_1),\;\dots,\;(t_T,a_T,o_T)\}
 $$
 
-策略在每一步预测下一对思考与动作:
+策略在每一步预测下一对思考与动作：
 
 $$
 P(t_n, a_n \mid \text{instruction},\; W_n,\; o_n,\; E_n)
 $$
 
-其中 $W_n$ 是**工作记忆**(最近若干步的高保真内容,上下文截断到最近 N 步), $E_n$ 是**情景记忆**(过往 episode 的语义压缩摘要,保留关键意图与结果)。动作空间有两类:GUI 动作(click/type/scroll,游戏操作复用同一套)与 SDK 函数(终端命令、MCP 工具调用)——后者让同一个 Agent 能在纯 GUI 与代码两条通道间切换(BrowseComp 上 GUI-only 7.0 vs 带 SDK 29.6,差距全部来自通道选择)。
+其中 $W_n$ 是**工作记忆**（最近若干步的高保真内容，上下文截断到最近 N 步）， $E_n$ 是**情景记忆**（过往 episode 的语义压缩摘要，保留关键意图与结果）。动作空间有两类：GUI 动作(click/type/scroll，游戏操作复用同一套)与 SDK 函数（终端命令、MCP 工具调用）——后者让同一个 Agent 能在纯 GUI 与代码两条通道间切换（BrowseComp 上 GUI-only 7.0 vs 带 SDK 29.6，差距全部来自通道选择）。<Cite n={1} />
 
-## 二、数据飞轮:让数据与模型互相加速
+## 二、数据飞轮：让数据与模型互相加速
 
-训练数据走 CT(持续预训练)→ SFT → RL 的飞轮循环,论文 Figure 3。冷启动:CT 用 UI-TARS 与 UI-TARS-1.5 的全部数据(网页教程、开源轨迹、内部标注);SFT 用合成生成 + 人工标注构造初始集。之后每轮 RL 的输出经验证函数 $V(s)\to\{0,1\}$ 筛选:
+训练数据走 CT（持续预训练）→ SFT → RL 的飞轮循环，论文 Figure 3。<Cite n={1} />冷启动：CT 用 UI-TARS 与 UI-TARS-1.5 的全部数据（网页教程、开源轨迹、内部标注）；SFT 用合成生成 + 人工标注构造初始集。之后每轮 RL 的输出经验证函数 $V(s)\to\{0,1\}$ 筛选：
 
 $$
 D_{\mathrm{SFT}}^{(t+1)}=D_{\mathrm{SFT}}^{(t)}\cup D_{\mathrm{RFT,high}}^{(t)},\qquad
 D_{\mathrm{CT}}^{(t+1)}=D_{\mathrm{CT}}^{(t)}\cup D_{\mathrm{RFT,low}}^{(t)}
 $$
 
-高质量样本升入 SFT、低质量回收进 CT;SFT 与 RL 的迭代频率高于 CT,agent 数据在 SFT 中占比远大于 CT。数据侧两个有意思的设计:
+高质量样本升入 SFT、低质量回收进 CT；SFT 与 RL 的迭代频率高于 CT，agent 数据在 SFT 中占比远大于 CT。数据侧两个有意思的设计：
 
-- **CT 的 think-aloud 标注**:标注员在自己的真实电脑上边操作边把思考过程说出来,语音经 ASR 转写、LLM 润色、与动作时间对齐——得到「带思维链的真实操作轨迹」;专家与新手双轨并行。
-- **SFT 的 on-policy 标注**:交互式标注平台(四层架构:交互层 UI、服务层编排模型命令与人工干预、平台层承载 Computer Use/Phone Use/Tool Use 场景、存储层记录轨迹)里,标注员对模型实时提议的动作「接受或改写」——改写即产生一次高价值的纠错样本,还带命令自动补全、VM 视频流、坐标可视化。
+- **CT 的 think-aloud 标注**：标注员在自己的真实电脑上边操作边把思考过程说出来，语音经 ASR 转写、LLM 润色、与动作时间对齐——得到「带思维链的真实操作轨迹」；专家与新手双轨并行。<Cite n={1} />
+- **SFT 的 on-policy 标注**：交互式标注平台(四层架构：交互层 UI、服务层编排模型命令与人工干预、平台层承载 Computer Use/Phone Use/Tool Use 场景、存储层记录轨迹)里，标注员对模型实时提议的动作「接受或改写」——改写即产生一次高价值的纠错样本，还带命令自动补全、VM 视频流、坐标可视化。
 
 <figure className="my-6">
-  <img src="./fig-3-data-flywheel.png" alt="UI-TARS-2 数据飞轮:CT(持续预训练)、SFT(监督微调)与 RL 三阶段循环,每轮 RL 输出经验证函数 V(s) 分流——高质量样本升入 SFT、低质量回收进 CT,数据与模型能力互相加速" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-3-data-flywheel.png" alt="UI-TARS-2 数据飞轮：CT（持续预训练）、SFT（监督微调）与 RL 三阶段循环，每轮 RL 输出经验证函数 V（s） 分流——高质量样本升入 SFT、低质量回收进 CT，数据与模型能力互相加速" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:ByteDance Seed Team, <em>UI-TARS-2 Technical Report</em>(arXiv:2509.02544)Figure 3
+    <span className="figure-caption-main">UI-TARS-2 数据飞轮：CT（持续预训练）、SFT（监督微调）与 RL 三阶段循环，每轮 RL 输出经验证函数 V（s） 分流——高质量样本升入 SFT、低质量回收进 CT，数据与模型能力互相加速</span>
+    <span className="figure-caption-source">图源：ByteDance Seed Team, <em>UI-TARS-2 Technical Report</em>（arXiv:2509.02544）Figure 3</span>
   </figcaption>
 </figure>
 
-## 三、多轮 RL:把整个轨迹当训练单元
+## 三、多轮 RL：把整个轨迹当训练单元
 
-与「单步动作 + 即时奖励」的 RL 不同,多轮 RL 以完整任务轨迹为单元,奖励主要由最终结果决定(游戏用 JS 校验脚本读运行时变量——分数/关卡/生命——给出确定性二元信号;GUI-Browsing 用 LLM-as-Judge 比对目标答案;不可验证的 GUI-General 任务让 UI-TARS-2 自己当生成式 ORM,基于全部文本历史 + 最近 5 张截图打分,在 300 条人工标注轨迹上 F1 = 83.8),再叠加格式奖励与长度惩罚(防提前终止与无限拖延)。
+与「单步动作 + 即时奖励」的 RL 不同，多轮 RL 以完整任务轨迹为单元，奖励主要由最终结果决定(游戏用 JS 校验脚本读运行时变量——分数/关卡/生命——给出确定性二元信号；GUI-Browsing 用 LLM-as-Judge 比对目标答案；不可验证的 GUI-General 任务让 UI-TARS-2 自己当生成式 ORM，基于全部文本历史 + 最近 5 张截图打分，在 300 条人工标注轨迹上 F1 = 83.8)，再叠加格式奖励与长度惩罚（防提前终止与无限拖延）。<Cite n={1} />
 
-任务面三族:**GUI-Browsing**(维基百科多条件混淆 + 多跳链式条件)、**GUI-General**(690 个网站的离线合成)、**Gameplay**(HTML5/WebGL 小游戏 + LLM 合成游戏,全部跑在浏览器沙箱里)。
+任务面三族：**GUI-Browsing**（维基百科多条件混淆 + 多跳链式条件）、**GUI-General**（690 个网站的离线合成）、**Gameplay**(HTML5/WebGL 小游戏 + LLM 合成游戏，全部跑在浏览器沙箱里)。
 
-算法选 **PPO 而非 GRPO**——论文明确说「PPO 始终以明显优势胜出」,训练曲线奖励更高、波动更低。这对 [GRPO 在推理域的统治地位](/papers/grpo-deepseek-r1) 是个值得注意的反例:多轮交互任务有天然的价值结构(中间状态可复用、critic 能跨步泛化),砍掉 critic 的组内基线反而吃亏。三个针对性改造:
+算法选 **PPO 而非 GRPO**——论文明确说「PPO 始终以明显优势胜出」，训练曲线奖励更高、波动更低。<Cite n={[1,3,4]} />这对 [GRPO 在推理域的统治地位](/papers/grpo-deepseek-r1) 是个值得注意的反例：多轮交互任务有天然的价值结构（中间状态可复用、critic 能跨步泛化），砍掉 critic 的组内基线反而吃亏。三个针对性改造：
 
-1. **Length-Adaptive GAE**:长序列的优势估计偏方差、短序列偏低偏差,按序列长度 $l$ 调 $\lambda_{\mathrm{policy}}=1-\frac{1}{\alpha l}$($\alpha=0.05$);critic 侧 $\lambda$ 与策略侧解耦;
-2. **Value Pretraining**:先冻结策略离线把价值模型训到收敛(GAE $\lambda=1.0$,等价蒙特卡洛回报),再进 RL——价值初始化偏差是多轮长轨迹的顽疾;
-3. **Clip Higher**:按 DAPO 把裁剪上下界解耦($\epsilon_{\mathrm{high}}$ 放宽,给低概率动作留上升空间;$\epsilon_{\mathrm{low}}$ 收紧防过早淘汰)。
+1. **Length-Adaptive GAE**：长序列的优势估计偏方差、短序列偏低偏差，按序列长度 $l$ 调 $\lambda_{\mathrm{policy}}=1-\frac{1}{\alpha l}$($\alpha=0.05$)；critic 侧 $\lambda$ 与策略侧解耦；<Cite n={[1,3]} />
+2. **Value Pretraining**：先冻结策略离线把价值模型训到收敛(GAE $\lambda=1.0$，等价蒙特卡洛回报)，再进 RL——价值初始化偏差是多轮长轨迹的顽疾；
+3. **Clip Higher**：按 DAPO 把裁剪上下界解耦($\epsilon_{\mathrm{high}}$ 放宽，给低概率动作留上升空间；$\epsilon_{\mathrm{low}}$ 收紧防过早淘汰)。<Cite n={5} />
 
-基础设施是这套方法的真正门槛,论文 Figure 6。核心三件:**异步服务化 rollout**(agent 框架与策略推理解耦)、**流式训练**(动态 rollout 池,完整轨迹凑够最小批量即开训,不完整轨迹保留到后续迭代——类似 Kimi-Researcher 的做法;GUI 轨迹动辄数分钟,等全员到齐会把 GPU 闲置)、**有状态环境**(跨工具调用保留执行状态)。支撑层:数千实例规模的 VM 平台(数千 QPS、VNC/RTC 监控、租约式生命周期),浏览器沙箱每容器多实例 + 弹性调度 + 崩溃自动恢复 + 检查点,兼容 CDP/Playwright,GPU 加速截图;游戏环境重写了 Window timing API,支持时间加速与启动暂停——不改变游戏逻辑的前提下提高采样效率与可复现性。
+基础设施是这套方法的真正门槛，论文 Figure 6。<Cite n={1} />核心三件：**异步服务化 rollout**（agent 框架与策略推理解耦）、**流式训练**（动态 rollout 池，完整轨迹凑够最小批量即开训，不完整轨迹保留到后续迭代——类似 Kimi-Researcher 的做法；GUI 轨迹动辄数分钟，等全员到齐会把 GPU 闲置）、**有状态环境**（跨工具调用保留执行状态）。支撑层：数千实例规模的 VM 平台(数千 QPS、VNC/RTC 监控、租约式生命周期)，浏览器沙箱每容器多实例 + 弹性调度 + 崩溃自动恢复 + 检查点，兼容 CDP/Playwright，GPU 加速截图；游戏环境重写了 Window timing API，支持时间加速与启动暂停——不改变游戏逻辑的前提下提高采样效率与可复现性。
 
 <figure className="my-6">
-  <img src="./fig-6-multiturn-rl.png" alt="UI-TARS-2 多轮 RL 基础设施:异步服务化 rollout 与流式训练架构,agent 框架与策略推理解耦,动态 rollout 池中完整轨迹凑够最小批量即开训;左侧为数千实例 VM 平台与浏览器沙箱等有状态环境集群" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-6-multiturn-rl.png" alt="UI-TARS-2 多轮 RL 基础设施：异步服务化 rollout 与流式训练架构，agent 框架与策略推理解耦，动态 rollout 池中完整轨迹凑够最小批量即开训；左侧为数千实例 VM 平台与浏览器沙箱等有状态环境集群" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:ByteDance Seed Team, <em>UI-TARS-2 Technical Report</em>(arXiv:2509.02544)Figure 6
+    <span className="figure-caption-main">UI-TARS-2 多轮 RL 基础设施：异步服务化 rollout 与流式训练架构，agent 框架与策略推理解耦，动态 rollout 池中完整轨迹凑够最小批量即开训；左侧为数千实例 VM 平台与浏览器沙箱等有状态环境集群</span>
+    <span className="figure-caption-source">图源：ByteDance Seed Team, <em>UI-TARS-2 Technical Report</em>（arXiv:2509.02544）Figure 6</span>
   </figcaption>
 </figure>
 
-训练动力学有一个反直觉发现:**熵在训练中上升**。推理域 RL 通常熵单调下降(策略确定性收敛),而 GUI 与游戏实验中熵持续走高——视觉密集、高度交互的环境需要持续探索,模型没有过早塌缩到窄的利用模式;GUI 任务的思考长度与交互步数反而在下降(学会更少的步骤完成任务)。
+训练动力学有一个反直觉发现：**熵在训练中上升**。<Cite n={1} />推理域 RL 通常熵单调下降（策略确定性收敛），而 GUI 与游戏实验中熵持续走高——视觉密集、高度交互的环境需要持续探索，模型没有过早塌缩到窄的利用模式；GUI 任务的思考长度与交互步数反而在下降（学会更少的步骤完成任务）。
 
 ## 四、垂直 Agent 与合并
 
-RL 阶段按域分别训练四个垂直 Agent(GUI-Browsing / GUI-General / Game / GUI-SDK),再用**参数插值**合并:
+RL 阶段按域分别训练四个垂直 Agent(GUI-Browsing / GUI-General / Game / GUI-SDK)，再用**参数插值**合并：<Cite n={1} />
 
 $$
 \theta^{\mathrm{merge}}=\sum_{k}\alpha_k\,\theta^{(k)},\qquad \sum_k \alpha_k=1,\;\;\alpha_k\ge 0
 $$
 
-依据是同一预训练 checkpoint 出发的微调模型在参数空间近似线性模式连接——插值合并保住各垂直域性能的同时给出跨域泛化。论文还试了混合 RL(共享接口训练):混合模型即使每个接口的数据减半仍超过纯 GUI 基线,共享价值模型还提升了方差解释率。
+依据是同一预训练 checkpoint 出发的微调模型在参数空间近似线性模式连接——插值合并保住各垂直域性能的同时给出跨域泛化。论文还试了混合 RL（共享接口训练）：混合模型即使每个接口的数据减半仍超过纯 GUI 基线，共享价值模型还提升了方差解释率。
 
-用 numpy 模拟「轨迹级 vs 步级信用分配」与多轮 GAE 的区别:
+用 numpy 模拟「轨迹级 vs 步级信用分配」与多轮 GAE 的区别：
 
 <CodeRunner defaultCode={String.raw`
 import numpy as np
@@ -131,14 +133,15 @@ for l in [32, 64, 128, 512]:
     print("  轨迹长度 %4d 步 -> λ = %.3f  (短轨迹偏 TD/低偏差, 长轨迹偏 MC/低方差)" % (l, lam))
 `} />
 
-## 五、推理时扩展:步数预算换性能
+## 五、推理时扩展：步数预算换性能
 
-推理时扩展的形态出乎意料地朴素:**放大允许的交互步数**。游戏基准上,性能曲线随步数预算「以近乎单调的阶梯状」持续上升,在超出原始预算数量级的步数上仍在涨分;基线模型曲线很快走平,说明它们无法把额外的交互预算转化为收益。OSWorld 上同样成立——值得注意的是,RL 训练明明在激励模型用更少的步骤完成任务,模型却仍能把更大的步数预算转化为更高的分数,而不是过拟合到「最短路径」策略。论文的解释:策略在跨过任务特定的阈值后继续解锁新的子目标,而不是原地打转。
+推理时扩展的形态出乎意料地朴素：**放大允许的交互步数**。<Cite n={1} />游戏基准上，性能曲线随步数预算「以近乎单调的阶梯状」持续上升，在超出原始预算数量级的步数上仍在涨分；基线模型曲线很快走平，说明它们无法把额外的交互预算转化为收益。OSWorld 上同样成立——值得注意的是，RL 训练明明在激励模型用更少的步骤完成任务，模型却仍能把更大的步数预算转化为更高的分数，而不是过拟合到「最短路径」策略。论文的解释：策略在跨过任务特定的阈值后继续解锁新的子目标，而不是原地打转。
 
 <figure className="my-6">
-  <img src="./fig-11-inference-scaling.png" alt="UI-TARS-2 推理时扩展:游戏与 OSWorld 基准上,性能随允许交互步数预算放大近乎单调上升,UI-TARS-2 曲线持续爬升而基线模型很快走平——多出的交互预算被转化为新子目标的解锁" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-11-inference-scaling.png" alt="UI-TARS-2 推理时扩展：游戏与 OSWorld 基准上，性能随允许交互步数预算放大近乎单调上升，UI-TARS-2 曲线持续爬升而基线模型很快走平——多出的交互预算被转化为新子目标的解锁" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:ByteDance Seed Team, <em>UI-TARS-2 Technical Report</em>(arXiv:2509.02544)Figure 11
+    <span className="figure-caption-main">UI-TARS-2 推理时扩展：游戏与 OSWorld 基准上，性能随允许交互步数预算放大近乎单调上升，UI-TARS-2 曲线持续爬升而基线模型很快走平——多出的交互预算被转化为新子目标的解锁</span>
+    <span className="figure-caption-source">图源：ByteDance Seed Team, <em>UI-TARS-2 Technical Report</em>（arXiv:2509.02544）Figure 11</span>
   </figcaption>
 </figure>
 
@@ -153,21 +156,32 @@ for l in [32, 64, 128, 512]:
 | Terminal-Bench(SDK) | **45.3** | Claude-4-Opus 43.2 / o3 30.2 | 75/80 任务 |
 | SWE-Bench(SDK) | 68.7 | Claude-4-Sonnet 72.7 / o3 69.1 | 略逊于头部闭源 |
 
-15 个游戏的归一化均值 59.8,是 OpenAI CUA(24.73)的 2.4 倍、Claude Computer Use(21.61)的 2.8 倍;2048 上 91.0、Infinity-Loop 92.7、Shapes 甚至 108.9(超人类水平)。工程侧:W4A8 量化把吞吐从 29.6 提到 47 token/s、每轮延迟 4.0→2.5 秒,OSWorld 只掉 3.1 分(47.5→44.4)。
+15 个游戏的归一化均值 59.8，是 OpenAI CUA（24.73）的 2.4 倍、Claude Computer Use（21.61）的 2.8 倍；2048 上 91.0、Infinity-Loop 92.7、Shapes 甚至 108.9（超人类水平）。<Cite n={1} />工程侧：W4A8 量化把吞吐从 29.6 提到 47 token/s、每轮延迟 4.0→2.5 秒，OSWorld 只掉 3.1 分（47.5→44.4）。
 
 ## 局限与批判
 
-- **长程规划仍是软肋**:Tetris(16.0)与 Sokoban(0.3)在 LMGame-Bench 上近乎失败,论文自己归因于超长视野规划;Gem-11/Hex-frvr 的平台期提示瓶颈来自基座推理能力而非优化步数。
-- **ORM 的假阳性**:自举 ORM 的 F1 只有 83.8,假阳性被刻意容忍(正确的中间步骤仍有奖励),但这意味着不可验证任务上的奖励信号天然带噪。
-- **PPO 的代价**:与 GRPO 路线相比,多轮 PPO 需要维护跨步复用的价值模型,加上数千实例的环境集群——这套基础设施的复现门槛远高于算法本身。
-- **数据域偏斜**:公开 GUI 数据稀缺且已用尽;中文 App 覆盖有限;回顾式思维链标注被验证无效(思维必须在操作时同步产生)。
-- **推理时扩展未与尝试选择结合**:论文只放大步数预算;多次采样 + 判别选择(如 self-critic 投票)是社区常见做法,论文未探索,留给后续。
+- **长程规划仍是软肋**：Tetris（16.0）与 Sokoban（0.3）在 LMGame-Bench 上近乎失败，论文自己归因于超长视野规划；Gem-11/Hex-frvr 的平台期提示瓶颈来自基座推理能力而非优化步数。
+- **ORM 的假阳性**：自举 ORM 的 F1 只有 83.8，假阳性被刻意容忍（正确的中间步骤仍有奖励），但这意味着不可验证任务上的奖励信号天然带噪。
+- **PPO 的代价**：与 GRPO 路线相比，多轮 PPO 需要维护跨步复用的价值模型，加上数千实例的环境集群——这套基础设施的复现门槛远高于算法本身。
+- **数据域偏斜**：公开 GUI 数据稀缺且已用尽；中文 App 覆盖有限；回顾式思维链标注被验证无效（思维必须在操作时同步产生）。
+- **推理时扩展未与尝试选择结合**：论文只放大步数预算；多次采样 + 判别选择（如 self-critic 投票）是社区常见做法，论文未探索，留给后续。
 
 ## 小结
 
-- **形式化**:native agent = 轨迹上的参数化策略 $P(t_n,a_n\mid\text{instruction},W_n,o_n,E_n)$;工作记忆(最近 N 步)+ 情景记忆(压缩摘要)的双层记忆让长程任务在截断上下文下可行。
-- **数据**:飞轮循环(CT → SFT → RL,验证函数分流高低质量样本)+ think-aloud CT 标注 + on-policy 交互式标注平台(四层架构)。
-- **多轮 RL**:PPO(明确胜过 GRPO)+ Length-Adaptive GAE + Value Pretraining + Clip Higher;异步服务化 rollout、流式训练、有状态环境、数千实例 VM/浏览器沙箱;训练中熵上升是持续探索的证据。
-- **结果**:OSWorld 47.5、AndroidWorld 73.3、游戏均值超 CUA 2.4 倍;推理时按步数预算扩展,单调涨分;四个垂直 Agent 参数插值合并。
+- **形式化**：native agent = 轨迹上的参数化策略 $P(t_n,a_n\mid\text{instruction},W_n,o_n,E_n)$；工作记忆（最近 N 步）+ 情景记忆（压缩摘要）的双层记忆让长程任务在截断上下文下可行。
+- **数据**：飞轮循环（CT → SFT → RL，验证函数分流高低质量样本）+ think-aloud CT 标注 + on-policy 交互式标注平台（四层架构）。
+- **多轮 RL**：PPO（明确胜过 GRPO）+ Length-Adaptive GAE + Value Pretraining + Clip Higher；异步服务化 rollout、流式训练、有状态环境、数千实例 VM/浏览器沙箱；训练中熵上升是持续探索的证据。
+- **结果**:OSWorld 47.5、AndroidWorld 73.3、游戏均值超 CUA 2.4 倍；推理时按步数预算扩展，单调涨分；四个垂直 Agent 参数插值合并。
 
-UI-TARS-2 最大的信息量是把「GUI Agent 能不能训」变成了一个工程问题,并且给出了完整答案清单:任务怎么造(混淆/多跳/游戏)、奖励怎么定(结果主导 + 校验脚本)、基础设施怎么搭(异步流式 + 沙箱)、算法怎么调(PPO 三件套)。其中「PPO 在多轮交互域胜过 GRPO」这一条,对 2025 年一边倒的 GRPO 共识是必要的一针清醒剂——**砍 critic 省下的算力,在状态可复用的环境里是要还的**。
+UI-TARS-2 最大的信息量是把「GUI Agent 能不能训」变成了一个工程问题，并且给出了完整答案清单：任务怎么造（混淆 / 多跳 / 游戏）、奖励怎么定（结果主导 + 校验脚本）、基础设施怎么搭（异步流式 + 沙箱）、算法怎么调（PPO 三件套）。其中「PPO 在多轮交互域胜过 GRPO」这一条，对 2025 年一边倒的 GRPO 共识是必要的一针清醒剂——**砍 critic 省下的算力，在状态可复用的环境里是要还的**。
+
+## 参考资料
+
+<References>
+1. ByteDance Seed Team (2025). *UI-TARS-2 Technical Report*. arXiv: [2509.02544](https://arxiv.org/abs/2509.02544). —— 本文主报告，支撑 native GUI agent 形式化、数据飞轮、多轮 PPO、基础设施、推理时扩展、Figures 3/6/11 与 OSWorld / AndroidWorld / Online-Mind2Web 等 benchmark 数字。
+2. ByteDance Seed Team (2025). *UI-TARS: Pioneering Automated GUI Interaction with Native Agents*. arXiv: [2501.12326](https://arxiv.org/abs/2501.12326). —— UI-TARS 系列早期 GUI agent、数据与动作空间背景。
+3. Schulman et al. (2017). *Proximal Policy Optimization Algorithms*. arXiv: [1707.06347](https://arxiv.org/abs/1707.06347). —— PPO、clip objective 与 actor-critic 训练背景。
+4. DeepSeek-AI (2025). *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. arXiv: [2501.12948](https://arxiv.org/abs/2501.12948). —— GRPO / RLVR 对照背景，用于理解 UI-TARS-2 为什么在多轮交互中仍选择 PPO。
+5. Yu et al. (2025). *DAPO: An Open-Source LLM Reinforcement Learning System at Scale*. arXiv: [2503.14476](https://arxiv.org/abs/2503.14476). —— Clip Higher、clip range 解耦和大规模 RL 工程背景。
+6. Yao et al. (2023). *ReAct: Synergizing Reasoning and Acting in Language Models*. arXiv: [2210.03629](https://arxiv.org/abs/2210.03629). —— 思考—行动—观察循环的 agent 形式化背景。
+</References>

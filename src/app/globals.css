@@ -174,3 +174,17 @@ body {
 .hljs-strong {
   font-weight: 700;
 }
+
+/* 正文引用角标 <Cite> 跳转到 #ref-N 时,对应参考资料条目短暂高亮,
+   帮读者定位跳转落点。-mx-2/px-2 让高亮背景不引起布局偏移。 */
+.reference-item:target {
+  animation: reference-flash 1.6s ease-out;
+}
+@keyframes reference-flash {
+  from {
+    background-color: rgb(16 185 129 / 0.15);
+  }
+  to {
+    background-color: transparent;
+  }
+}

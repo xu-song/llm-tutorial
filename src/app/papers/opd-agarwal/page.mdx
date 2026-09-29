@@ -1,0 +1,654 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("opd-agarwal");
+
+<PaperHeader slug="opd-agarwal" />
+
+# OPD：让学生在自己犯错的轨迹上被老师纠正
+
+离线蒸馏有一个尴尬点：老师生成的答案很漂亮，学生训练时只见过这些漂亮轨迹；可一旦学生自己推理，它会走到老师从不经过的坏状态里。**On-Policy Distillation（OPD）** 的核心就是把训练现场搬到学生自己的轨迹上：学生先 rollout，老师不接管生成，只在这些学生访问过的前缀状态上给出 next-token logprob，学生再用逐 token 的蒸馏损失修正自己。<Cite n={[1,4]} />它把 [知识蒸馏](/tutorials/knowledge-distillation) 的稠密监督和 [RLVR](/papers/grpo-deepseek-r1) 的 on-policy 状态覆盖拼在一起，成为 2024—2026 年后训练论文里越来越常见的一条线。原论文用 Algorithm 1 把这条循环写成伪代码：
+
+<figure className="my-6">
+  <img src="./alg-1-gkd.svg" alt="GKD 训练算法伪代码：每步以概率 λ 让学生采样输入并自回归生成输出（on-policy 分支），否则从固定数据集采样；然后在批次上最小化老师与学生 token 级分布的散度 D，更新学生参数 θ" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">GKD 训练算法：以概率 λ 在学生自生成数据（on-policy）与固定数据集间切换，逐 token 最小化老师—学生散度</span>
+    <span className="figure-caption-source">图源：Agarwal et al., <em>On-policy Distillation of Language Models</em>（arXiv:2306.13649）Algorithm 1</span>
+  </figcaption>
+</figure>
+
+这里最重要的超参数是 **student data fraction λ**：λ=1 退化为纯 on-policy 蒸馏（学生轨迹 + 老师打分），λ=0 退化为固定数据集上的 supervised KD，中间值则混合两个数据源——这正对应第六节 verl 实现里的 `data fraction` 类配置。
+
+> 📌 前置：建议先读 [在线蒸馏](/tutorials/on-policy-distillation)、[前向 / 反向 KL](/tutorials/forward-reverse-kl)、[GRPO 与 DeepSeek-R1](/papers/grpo-deepseek-r1)。本文不是单篇论文复述，而是按 verl OPD 文档整理的一条论文脉络：GKD、MiniLLM/PG OPD、Thinking Machines OPD、MOPD，以及 Qwen3、DeepSeek、GLM、Nemotron、MiMo 等技术报告里的落地用法。<Cite n={4} />
+
+## 一、动机：离线蒸馏输在状态分布
+
+传统 SFT / KD 的数据通常来自人工、老师模型或离线语料。训练时，学生看到的是：
+
+$$
+(x, y) \sim p_{\text{teacher/data}}
+$$
+
+但部署时，真正决定下一个 token 的上下文来自学生自己：
+
+$$
+y_{<t} \sim \pi_\theta(\cdot\mid x)
+$$
+
+这就是 exposure bias：训练状态分布和生成状态分布不一致。<Cite n={1} />长 CoT、代码修复、工具调用尤其严重，因为一步偏离会创造一个老师语料里没有的前缀，后面每一步都在陌生状态里继续决策。
+
+OPD 的反问是：**如果学生总会犯自己的错，那为什么不让老师直接在这些错上教？**
+
+这篇论文的主结果先给出直观印象：在摘要（XSum）、翻译（WMT）和数学推理（GSM8K）三类任务上，把 T5-XL（约 3B）老师蒸给不同大小的学生，on-policy GKD 相对 supervised FT、supervised KD 和 SeqKD 的提升幅度最大——摘要任务相对提升约 111%，翻译约 70%，数学推理约 90%。<Cite n={1} />
+
+<figure className="my-6">
+  <img src="./fig-1-main-results.svg" alt="GKD 主结果：在 XSum 摘要、WMT 翻译、GSM8K 推理三类任务上，不同学生规模（T5-Small/Base/Large）经 on-policy GKD 蒸馏后的性能提升柱状图，横向虚线为 T5-XL 老师水平，on-policy GKD 相对基线提升最大" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">GKD 主结果：XSum / WMT / GSM8K 上不同学生规模的蒸馏对比，横虚线为 T5-XL 老师水平</span>
+    <span className="figure-caption-source">图源：Agarwal et al., <em>On-policy Distillation of Language Models</em>（arXiv:2306.13649）Figure 1</span>
+  </figcaption>
+</figure>
+
+它的训练循环可以写成四步：
+
+1. 从 prompt $x\sim p_{\mathrm{data}}$ 出发；
+2. 学生当前策略生成回答 $y\sim\pi_\theta(\cdot\mid x)$；
+3. 对每个前缀状态 $s_t=(x,y_{<t})$，老师 $\nu$ 只做打分，返回 $\nu(\cdot\mid s_t)$ 或采样 token 的 logprob；
+4. 学生在这些自己访问过的状态上最小化逐 token 蒸馏信号。
+
+verl 文档给出的统一目标是：<Cite n={4} />
+
+$$
+\mathcal{L}_{\mathrm{OPD}}(\theta)
+=\mathbb{E}_{x, y}\left[
+\frac{1}{|y|}\sum_{t=1}^{|y|}
+D\left(\pi_\theta(\cdot\mid s_t),\nu(\cdot\mid s_t),y_t\right)
+\right]
+$$
+
+这里 $D$ 可以是完整分布级 KL，也可以是只看采样 token 的估计器。不同 OPD 变体，本质上就是在问：**老师给什么信号？学生用普通反传学，还是用 policy gradient 学？**
+
+## 二、三种训练范式的坐标
+
+OPD 最容易理解的方式，是把“状态来源”和“监督密度”分开看：<Cite n={[1,4]} />
+
+| 方法 | 状态来自谁 | 监督信号 | 典型问题 |
+|---|---|---|---|
+| SFT / 离线 KD | 老师、人工或固定数据 | 逐 token 稠密 | 状态分布错配，学生跑偏后没人教 |
+| RLVR / GRPO | 学生自己 | 终局或序列级稀疏奖励 | 信用分配慢，只有答对 / 答错信号 |
+| OPD | 学生自己 | 老师逐 token 稠密信号 | 老师打分贵，loss 方向和实现细节要选对 |
+
+这张表解释了 OPD 为什么突然重要：它不是替代 RL，也不是回到 SFT，而是在两者之间补上一个空位。论文在 XSum 上的两组实验直接支撑了这张表的右列：on-policy GKD 一致超过 supervised KD、ImitKD、f-distill 等离线基线，且只用 5% 训练数据的 on-policy GKD 就能超过用全量数据的 supervised KD——数据效率是 on-policy 信号的核心红利。<Cite n={1} />
+
+<figure className="my-6">
+  <div className="grid gap-4 md:grid-cols-2">
+    <figure className="m-0">
+      <img src="./fig-2-xsum-baselines.svg" alt="XSum 蒸馏基线对比：温度采样与贪心采样两种评测下，on-policy GKD（JSD 0.9 或 Forward KL）相对 Supervised KD、ImitKD、f-distill 的 ROUGE-2 得分" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+      <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+        <span className="figure-caption-main">XSum 上 GKD 与蒸馏基线对比（贪心 / 温度采样）</span>
+        <span className="figure-caption-source">图源：Agarwal et al.（arXiv:2306.13649）Figure 2</span>
+      </figcaption>
+    </figure>
+    <figure className="m-0">
+      <img src="./fig-3-data-scaling.svg" alt="XSum 数据规模实验：训练数据从 0.5% 到 100% 缩放时，on-policy GKD 与基线的 ROUGE-2 曲线，on-policy GKD 用 5% 数据即超过全量数据的基线" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+      <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+        <span className="figure-caption-main">数据效率：5% 数据的 on-policy GKD 超过 100% 数据的离线基线</span>
+        <span className="figure-caption-source">图源：Agarwal et al.（arXiv:2306.13649）Figure 3</span>
+      </figcaption>
+    </figure>
+  </div>
+</figure>
+
+<figure className="my-6">
+  <img src="./fig-opd-taxonomy.svg" alt="OPD 在训练范式中的位置：SFT/KD 提供密集监督但状态来自离线数据，RLVR 使用学生 on-policy 状态但奖励稀疏，OPD 同时使用学生 rollout 和逐 token 老师信号，MOPD 进一步加入多老师路由" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">OPD 在训练范式中的位置：SFT/KD 提供密集监督但状态来自离线数据，RLVR 使用学生 on-policy 状态但奖励稀疏，OPD 同时使用学生 rollout 和逐 token 老师信号，MOPD 进一步加入多老师路由</span>
+    <span className="figure-caption-source">图源：根据 Agarwal et al., <em>On-policy Distillation of Language Models</em>（arXiv:2306.13649）与 veRL OPD 文档重绘</span>
+  </figcaption>
+</figure>
+
+- 相比 SFT，它覆盖学生真实会进入的坏前缀；
+- 相比 RLVR，它不用等最终答案对错，每个 token 都有老师信号；
+- 相比 RLHF，它不需要训练奖励模型，老师本身就是打分器；
+- 相比普通蒸馏，它更贵，因为每轮都要 student rollout + teacher scoring。
+
+Thinking Machines 的博客把这个优势说得很直接：在 Qwen3-8B-Base 学生、Qwen3 系列老师的数学实验中，从 400K SFT checkpoint 出发，OPD 约 150 steps（约 77K prompts，每 prompt 4 条 rollout）把 AIME’24 提到 70%；他们估算相对继续 SFT 到 2M prompts 有 9—30× 成本优势。Qwen3 技术报告里，OPD 还以约 1,800 GPU hours 达到 AIME’24 74.4，而 RL 路线约 17,920 GPU hours 达到 67.6。<Cite n={5} />不要把这些数当成通用定律，但它们说明一个事实：**密集老师信号能显著改善 RL 式后训练的信用分配效率**。
+
+## 三、GKD OPD：完整分布上的前向 KL
+
+Agarwal et al. 的 GKD（Generalized Knowledge Distillation）把很多蒸馏形式统一成一个框架：数据可以来自老师、学生或二者混合，损失可以是不同 KL / divergence。<Cite n={1} />放在 OPD 语境里，GKD OPD 的典型形式是在学生访问的状态 $s_t$ 上，让学生覆盖老师分布：
+
+$$
+D_t
+=\sum_{v\in V}\nu(v\mid s_t)\log\frac{\nu(v\mid s_t)}{\pi_\theta(v\mid s_t)}
+$$
+
+这是**前向 KL** $D_{KL}(\nu\Vert\pi_\theta)$：老师认为有概率的 token，学生都要尽量覆盖。优点是信号完整、梯度直接，像普通交叉熵一样反传；缺点是完整词表太贵，尤其是大词表 + 长序列 + 大 batch。
+
+verl 因此实现了 teacher top-k 近似：只取老师分布里概率最高的 $k$ 个 token：<Cite n={4} />
+
+$$
+\mathcal{L}_{\mathrm{GKD}}^{(k)}(s_t)
+=\sum_{v\in \operatorname{TopK}(\nu)}\nu(v\mid s_t)
+\left[\log \nu(v\mid s_t)-\log \pi_\theta(v\mid s_t)\right]
+$$
+
+这不是随便省算力，而是受推理服务接口限制：teacher server 通常容易返回 sampled token 与 teacher top-k token 的 logprobs，却不一定支持对任意 student token id 做高效 gather。<Cite n={4} />于是工程上更自然的是 teacher-top-k forward KL，而不是完整 reverse KL。
+
+在 verl 里，这条路线对应：
+
+```yaml
+distillation:
+  distillation_loss:
+    loss_mode: forward_kl_topk
+    topk: 128
+    use_policy_gradient: false
+```
+
+怎么读这个配置？`forward_kl_topk` 表示老师给 top-k 分布；`use_policy_gradient: false` 表示学生直接反传这个分布级损失，而不是把它塞进 PPO/GRPO 的 policy-gradient 目标。Tinker、TRL 与 verl 对两条路线的源码实现，见第十节源码走读。
+
+## 四、PG OPD：把反向 KL 变成 token reward
+
+另一条 OPD 路线来自 MiniLLM 与 Thinking Machines 的实现口径：优化反向 KL，期望在学生自己的采样 token 上取：<Cite n={[2,3]} />
+
+$$
+D_{KL}\left(\pi_\theta(\cdot\mid s_t)\Vert\nu(\cdot\mid s_t)\right)
+=\mathbb{E}_{y_t\sim\pi_\theta}\left[
+\log\pi_\theta(y_t\mid s_t)-\log\nu(y_t\mid s_t)\right]
+$$
+
+对已经采样出的 token $y_t$，可以得到一个 k1 估计器：
+
+$$
+D_t=\operatorname{sg}\left[
+\log\pi_\theta(y_t\mid s_t)-\log\nu(y_t\mid s_t)\right]
+$$
+
+于是 token-level reward 就是它的相反数：
+
+$$
+r_t=\operatorname{sg}\left[
+\log\nu(y_t\mid s_t)-\log\pi_\theta(y_t\mid s_t)\right]
+$$
+
+这就是为什么 PG OPD 看起来很像 RL：老师不是给一个最终分，而是给每个 token 一个“像不像老师”的即时奖励。<Cite n={[2,3,4]} />`sg`（stop-gradient）很关键，因为 reward 应该被当作标量反馈，而不是让梯度穿回 reward 公式本身。
+
+verl 的配置形状是：
+
+```yaml
+distillation:
+  distillation_loss:
+    loss_mode: k1
+    use_policy_gradient: true
+    policy_loss_mode: vanilla
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+```
+
+这里的直觉是：学生采样了某个 token，如果老师比学生更认可这个 token（$\log\nu-\log\pi_\theta>0$），它就得到正 advantage；如果老师更不认可，就得到负 advantage。然后用 PPO-style importance sampling 更新策略。
+
+用一个极小例子看这个 token reward：
+
+<CodeRunner defaultCode={String.raw`
+import numpy as np
+
+# 学生 rollout 中已经采样出的 6 个 token。
+# logp_student 是学生当时给这些 token 的 logprob；logp_teacher 是老师在同一前缀下给的 logprob。
+logp_student = np.array([-1.2, -0.7, -2.0, -1.1, -0.5, -1.8])
+logp_teacher = np.array([-0.8, -1.4, -1.6, -0.9, -0.6, -2.4])
+
+reverse_kl_k1 = logp_student - logp_teacher
+reward = -reverse_kl_k1
+
+for i, (ls, lt, r) in enumerate(zip(logp_student, logp_teacher, reward), 1):
+    verdict = "鼓励" if r > 0 else "压低"
+    print(f"token {i}: student={ls:>4.1f}, teacher={lt:>4.1f}, reward={r:>4.1f} -> {verdict}")
+
+print("\n平均 reverse-KL 估计:", reverse_kl_k1.mean().round(3))
+print("平均 token reward:   ", reward.mean().round(3))
+`} />
+
+这里要注意一个容易混淆的点：GKD OPD 的前向 KL 和 PG OPD 的反向 KL 都可以叫 OPD，因为 OPD 的核心不是 KL 方向，而是**状态来自学生自己**。KL 方向决定行为：前向 KL 更覆盖老师所有高概率模式；反向 KL 更 mode-seeking，倾向于让学生抓住老师认为最好的若干模式。
+
+原论文用一组很直观的实验量化了这件事：固定用 on-policy GKD 蒸馏 T5-small，只换散度（forward KL → JSD(β) → reverse KL）和评测温度，画“质量—多样性”曲线。从 forward KL 走向 reverse KL，生成多样性（Self-BLEU）单调下降，但高温采样下 mode-seeking 散度的 ROUGE-2 明显更好；降低温度会同时压缩多样性和散度间差距。<Cite n={1} />
+
+<figure className="my-6">
+  <img src="./fig-4-divergence-diversity.svg" alt="散度选择对质量—多样性权衡的影响：横轴为生成相似度 Self-BLEU，纵轴为 ROUGE-2，不同散度（Forward KL、JSD 0.1/0.5/0.9、Reverse KL）与采样温度的组合；从 forward KL 到 reverse KL 多样性下降而质量上升" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">散度决定行为：从 forward KL 到 reverse KL，多样性下降、高温下质量上升</span>
+    <span className="figure-caption-source">图源：Agarwal et al.（arXiv:2306.13649）Figure 4</span>
+  </figcaption>
+</figure>
+
+这对教程里 GKD（前向）与 PG OPD（反向）两条路线的选择很有参考价值：**开放生成任务**（对话、摘要）通常更在意覆盖度与多样性，前向 KL / 小 β JSD 更稳；**推理与指令任务**通常有唯一正确答案倾向，反向 KL 的 mode-seeking 反而是优势——论文在 FLAN 指令蒸馏上同样发现 reverse KL 明显更好（见 Figure 10）。
+
+## 五、MOPD：把多个专家老师蒸回一个学生
+
+2026 年后，OPD 更常出现在多专家合并场景：数学老师、代码老师、指令老师、视觉老师、agent 老师各自在自己的领域更强，但线上不想维护一堆模型，也不想让路由系统决定每次调用谁。<Cite n={[6,7,9]} />**Multi-Teacher OPD（MOPD）** 的目标就是把多个 specialized policies 合回一个 student。
+
+训练时的关键不是公式，而是 routing：每个样本带一个字段，告诉系统该找哪个老师打分。verl 默认字段是：<Cite n={4} />
+
+```yaml
+distillation:
+  teacher_key: data_source
+```
+
+如果样本的 `data_source` 是 `openai/gsm8k`，就路由到 key 匹配的 math teacher；如果是代码数据，就路由到 code teacher。这样 student 的状态仍然是 on-policy 的，但 teacher signal 由域专家提供。
+
+这也是为什么 OPD 文档的参考资料会同时出现 [Qwen3](/papers/qwen3)、[DeepSeek-V4](/papers/deepseek-v4)、[GLM-5](/papers/glm-5)、Nemotron-Cascade 2、[MiMo-v2-Flash](/papers/mimo-v2-flash)、Kimi K3 等技术报告：它们讨论的已经不是“能不能蒸馏”，而是**如何把多个 RL / 专家 / 多域能力压回一个部署模型**。<Cite n={[6,7,9]} />
+
+把 MOPD 放进训练流水线，可以想成下面这张表：
+
+| 样本域 | 学生做什么 | 老师做什么 | 学生学到什么 |
+|---|---|---|---|
+| 数学 | 自己写解题过程 | 数学老师逐 token 打分 | 推理链与答案格式 |
+| 代码 | 自己生成 patch / 程序 | 代码老师逐 token 打分 | 代码风格、API 选择、修复套路 |
+| 指令 | 自己回答用户请求 | 通用对话老师打分 | 指令遵循与安全边界 |
+| 多模态 / Agent | 自己走工具轨迹 | 领域老师或环境老师打分 | 跨模态、跨步骤的行为偏好 |
+
+MOPD 的风险也很明确：如果 routing key 脏了，学生会在错老师身上学；如果数据拼接不 shuffle，长时间只激活一个 teacher，会导致训练吞吐和能力覆盖都不均衡；如果老师 tokenizer / vocab 与学生不一致，logprob 对齐会直接变成工程灾难。因此 verl 文档明确建议 teacher 与 student 通常选同一模型家族。
+
+值得注意的是，单老师的 on-policy 优势在原论文里就已系统量化过。WMT 翻译上的散度 × 数据来源消融（Figure 6）和 GSM8K 上的同类消融（Figure 7、8）给出了一致结论：**纯 on-policy（λ=1）几乎在所有散度下都优于 mixed（λ=0.5）和 supervised（λ=0）**；GSM8K 上只要 on-policy 比例超过 25%，性能就开始单调上升。<Cite n={1} />
+
+<figure className="my-6">
+  <div className="grid gap-4 md:grid-cols-2">
+    <figure className="m-0">
+      <img src="./fig-7-gsm8k-ablation.svg" alt="GSM8K 消融：散度（Forward KL、JSD、Reverse KL）× 学生数据比例（100%、50%、0%）的准确率提升矩阵，100% on-policy 最优" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+      <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+        <span className="figure-caption-main">GSM8K 散度 × 数据来源消融：纯 on-policy 最优</span>
+        <span className="figure-caption-source">图源：Agarwal et al.（arXiv:2306.13649）Figure 7</span>
+      </figcaption>
+    </figure>
+    <figure className="m-0">
+      <img src="./fig-8-onpolicy-fraction.svg" alt="GSM8K 上 on-policy 数据比例从 0% 到 100% 变化时测试准确率曲线，超过 25% 后性能随比例上升" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+      <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+        <span className="figure-caption-main">on-policy 比例扫描：超过 25% 后性能随比例单调上升</span>
+        <span className="figure-caption-source">图源：Agarwal et al.（arXiv:2306.13649）Figure 8</span>
+      </figcaption>
+    </figure>
+  </div>
+</figure>
+
+<figure className="my-6">
+  <img src="./fig-6-wmt-ablation.svg" alt="WMT 英德翻译消融：T5-XL→Small 与 T5-XL→Base 两组学生下，五种散度 × 三档学生数据比例的 BLEU 提升矩阵，100% on-policy 列整体最优" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">WMT 消融：两种学生规模下，100% on-policy（最左列）整体优于 mixed 与 supervised</span>
+    <span className="figure-caption-source">图源：Agarwal et al.（arXiv:2306.13649）Figure 6</span>
+  </figcaption>
+</figure>
+
+## 六、OPD 如何接到 PPO / GRPO 管线里
+
+verl 的实现把 OPD 接在 PPO/GRPO actor training pipeline 上。<Cite n={4} />开启蒸馏后，actor loss 从普通 `ppo_loss` 切到 `distillation_ppo_loss`；最终目标可以只做蒸馏，也可以和任务奖励叠加：
+
+$$
+\mathcal{L}
+=\mathcal{L}_{\mathrm{policy}}
++\lambda_{\mathrm{distill}}\mathcal{L}_{\mathrm{distill}}
+$$
+
+对应配置是：
+
+```yaml
+distillation:
+  distillation_loss:
+    use_task_rewards: true
+    distillation_loss_coef: 1.5
+```
+
+如果把 `use_task_rewards` 设为 `false`，就等于关闭 PPO/GRPO 的任务奖励项，只优化 teacher distillation loss。这在“把强老师能力搬到学生”时很自然；如果目标是“既学老师风格，又继续追环境 reward”，才需要打开任务奖励混合。
+
+这不是凭空的配置项：原论文把 on-policy GKD 和 RLAIF 拼成同一个目标（即上面的 $\alpha$ 加权形式），在 XSum 上同时优化 entailment 奖励和蒸馏损失。结果显示随 $\alpha$ 增大，ROUGE-2 提升而事实一致性增幅放缓；更重要的是，**GKD + RL 的学生比 12× 大的老师本身生成更事实一致的摘要**——蒸馏不是把老师的幻觉也一起搬过来。<Cite n={1} />
+
+<figure className="my-6">
+  <img src="./fig-5-rlaif-gkd.svg" alt="RLAIF 与 on-policy GKD 组合实验：横轴为摘要质量提升 ΔROUGE-2，纵轴为事实一致性提升 ΔEntailment，不同 α 值的权衡曲线；GKD+RL 相对 RLEF 基线在两个维度上均更优" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">RLAIF + on-policy GKD：α 控制蒸馏强度，GKD+RL 比 RLEF\* 和老师本身更事实一致</span>
+    <span className="figure-caption-source">图源：Agarwal et al.（arXiv:2306.13649）Figure 5</span>
+  </figcaption>
+</figure>
+
+文档还建议多数 OPD run 关闭标准 PPO/GRPO reference-policy KL：<Cite n={4} />
+
+```yaml
+actor_rollout_ref:
+  actor:
+    use_kl_loss: false
+algorithm:
+  use_kl_in_reward: false
+```
+
+原因是 student 已经在被 teacher 拉住；再加 reference policy KL，可能变成两股约束同时拉扯：一个要像旧参考模型，一个要像当前 teacher。
+
+## 七、实现细节：老师只打分，不生成
+
+OPD 的 teacher server 做的不是“替学生写答案”，而是对已经生成好的 prompt + response 做 scoring。verl 文档里的流程大致是：<Cite n={4} />
+
+1. `AgentLoopManager.generate_sequences` 让 student rollout；
+2. 每个 sample 在 `_agent_loop_postprocess` 后触发 teacher logprob 计算；
+3. `_compute_teacher_logprobs` 根据 `teacher_key` 找到对应 teacher；
+4. teacher inference server 接收完整前缀，只返回 logprobs；
+5. 输出写成 `teacher_ids` 与 `teacher_logprobs`，shape 为 `(S, 1 or K)`。
+
+两个实现点很实用：
+
+- teacher temperature 强制为 1.0，因为这里要的是打分分布，不是采样风格；
+- teacher 的 `response_length` 设成 1，本质上是在“score prefix + dummy token”，不是让 teacher 继续生成长答案。
+
+top-k 分支还会记录一组诊断指标：
+
+| 指标 | 含义 |
+|---|---|
+| `actor/distillation/loss` | 未缩放的蒸馏损失 |
+| `actor/distillation/student_mass` | 学生给 teacher top-k token 分配了多少概率质量 |
+| `actor/distillation/teacher_mass` | teacher top-k 覆盖了多少 teacher 概率质量 |
+| `actor/distillation/overlap_ratio` | teacher top-k 与 student top-k 的重合度 |
+| `actor/distillation/overlap_token_advantage` | 重合 token 上的优势信号 |
+
+调试时有一个简单 sanity check：把 student 和 teacher 设成同一个模型，loss 应接近 0。<Cite n={4} />不会完全为 0，因为训练引擎和推理引擎的数值路径可能不同。
+
+## 八、该选 GKD、PG OPD，还是混合 RL？
+
+可以用一个粗略决策表：
+
+| 目标 | 更像哪条路线 | 原因 |
+|---|---|---|
+| 想最大程度复刻老师完整分布 | GKD / forward_kl_topk | 老师 top-k 分布信息更完整，直接反传稳定 |
+| 想让学生在自己采样 token 上做 mode-seeking 修正 | PG OPD / reverse KL | 信号只作用在真实采样动作上，更像 RL |
+| 想保留环境奖励，同时学老师风格 | OPD + PPO/GRPO task rewards | task reward 管结果，teacher loss 管过程偏好 |
+| 有多个领域专家要合并 | MOPD | routing 到不同 teacher，压回单个 student |
+| 老师极贵，prompt 很少 | 谨慎用 OPD 或混合蒸馏 | on-policy scoring 成本高，可能要复用样本或降低 teacher 频率 |
+
+最重要的边界是：OPD 不是“免费 RL”。它把 reward model 换成 teacher model，把稀疏奖励换成密集 logprob，但 teacher 在线打分仍然贵。它适合的场景是：老师比学生强、teacher scoring 可承受、目标能力能在 token-level 分布里体现，且离线 SFT 已经被 exposure bias 卡住。
+
+两个规模化的证据可以佐证“OPD 适合推理与指令任务”：GSM8K 上，on-policy GKD 蒸出的 T5 学生大幅超过全部 KD 基线，甚至用 77M 的 T5-small 逼近 175B davinci-002 的 few-shot 水平；FLAN 指令蒸馏上，on-policy + reverse KL 在 held-out 的 MMLU / BBH 上同时超过 supervised KD 与 ImitKD——泛化到没见过的任务，说明学到的是能力而不只是表面风格。<Cite n={1} />
+
+<figure className="my-6">
+  <img src="./fig-9-gsm8k-baselines.svg" alt="GSM8K 上 on-policy GKD 与各蒸馏基线在不同学生规模下的测试准确率对比，横排参照 davinci-002 175B 与 PaLM 540B 的 few-shot 水平" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">GSM8K 全基线对比：on-policy GKD 学生逼近更大模型的 few-shot 水平</span>
+    <span className="figure-caption-source">图源：Agarwal et al.（arXiv:2306.13649）Figure 9</span>
+  </figcaption>
+</figure>
+
+<figure className="my-6">
+  <img src="./fig-10-flan-task-agnostic.svg" alt="FLAN 任务无关蒸馏：held-out MMLU 与 BBH 基准上各蒸馏方法的准确率提升，on-policy GKD（Reverse KL）最优" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">FLAN 指令蒸馏：on-policy + reverse KL 在 held-out MMLU / BBH 上泛化最好</span>
+    <span className="figure-caption-source">图源：Agarwal et al.（arXiv:2306.13649）Figure 10</span>
+  </figcaption>
+</figure>
+
+## 九、局限：OPD 的坑不在口号，在分布细节
+
+1. **老师不一定知道学生错在哪里**：老师只给 next-token 概率，不会显式解释“为什么这条推理路线错了”。如果学生已经走到荒谬前缀，老师的局部修正未必能救回全局。
+2. **KL 方向改变行为**：前向 KL 偏覆盖，反向 KL 偏择一。数学推理可能喜欢反向 KL 的尖锐模式；开放对话可能更需要覆盖多样表达。
+3. **teacher top-k 近似会漏概率质量**：如果 `teacher_mass` 低，top-k loss 只看到老师分布的一小块，学生可能学到截断后的假信号。
+4. **MOPD 依赖干净路由**：多老师不是越多越好，错误路由会制造冲突监督。
+5. **和 reference KL 可能互相打架**：OPD 已经有 teacher anchor，额外 KL 应该是有意识的安全绳，而不是默认套上。
+
+这些限制解释了为什么 OPD 文档不像传统论文那样只给一个 loss，而是把 loss mode、teacher pool、routing、top-k metrics、PPO/GRPO 组合项都列出来：真正决定效果的是整条训练系统。
+
+## 十、源码走读：三个实现，三种复杂度
+
+论文本身没有发布官方代码库，但三条实现路线各自完整覆盖了 Algorithm 1 的核心循环，复杂度递增，适合按顺序对照阅读：<Cite n={[10,11,12]} />
+
+| 实现 | 路线 | 复杂度 | 适合谁读 |
+|---|---|---|---|
+| Tinker cookbook | PG OPD（reverse KL 作 reward） | ~80 行核心逻辑 | 想最快看懂 OPD 循环的人 |
+| TRL `GKDTrainer` | GKD（广义 JSD，直接反传） | ~450 行 | 想复现论文实验的人 |
+| verl `distillation/` | 全家桶（top-k GKD / PG / MOPD / RL 混合） | 多模块 | 想做大规模生产训练的人 |
+
+### 10.1 Tinker cookbook：最小可读的 PG OPD
+
+Thinking Machines 把博客里的 OPD 配方开源成了 [tinker-cookbook](https://github.com/thinking-machines-lab/tinker-cookbook/tree/main/tinker_cookbook/recipes/distillation)，核心逻辑只有几十行（`tinker_cookbook/distillation/train_on_policy.py`），是理解「reverse KL 当 reward」最短的路径：<Cite n={12} />
+
+```python
+# tinker_cookbook/distillation/train_on_policy.py（节选，注释为本站所加）
+async def incorporate_kl_penalty(data_D, teacher_clients_D, dataset_indices_D,
+                                 kl_penalty_coef, kl_discount_factor):
+    # 把 prompt + 学生 rollout 拼成完整序列喂给老师
+    full_sequence_inputs_D = [
+        datum.model_input.append_int(datum.loss_fn_inputs["target_tokens"].data[-1])
+        for datum in data_D
+    ]
+    # 老师只做一件事：对完整前缀返回逐 token logprob（scoring，不是生成）
+    teacher_logprobs_D = await asyncio.gather(*[
+        teacher_client.compute_logprobs_async(sequence_input)
+        for teacher_client, sequence_input in zip(teacher_clients_D, full_sequence_inputs_D)
+    ])
+
+    # 学生 rollout 时已经顺手记下了自己的 logprob
+    sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
+    float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
+
+    # k1 估计器一行写完：reverse_kl = logπ_student - logπ_teacher
+    # （KL(π‖ν) ≈ E_{y~π}[logπ(y) - logν(y)]，y 就是学生刚采的 token）
+    reverse_kl = [
+        (sampled_logprobs - torch.tensor(teacher_logprobs[1:])) * mask
+        for teacher_logprobs, sampled_logprobs, mask in
+        safezip(teacher_logprobs_D, sampled_logprobs_D, float_masks)
+    ]
+
+    for i, datum in enumerate(data_D):
+        # token reward = -reverse KL，即 r_t = logν(y_t) - logπ_θ(y_t)
+        kl_advantages = -kl_penalty_coef * float_masks[i] * reverse_kl[i]
+        datum.loss_fn_inputs["advantages"] = ... + kl_advantages  # 直接写进 RL 训练数据
+    ...
+```
+
+接下来的事全部交给通用 RL 循环：`advantages` 进 importance-sampling policy gradient loss，学生更新，下一轮继续 rollout。对比第四节公式，`reverse_kl` 一行就是 k1 估计器，`-kl_penalty_coef * reverse_kl` 一行就是 token reward——没有任何多余的机制。整个文件的训练主循环 `do_sync_training` 也只有几十行：取 batch → 学生 rollout（每 prompt 4 条）→ 老师打分 → 训练 step。<Cite n={12} />
+
+这个实现还展示了 OPD 的一个重要工程事实：**老师可以只是一个 logprob API**。Tinker 的 `teacher_client.compute_logprobs_async` 是远程调用，学生训练与老师打分通过服务解耦——这正对应第七节「teacher server 只打分，不生成」的架构。
+
+### 10.2 TRL `GKDTrainer`：与论文对齐的参考实现
+
+HuggingFace TRL 的 `GKDTrainer`（`trl/experimental/gkd/gkd_trainer.py`）把 Algorithm 1 的三要素——λ 数据切换、广义 JSD 损失、学生 rollout——完整落到了工程上。<Cite n={10} />
+
+先看训练主循环，对应 Algorithm 1 第 3—9 行的 λ 分支：
+
+```python
+# trl/experimental/gkd/gkd_trainer.py（节选，注释为本站所加）
+class GKDTrainer(SFTTrainer):
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        # 以概率 lmbda 决定本 step 用谁的数据 —— 即 Algorithm 1 第 4—5 行
+        # u ~ Uniform(0,1)，u <= λ 走学生自生成（on-policy）分支
+        if random.random() <= self.lmbda:
+            with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
+                # 学生对 prompt 自己 rollout，生成新序列与标签
+                new_input_ids, new_attention_mask, new_labels = self.generate_on_policy_outputs(
+                    unwrapped_model, inputs, self.generation_config
+                )
+            inputs["input_ids"] = new_input_ids
+            inputs["attention_mask"] = new_attention_mask
+            inputs["labels"] = new_labels
+        elif self.seq_kd:
+            # λ 落空且开启 seq_kd 时改为老师生成 —— SeqKD 基线
+            with unwrap_model_for_generation(self.teacher_model, self.accelerator) as unwrapped_model:
+                new_input_ids, new_attention_mask, new_labels = self.generate_on_policy_outputs(
+                    unwrapped_model, inputs, self.generation_config
+                )
+            inputs["input_ids"] = new_input_ids
+            # ...同上替换
+        # 不管数据来自谁，损失都在老师—学生 token 级分布上计算
+        loss = super().training_step(model, inputs, num_items_in_batch)
+        return loss
+```
+
+再看损失函数，对应论文 Eq (1) 的广义 JSD（β 在两个端点分别退化为前向 / 反向 KL）：
+
+```python
+# trl/experimental/gkd/gkd_trainer.py（节选，注释为本站所加）
+@staticmethod
+def generalized_jsd_loss(student_logits, teacher_logits, labels=None, beta=0.5, temperature=1.0, ...):
+    # 两个模型对同一前缀各给一份全词表 logits
+    student_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
+    teacher_log_probs = F.log_softmax(teacher_logits / temperature, dim=-1)
+
+    if beta == 0:
+        # β=0：前向 KL（老师认为可能的 token，学生都要覆盖）
+        jsd = F.kl_div(student_log_probs, teacher_log_probs, reduction="none", log_target=True)
+    elif beta == 1:
+        # β=1：反向 KL（mode-seeking，学生聚焦老师最认可的模式）
+        jsd = F.kl_div(teacher_log_probs, student_log_probs, reduction="none", log_target=True)
+    else:
+        # 混合分布 M = β·teacher + (1-β)·student，用 logsumexp 保证数值稳定
+        mixture_log_probs = torch.logsumexp(
+            torch.stack([student_log_probs + torch.log1p(-beta),
+                         teacher_log_probs + torch.log(beta)]), dim=0)
+        # JSD(β) = β·KL(teacher‖M) + (1-β)·KL(student‖M)，即论文 Eq (1)
+        kl_teacher = F.kl_div(mixture_log_probs, teacher_log_probs, reduction="none", log_target=True)
+        kl_student = F.kl_div(mixture_log_probs, student_log_probs, reduction="none", log_target=True)
+        jsd = beta * kl_teacher + (1 - beta) * kl_student
+
+    # 只在 completion 位置计算（labels=-100 屏蔽 prompt 与 padding）
+    mask = labels != -100
+    jsd = jsd[mask]
+    return jsd.sum() / mask.sum().clamp_min(1)
+```
+
+学生 rollout 的输出还要做一次 EOS 掩码——`generate` 返回的序列里，第一个 EOS 之后的 token 全部置 `-100`，避免把截断噪声算进损失：
+
+```python
+# trl/experimental/gkd/gkd_trainer.py（节选，注释为本站所加）
+@staticmethod
+def generate_on_policy_outputs(model, inputs, generation_config):
+    generated_tokens = model.generate(
+        input_ids=inputs["prompts"],           # 只喂 prompt
+        attention_mask=inputs["prompt_attention_mask"],
+        generation_config=generation_config,   # temperature、do_sample=True
+        return_dict_in_generate=True,
+    ).sequences
+    completion_ids = generated_tokens[:, inputs["prompts"].shape[1]:]
+
+    # 找到每条序列第一个 EOS，其后的位置全部置 0
+    is_eos = torch.isin(completion_ids, torch.tensor(generation_config.eos_token_id, ...))
+    eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), ...)
+    eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
+    completion_mask = (torch.arange(is_eos.size(1)).expand_as(is_eos) <= eos_idx.unsqueeze(1)).int()
+
+    # prompt 部分也置 -100：只有学生自己生成的 token 参与蒸馏损失
+    new_labels = generated_tokens.clone()
+    new_labels[:, inputs["prompts"].shape[1]:] *= completion_mask
+    new_labels[completion_mask_expanded == 0] = -100
+    new_labels[:, :inputs["prompts"].shape[1]] = -100
+    return generated_tokens, new_attention_mask, new_labels
+```
+
+注意 TRL 在构造函数里做了一个显式检查：学生与老师词表大小不一致会直接报错，因为 GKD 要逐位置比较老师的**完整** next-token 分布——这正是第五节 MOPD 警告「老师 tokenizer / vocab 必须与学生一致」的代码依据；跨词表场景 TRL 建议改用 GOLD。完整源码见 [gkd_trainer.py](https://github.com/huggingface/trl/blob/main/trl/experimental/gkd/gkd_trainer.py) 与 [GKD 文档](https://huggingface.co/docs/trl/gkd_trainer)。<Cite n={10} />
+
+### 10.3 verl：生产级全家桶
+
+PG OPD 的生产级实现在 verl 的 `verl/trainer/distillation/losses.py`。`distillation_loss` 里有一个开关 `use_policy_gradient`，它决定同一份逐 token 蒸馏损失走两条完全不同的反传路径：<Cite n={11} />
+
+```python
+# verl/trainer/distillation/losses.py（节选，注释为本站所加）
+def distillation_loss(config, distillation_config, model_output, data):
+    # 先算出逐 token 的蒸馏损失矩阵 (bsz, resp_len)
+    distillation_losses, distillation_metrics = distillation_loss_fn(...)
+    if loss_config.use_policy_gradient:
+        # PG 路线：把负蒸馏损失当作 reward，走 policy gradient 更新
+        # 参考实现即 Thinking Machines 的 OPD 博客口径
+        policy_loss_fn = get_policy_loss_fn(loss_config.policy_loss_mode)
+        distillation_loss, pg_metrics = policy_loss_fn(
+            old_log_prob=old_log_prob,       # rollout 时的学生 logprob
+            log_prob=log_prob,               # 当前学生的 logprob（PPO 式重要性采样）
+            advantages=-distillation_losses.detach(),  # 负损失 = reward，detach 即 sg
+            response_mask=response_mask,
+            ...
+        )
+    else:
+        # 监督路线：直接对蒸馏损失做反传，即 GKD 论文（arXiv:2306.13649）的做法
+        distillation_loss = agg_loss(
+            loss_mat=distillation_losses,
+            loss_mask=response_mask,
+            loss_agg_mode=loss_agg_mode,
+        )
+    return distillation_loss, distillation_metrics
+```
+
+对照第四节的公式：`-distillation_losses.detach()` 正是 $r_t=\operatorname{sg}\left[\log\nu-\log\pi_\theta\right]$ 的代码形态——`k1` 估计器先由 `kl_penalty` 算出 $\log\pi_\theta-\log\nu$，取负号变成 reward，`detach()` 实现 stop-gradient，再交给 `compute_policy_loss_vanilla` 这类 PPO 式目标做 clip + importance sampling（`clip_ratio_low/high` 就是第四节 yaml 里的 0.2/0.28）。
+
+而 k1 估计器本身只有一行，在 `verl/trainer/ppo/core_algos.py`：
+
+```python
+# verl/trainer/ppo/core_algos.py（节选，注释为本站所加）
+def kl_penalty_forward(logprob, ref_logprob):
+    # k1 单样本估计器：KL(π‖ν) ≈ logπ(y) - logν(y)，y 是已采样出的 token
+    # 蒸馏场景下 logprob 来自学生、ref_logprob 来自老师
+    return logprob - ref_logprob
+```
+
+top-k 前向 KL 的学生侧实现在 `verl/trainer/distillation/fsdp/losses.py`，直接决定第三节 `forward_kl_topk` 的数值行为：<Cite n={11} />
+
+```python
+# verl/trainer/distillation/fsdp/losses.py（节选，注释为本站所加）
+def compute_forward_kl_topk(student_logits, teacher_topk_log_probs, teacher_topk_ids, config, data_format):
+    student_log_probs = F.log_softmax(student_logits, dim=-1)     # 学生全词表分布
+    # 学生在自己的 top-k 上取 id（仅用于 overlap 诊断）
+    student_topk_ids = torch.topk(student_log_probs, k=teacher_topk_ids.shape[-1], dim=-1).indices
+    # 学生的 logprob 只在老师选出的 k 个 token 上 gather —— 这是 top-k 近似的关键
+    student_topk_log_probs = torch.gather(student_log_probs, dim=-1, index=teacher_topk_ids)
+
+    # 两边的概率质量：top-k 截断后都不为 1，用于诊断截断误差
+    student_mass = student_topk_log_probs.exp().sum(dim=-1)
+    teacher_mass = teacher_topk_log_probs.exp().sum(dim=-1)
+
+    # 逐 token 前向 KL：Σ_{v∈TopK(ν)} ν(v)·[logν(v) - logπ(v)]
+    distillation_losses = kl_divergence(log_q=student_topk_log_probs, log_p=teacher_topk_log_probs)
+
+    # 诊断：老师 top-k 与学生 top-k 的重合度（Rethinking OPD, arXiv:2604.13016）
+    overlap_mask = (teacher_topk_ids.unsqueeze(-1) == student_topk_ids.unsqueeze(-2)).any(dim=-1)
+    ...
+    return {...}
+```
+
+两个工程细节值得注意。其一，`compute_forward_kl_topk` 在外层注册器版本（`losses.py`）里最后做了一次 `distillation_losses.clamp_min(0.0)`——因为 top-k 截断后两边分布的质量和都不等于 1，算出的“KL”可能为负，直接截到 0 再进 loss。其二，overlap 诊断（`overlap_ratio`、`overlap_token_advantage`）就是第七节表格里那两个指标的出处，用于追踪「老师认为重要的 token，学生的 top-k 里到底有没有」。<Cite n={[8,11]} />
+
+两条路线如何接进 PPO/GRPO 主损失，则由 `distillation_ppo_loss` 统一缝合，这正是第六节 $\mathcal{L}=\mathcal{L}_{\mathrm{policy}}+\lambda_{\mathrm{distill}}\mathcal{L}_{\mathrm{distill}}$ 的源码位置：<Cite n={11} />
+
+```python
+# verl/trainer/distillation/losses.py（节选，注释为本站所加）
+def distillation_ppo_loss(config, distillation_config, model_output, data, ...):
+    # 蒸馏项
+    distill_loss, distill_metrics = distillation_loss(config, distillation_config, model_output, data)
+    if not use_task_rewards and not use_policy_gradient:
+        policy_loss = 0.0                    # 纯蒸馏：完全不要任务奖励
+    else:
+        policy_loss, _ = ppo_loss(config, model_output, data, dp_group)
+        if not use_task_rewards:
+            policy_loss = 0.0                # use_policy_gradient 路线：蒸馏 PG 自己就是 policy loss
+
+    # L = L_policy + λ_distill · L_distill（λ 只在叠加任务奖励时才生效）
+    distillation_loss_coef = distillation_loss_config.distillation_loss_coef if use_task_rewards else 1.0
+    policy_loss += distill_loss * distillation_loss_coef
+    return policy_loss, policy_metrics
+```
+
+与 Tinker 相比，verl 多出来的部分全是生产级需求：teacher 按 `teacher_key` 路由（MOPD）、top-k 损失拆到 logits processor 里省显存、序列并行 / FSDP / Megatron 双后端、PPO clip 与任务奖励混合。完整源码见 [verl losses.py](https://github.com/volcengine/verl/blob/main/verl/trainer/distillation/losses.py) 与 [fsdp/losses.py](https://github.com/volcengine/verl/blob/main/verl/trainer/distillation/fsdp/losses.py)。<Cite n={11} />
+
+## 小结
+
+- **OPD** = student rollout + teacher token-level scoring：状态 on-policy，监督 dense。
+- **GKD OPD** 用 teacher top-k 前向 KL，适合完整分布级蒸馏，直接反传。
+- **PG OPD** 把 sampled-token 反向 KL 变成 reward，复用 PPO/GRPO 式 policy-gradient 更新。
+- **MOPD** 把多个领域老师按 routing key 合并到一个学生，是 2026 年多专家后训练的重要形态。
+- OPD 的价值不只是“学生模仿老师”，而是让学生在自己真实会犯错的状态上被老师纠正——这正好补上离线蒸馏和稀疏 RL 之间的空白。
+
+如果用一句话概括：**RLVR 教模型“最终要答对”，OPD 教模型“每一步更像强老师”；前者给目标，后者给过程密度。**
+
+## 参考资料
+
+<References>
+1. Rishabh Agarwal, Nino Vieillard, Yongchao Zhou, Piotr Stanczyk, Sabela Ramos, Matthieu Geist, Olivier Bachem (2024). *On-policy Distillation of Language Models: Learning from Self-Generated Mistakes*. ICLR 2024, arXiv: [2306.13649](https://arxiv.org/abs/2306.13649). —— GKD 框架的核心论文：用学生自生成数据缓解离线蒸馏的分布错配，并统一多种蒸馏损失。
+2. Yuxian Gu, Li Dong, Furu Wei, Minlie Huang (2024). *MiniLLM: On-Policy Distillation of Large Language Models*. ICLR 2024, arXiv: [2306.08543](https://arxiv.org/abs/2306.08543). —— 早期 PG / reverse-KL OPD 代表：用 on-policy 优化把白盒大模型蒸到小模型。
+3. Kevin Lu, Thinking Machines Lab (2025). *On-Policy Distillation*. [thinkingmachines.ai/blog/on-policy-distillation](https://thinkingmachines.ai/blog/on-policy-distillation/). —— 给出 Qwen3 数学实验、SFT/RL/OPD 成本对比和 self-distillation 结果，是理解 2025 年 OPD 热度的关键博客。
+4. veRL contributors (2026). *On-Policy Distillation (OPD)*. [verl.readthedocs.io/en/latest/algo/opd.html](https://verl.readthedocs.io/en/latest/algo/opd.html). —— 本文主要实现线索来源：GKD OPD、PG OPD、MOPD、teacher logprob pipeline、loss mode 与指标。
+5. An Yang et al. (2025). *Qwen3 Technical Report*. arXiv: [2505.09388](https://arxiv.org/abs/2505.09388). —— 技术报告中把 OPD 与 RL 做成本 / 效果对比，显示 OPD 在部分数学推理设置下以更低成本获得更高分。
+6. Bangjun Xiao et al. (2026). *MiMo-v2-Flash Technical Report*. arXiv: [2601.02780](https://arxiv.org/abs/2601.02780). —— 用 Multi-Teacher OPD 把多领域老师的 dense token-level rewards 压进 Flash MoE。
+7. Zhuolin Yang et al. (2026). *Nemotron-Cascade 2: Post-Training LLMs with Cascade RL and Multi-Domain On-Policy Distillation*. arXiv: [2603.19220](https://arxiv.org/abs/2603.19220). —— 多域 OPD / MOPD 的代表性技术报告之一。
+8. Yaxuan Li et al. (2026). *Rethinking On-Policy Distillation of Large Language Models: Phenomenology, Mechanism, and Recipe*. arXiv: [2604.13016](https://arxiv.org/abs/2604.13016). —— 对 OPD 现象、机制与配方进行系统反思的后续工作。
+9. DeepSeek-AI (2026). *DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence*. arXiv: [2606.19348](https://arxiv.org/abs/2606.19348). —— 用 OPD 替换 mixed RL 阶段，并讨论 full-vocabulary OPD 与 teacher scheduling 的长上下文后训练报告。
+10. HuggingFace. *TRL: GKDTrainer（Generalized Knowledge Distillation）源码与文档*. [github.com/huggingface/trl · trl/experimental/gkd](https://github.com/huggingface/trl/blob/main/trl/experimental/gkd/gkd_trainer.py)，[huggingface.co/docs/trl/gkd_trainer](https://huggingface.co/docs/trl/gkd_trainer). —— GKD 论文的参考实现：λ 数据切换、广义 JSD 损失、学生 rollout 与 EOS 掩码的工程细节。
+11. veRL contributors. *verl：On-Policy Distillation 损失实现*. [github.com/volcengine/verl · verl/trainer/distillation](https://github.com/volcengine/verl/blob/main/verl/trainer/distillation/losses.py). —— PG OPD（负蒸馏损失作 reward）、teacher top-k 前向 KL、k1 估计器与 distillation_ppo_loss 的生产级实现。
+12. Thinking Machines Lab. *tinker-cookbook：On-Policy Distillation 配方*. [github.com/thinking-machines-lab/tinker-cookbook · recipes/distillation](https://github.com/thinking-machines-lab/tinker-cookbook/tree/main/tinker_cookbook/recipes/distillation). —— 最小可读的 PG OPD 实现：reverse KL 作 token reward，老师以 logprob API 形式远程打分。
+</References>

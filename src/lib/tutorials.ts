@@ -4,6 +4,8 @@
 export interface Tutorial {
   slug: string;
   title: string;
+  /** 导航栏(侧边栏/移动端抽屉)展示的短标题;不填则导航与正文共用 title */
+  navTitle?: string;
   desc: string;
   /** 章节分组(领域) */
   category: string;
@@ -70,6 +72,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "ce-kl-nll-equivalence",
     title: "一个恒等式:交叉熵 = KL = NLL",
+    navTitle: "交叉熵 = KL = NLL",
     desc: "one-hot 标签下,交叉熵、KL 散度、负对数似然三个量为何完全相等?四步推导讲清塌缩的原因,以及软标签时为什么又分道扬镳。",
     category: "基础理论",
     topic: "信息论",
@@ -86,6 +89,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "ml-losses",
     title: "实战:分类与语言模型的损失",
+    navTitle: "实战:LM 损失",
     desc: "同一个交叉熵的三种面孔:二分类 BCE、多分类 CE、GPT 的下一个词预测与困惑度。理论如何落进真实模型。",
     category: "基础理论",
     topic: "信息论",
@@ -150,6 +154,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "ensemble-learning",
     title: "集成学习:随机森林与提升",
+    navTitle: "集成学习",
     desc: "三个臭皮匠顶个诸葛亮。拖动树的数量,看众多高方差的树如何平均成一条精准曲线。",
     category: "监督学习",
     topic: "树与集成",
@@ -200,6 +205,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "multi-armed-bandit",
     title: "多臂老虎机:探索与利用",
+    navTitle: "多臂老虎机",
     desc: "RL 的最小问题:面前 K 台机器、中奖率未知,每步只能拉一台。没有状态转移、没有折扣,只剩一个核心矛盾——该利用已知最好的,还是探索没试够的?ε-贪心、UCB、Thompson 采样、后悔值曲线,从这儿读懂整个 RL 的探索逻辑。",
     category: "强化学习",
     topic: "价值方法",
@@ -216,6 +222,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "dynamic-programming",
     title: "动态规划:精确求解 MDP",
+    navTitle: "动态规划",
     desc: "如果环境规则完全已知,根本不用试错——贝尔曼方程 + 价值迭代/策略迭代直接把最优策略算出来。这是 Q-learning、DQN 都在近似的理论地基。",
     category: "强化学习",
     topic: "价值方法",
@@ -224,6 +231,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "monte-carlo",
     title: "蒙特卡洛方法:用经验说话",
+    navTitle: "蒙特卡洛方法",
     desc: "不知道模型怎么办?反复跑回合、把真实回报平均起来——价值就是经验回报的均值。首次/每次访问、ε-软控制、重要性采样,以及它为何是 REINFORCE 拿 Gₜ 当梯度的根源。",
     category: "强化学习",
     topic: "价值方法",
@@ -232,6 +240,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "temporal-difference",
     title: "时序差分学习:边走边学",
+    navTitle: "时序差分学习",
     desc: "模型未知怎么办?TD 融合动态规划的自举与蒙特卡洛的免模型,走一步就学一步。随机游走里看它如何击败 MC,以及它为何是 Q-learning、Actor-Critic 的共同内核。",
     category: "强化学习",
     topic: "价值方法",
@@ -240,6 +249,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "dqn",
     title: "DQN:用神经网络逼近 Q 表",
+    navTitle: "DQN",
     desc: "状态太多、Q 表存不下?用神经网络逼近 Q 值,再靠经验回放 + 目标网络稳住训练。DeepMind 用它仅凭像素玩通 Atari,深度强化学习就此起飞。",
     category: "强化学习",
     topic: "价值方法",
@@ -248,6 +258,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "policy-gradient",
     title: "策略梯度:直接学策略",
+    navTitle: "策略梯度",
     desc: "跳过价值表,直接把策略参数化用梯度上升优化。REINFORCE、基线降方差、Actor-Critic 的优势函数,到 PPO 裁剪目标——通往 RLHF 的必经之路。",
     category: "强化学习",
     topic: "策略与对齐",
@@ -256,6 +267,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "continuous-control",
     title: "连续控制:DDPG 到 SAC",
+    navTitle: "连续控制",
     desc: "机器人关节、方向盘转角是连续实数,没法对动作取 argmax。确定性 actor 替代 max(DDPG)、孪生 critic 治高估(TD3)、最大熵强探索(SAC)——机器人与自动驾驶的 RL 主力。",
     category: "强化学习",
     topic: "策略与对齐",
@@ -264,6 +276,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "rlhf",
     title: "从 RL 到 RLHF:对齐大模型",
+    navTitle: "从 RL 到 RLHF",
     desc: "ChatGPT 为何「听话」?奖励模型 + PPO/DPO + 反向 KL 约束,把语言模型对齐到人类偏好。强化学习在大模型时代的杀手级应用。",
     category: "强化学习",
     topic: "策略与对齐",
@@ -272,6 +285,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "grpo-rlvr",
     title: "GRPO 与可验证奖励:训练会推理的大模型",
+    navTitle: "GRPO 与 RLVR",
     desc: "DeepSeek-R1 靠什么学会一步步推理?GRPO 砍掉 PPO 的 critic,用同一道题采样一组回答、组内均值当基线;RLVR 用「答案对不对」的规则判分取代奖励模型。再看长度偏置、难度偏置两大陷阱,以及 Dr.GRPO / DAPO 的修法。",
     category: "强化学习",
     topic: "策略与对齐",
@@ -280,6 +294,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "offline-rl",
     title: "离线强化学习:从别人的日志里学策略",
+    navTitle: "离线 RL",
     desc: "医疗、自动驾驶、推荐——这些场景不能试错,却囤着海量历史日志。离线 RL 只用固定数据集学策略,拦路虎是分布偏移导致的 Q 值外推高估;BCQ 约束策略、CQL 保守压低、IQL 干脆不问 OOD 动作,三招殊途同归。",
     category: "强化学习",
     icon: "📦",
@@ -287,6 +302,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "imitation-learning",
     title: "模仿学习:从示范中学习",
+    navTitle: "模仿学习",
     desc: "没有奖励信号、只有专家示范,怎么学策略?行为克隆把它当监督学习,却栽在「级联误差」上;DAgger 边走边问、用学习者轨迹纠偏;逆向强化学习(IRL)从示范反推奖励;GAIL 把 IRL+RL 映射到 GAN,判别器即隐式奖励——免显式奖励、免内层 RL 循环。",
     category: "强化学习",
     icon: "🎓",
@@ -294,6 +310,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "model-based-rl",
     title: "基于模型的强化学习:学会规划",
+    navTitle: "基于模型的 RL",
     desc: "免模型 RL 省心却费样本——能不能顺便把环境也学了,在脑子里「想象」着规划?Dyna-Q 边学 Q 表边学环境模型、n 步规划加速收敛;MCTS 用 UCT 在博弈树上「选-展-滚-传」;AlphaZero 用神经网络替掉随机 rollout;世界模型(Dreamer)干脆在潜空间里做梦训练。",
     category: "强化学习",
     icon: "🗺️",
@@ -301,6 +318,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "hierarchical-rl",
     title: "分层强化学习:选项与时间抽象",
+    navTitle: "分层 RL",
     desc: "走一步学一步太慢——能不能把「去门口」这种跨多步的子目标打包成一个动作?选项框架(option = 起始集 + 内部策略 + 终止函数)把时间延伸动作塞进 SMDP 贝尔曼方程 $Q(s,o)=\\mathbb E[R+\\gamma^k Q(s',o')]$,时间抽象缩短有效视野。MAXQ/Feudal/HAM 三框架、FeUdal Networks 的 manager-worker、h-DQN 目标分层、option-critic 自动发现选项——分层是 RL 对付长程信用分配的主干。",
     category: "强化学习",
     icon: "🏗️",
@@ -308,9 +326,18 @@ export const tutorials: Tutorial[] = [
   {
     slug: "multi-agent-rl",
     title: "多智能体强化学习:从博弈到合作",
+    navTitle: "多智能体 RL",
     desc: "多个智能体同时学习会怎样?每个智能体把别人当环境,可别人也在学——环境就不再平稳,马尔可夫性被破坏。MARL 从随机博弈形式化出发,经独立 Q-learning 的非平稳困境,到 CTDE(集中训练分布执行)范式:价值分解(VDN/QMIX 单调混合)解决合作协同,策略梯度(MADDPG 集中 critic、COMA 反事实基线、MAPPO)应对混合博弈。再到自博弈的 autocurriculum 与社交困境——RL 从单智能体走向多智能体的主干。",
     category: "强化学习",
     icon: "🤝",
+  },
+  {
+    slug: "llm-post-training",
+    title: "大模型后训练：从 Base Model 到可用助手",
+    navTitle: "大模型后训练",
+    desc: "预训练之后，如何把 Base Model 变成可用助手？一张路线图串起 SFT、偏好优化、RLHF/PPO、DPO 家族、RLVR/GRPO、拒绝采样、蒸馏、安全、工具与评测闭环。",
+    category: "大模型后训练",
+    icon: "🧰",
   },
   {
     slug: "knowledge-distillation",
@@ -323,6 +350,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "on-policy-distillation",
     title: "在线蒸馏(on-policy distillation)",
+    navTitle: "在线蒸馏(OPD)",
     desc: "离线蒸馏让学生「一步错步步错」。让学生自己生成、老师逐 token 打分,用反向 KL 在学生自己的轨迹上学——比 RL 省 10 倍算力的大模型蒸馏当红方案。",
     category: "前沿与对齐",
     topic: "知识蒸馏",
@@ -331,6 +359,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "mixed-distillation",
     title: "混合蒸馏:off-policy 的成本 + on-policy 的覆盖",
+    navTitle: "混合蒸馏",
     desc: "纯离线有暴露偏差,纯在线太贵——能不能各取所长?GKD 的 mixed 模式、Speculative KD 的交错采样、DistiLLM 的样本复用,把老师样本与学生样本按比例混合,用 off-policy 的成本买 on-policy 的覆盖。工业流水线最实际的折中。",
     category: "前沿与对齐",
     topic: "知识蒸馏",
@@ -347,6 +376,7 @@ export const tutorials: Tutorial[] = [
   {
     slug: "llm-decoding",
     title: "大模型解码:如何生成文字",
+    navTitle: "大模型解码",
     desc: "训练学的是概率,生成靠的是解码。贪心、温度、top-k、top-p 核采样——同一个模型,如何在「稳妥」与「有创意」之间调出千变万化的文字。",
     category: "前沿与对齐",
     icon: "✍️",
@@ -361,6 +391,7 @@ const CATEGORY_ICONS: Record<string, string> = {
   无监督学习: "🔍",
   深度学习: "🧠",
   强化学习: "🕹️",
+  大模型后训练: "🧰",
   前沿与对齐: "🚀",
 };
 

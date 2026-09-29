@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="520" viewBox="0 0 1040 520" role="img" aria-labelledby="title desc">
+  <title id="title">Nemotron-Cascade 2 Cascade RL and MOPD</title>
+  <desc id="desc">A schematic showing staged cascade RL producing domain teachers and multi-domain OPD merging their strengths back into one student.</desc>
+  <rect width="1040" height="520" fill="#fafafa"/>
+  <text x="520" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="#111827">Nemotron-Cascade 2：用 MOPD 合并 Cascade RL 的阶段性高点</text>
+  <rect x="62" y="104" width="190" height="92" rx="18" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="157" y="140" text-anchor="middle" font-family="Arial, sans-serif" font-size="19" font-weight="700" fill="#075985">SFT 起点</text>
+  <text x="157" y="166" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#0369a1">30B MoE / 3B 激活</text>
+  <path d="M252 150 H330" stroke="#6b7280" stroke-width="3" marker-end="url(#arrow)"/>
+  <rect x="330" y="70" width="205" height="82" rx="16" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="432" y="103" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#92400e">数学 RL checkpoint</text>
+  <text x="432" y="128" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#92400e">局部高点，也可能带来回退</text>
+  <rect x="330" y="190" width="205" height="82" rx="16" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="432" y="223" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#92400e">代码 RL checkpoint</text>
+  <text x="432" y="248" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#92400e">修复代码能力，可能影响通用性</text>
+  <rect x="330" y="310" width="205" height="82" rx="16" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="432" y="343" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#92400e">Agent RL checkpoint</text>
+  <text x="432" y="368" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#92400e">工具任务高点，可能掉静态问答</text>
+  <path d="M535 111 C608 128 630 172 660 218" fill="none" stroke="#6b7280" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M535 231 H652" fill="none" stroke="#6b7280" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <path d="M535 351 C608 334 630 290 660 244" fill="none" stroke="#6b7280" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="660" y="126" width="250" height="210" rx="22" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="785" y="165" text-anchor="middle" font-family="Arial, sans-serif" font-size="21" font-weight="700" fill="#065f46">Multi-Domain OPD</text>
+  <text x="785" y="202" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#047857">学生 rollout 暴露当前状态</text>
+  <text x="785" y="232" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#047857">按任务域路由到中间老师</text>
+  <text x="785" y="262" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#047857">逐 token 蒸馏回单一模型</text>
+  <text x="785" y="292" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#047857">恢复 benchmark regression</text>
+  <path d="M785 336 C694 435 302 438 157 196" fill="none" stroke="#9ca3af" stroke-width="2" stroke-dasharray="8 8" marker-end="url(#arrow)"/>
+  <text x="520" y="458" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#4b5563">Cascade RL 拉高单域上限；MOPD 把多个阶段性老师的能力重新压回目标部署模型</text>
+  <text x="520" y="488" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#6b7280">根据 Yang et al. (2026) Nemotron-Cascade 2 摘要与 OPD / MOPD 机制重绘</text>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/>
+    </marker>
+  </defs>
+</svg>

@@ -1,0 +1,142 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("mimo-v2-flash");
+
+<PaperHeader slug="mimo-v2-flash" />
+
+# MiMo-v2-Flash：多教师在线蒸馏出的高效推理模型
+
+MiMo-v2-Flash 的关键词不是“更小”，而是 **Flash**：在保持强推理、代码和智能体能力的同时，把激活参数、上下文成本和推理延迟压到更适合部署的区间。它的后训练路线把 Multi-Teacher On-Policy Distillation（MOPD）放在核心位置：学生自己 rollout，多领域老师提供 dense token-level rewards，再叠加可验证结果奖励，让 Flash 模型吸收强策略而不是只背老师答案。<Cite n={[1,2,4]} />
+
+> 📌 前置：建议先读 [OPD 总览](/papers/opd-agarwal)、[Nemotron-Cascade 2](/papers/nemotron-cascade-2)、[Qwen3](/papers/qwen3)。MiMo-v2-Flash 和 Nemotron-Cascade 2 都把 OPD 推向多老师、多领域能力合并场景。
+
+## 一、动机：Flash 版本到底在压缩什么
+
+强模型的代价通常不止参数量。真实部署里还要看：
+
+1. 每 token 激活参数；
+2. attention 与 KV cache 成本；
+3. 长上下文下吞吐是否还能接受；
+4. 解码是否能用投机方式提速；
+5. 后训练后是否在多领域同时保持能力。
+
+MiMo-v2-Flash 的目标，就是把“强推理策略”压进一个更高效率的模型形态。报告给出的模型规模是 **309B 总参数、15B 激活参数**。<Cite n={1} />这不是极小模型，而是一个高容量、低激活的 MoE 部署模型。
+
+## 二、架构：SWA + 全局注意力的混合成本控制
+
+MiMo-v2-Flash 使用 sliding window attention（SWA）与全局注意力混合。<Cite n={1} />报告中的关键配置是：SWA window 为 128 tokens，混合比例为 5:1。<Cite n={1} />
+
+这个设计背后的直觉是：
+
+| 注意力类型 | 负责什么 | 为什么需要 |
+|---|---|---|
+| SWA | 处理局部连续上下文 | 大多数语言建模依赖近邻信息，成本低 |
+| 全局注意力 | 保留跨段证据和长程依赖 | 推理、代码和长文档不能完全局部化 |
+| 5:1 混合 | 让低成本局部层占多数 | 控制总体 FLOPs 与 KV cache |
+
+因此 Flash 的效率不是单靠缩模型，而是把架构、激活参数和注意力模式一起压缩。
+
+## 三、训练底座：27T token 与长上下文扩展
+
+报告写到 MiMo-v2-Flash 在 27T tokens 上预训练，原生上下文为 32K，并进一步扩展到 256K。<Cite n={1} />这个信息很重要：MOPD 不是从一个很弱的学生开始，而是在一个已经具备长上下文和基础推理能力的 student 上继续压强策略。
+
+这也解释了为什么在线蒸馏适合它：
+
+- 如果学生太弱，rollout 状态会很差，老师信号未必可学；
+- 如果学生已经具备基本能力，OPD 可以在学生真实错误附近提供局部修正；
+- 如果目标是 Flash 部署模型，复制强 teacher 的策略通常比继续大规模探索更划算。
+
+## 四、MOPD：把多个领域老师变成密集过程信号
+
+MiMo-v2-Flash 的后训练可以概括为三阶段：<Cite n={1} />
+
+| 阶段 | 作用 |
+|---|---|
+| General SFT | 建立通用指令、格式和基础任务能力 |
+| Specialized RL / SFT | 训练数学、代码、智能体等领域老师 |
+| MOPD | 学生 rollout，多个老师提供 dense token-level rewards，并结合可验证 outcome reward |
+
+这和普通知识蒸馏的差别在于状态来源。普通蒸馏常让学生模仿老师生成的轨迹；MOPD 则让 Flash 模型先走自己的路，然后由对应老师在这些学生状态上打分。<Cite n={[1,2]} />
+
+可以把 MOPD 理解成一个多领域控制系统：
+
+1. 学生生成当前任务的回答；
+2. 根据任务领域选择或组合老师；
+3. 老师对学生轨迹提供 token-level 信号；
+4. 可验证奖励检查最终答案是否真的正确；<Cite n={1} />
+5. 学生在自己的分布附近同时吸收过程偏好和结果约束。
+
+<figure className="my-6">
+  <img src="./fig-mopd-flash.svg" alt="MiMo-v2-Flash 的多教师在线蒸馏流程：Flash MoE 学生先生成自己的轨迹，数学、代码和智能体等领域老师在学生状态上提供 token-level reward，再与可验证结果奖励结合，服务部署侧的 MTP 投机解码" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">MiMo-v2-Flash 的多教师在线蒸馏流程：Flash MoE 学生先生成自己的轨迹，数学、代码和智能体等领域老师在学生状态上提供 token-level reward，再与可验证结果奖励结合，服务部署侧的 MTP 投机解码</span>
+    <span className="figure-caption-source">图源：根据 Xiao et al., <em>MiMo-v2-Flash Technical Report</em>（arXiv:2601.02780）与 OPD / MOPD 机制重绘</span>
+  </figcaption>
+</figure>
+
+## 五、为什么需要 token-level teacher reward
+
+只用可验证 outcome reward，有一个经典问题：奖励太稀疏。<Cite n={[1,2]} />数学题最后答对才有分，代码题测试通过才有分，但模型在中间哪一步走错，reward 本身不告诉你。
+
+MOPD 的 dense token-level rewards 正好补这块：
+
+| 信号 | 优点 | 局限 |
+|---|---|---|
+| Outcome reward | 能确认最终结果是否正确 | 稀疏，信用分配困难 |
+| Teacher token reward | 每一步都有方向 | 依赖 teacher 质量与兼容性 |
+| 两者结合 | 过程与结果互相约束 | teacher 调度和权重设计更复杂 |
+
+这也是 OPD 和 RL 的互补关系：RL 告诉模型“最终要对”，OPD 告诉模型“当前这一步更像强策略”。
+
+## 六、投机解码：MTP 如何服务 Flash
+
+MiMo-v2-Flash 还把 multi-token prediction（MTP）用于投机解码。<Cite n={1} />报告给出的数字是：平均 accepted length 约 3.6，推理加速约 2.6×。<Cite n={1} />
+
+这说明 Flash 的效率目标贯穿训练和推理两端：
+
+- 训练端：用 MOPD 把强老师能力压进目标模型；
+- 架构端：用 MoE 与混合注意力降低激活与上下文成本；
+- 推理端：用 MTP draft model 提高解码吞吐。
+
+如果只看 benchmark，很容易低估这些系统设计。Flash 模型的真正价值是单位成本下的能力密度，而不是单个榜单分数。
+
+## 七、结果：高效不等于只做简单任务
+
+报告强调 MiMo-v2-Flash 在软件工程和多语言 SWE 任务上表现突出，例如 SWE-Bench Verified 73.4%、SWE-Bench Multilingual 71.7%。<Cite n={1} />这些任务比普通问答更接近真实部署：它们涉及长上下文、代码理解、修改、测试和多步执行。
+
+这也解释了为什么 MOPD 适合这里。软件工程任务的最终结果可以验证，但中间过程很长；只靠最终测试通过与否做 RL，样本效率会很低。多教师 OPD 给模型补上了中间过程信号，让 Flash 模型更容易继承强老师的代码和推理习惯。
+
+## 八、和 Nemotron-Cascade 2、Qwen3 的对照
+
+MiMo-v2-Flash、[Nemotron-Cascade 2](/papers/nemotron-cascade-2)、[Qwen3](/papers/qwen3) 的共同点是：它们都不把 OPD 当成单篇算法里的 toy setting，而是放进模型后训练系统。<Cite n={[1,3,4]} />
+
+| 模型 / 报告 | OPD 形态 | 主要目标 |
+|---|---|---|
+| Qwen3 | strong-to-weak on-policy distillation | 低成本复制推理策略 |
+| Nemotron-Cascade 2 | Multi-Domain OPD | 恢复多阶段 RL 后的 benchmark regression |
+| MiMo-v2-Flash | Multi-Teacher OPD | 把多领域强老师压进高效 Flash 模型 |
+
+共同趋势是：当 teacher 已经很强、学生要部署、任务又需要长过程推理时，在线蒸馏比“继续盲目 RL”更像一种工程化能力迁移工具。<Cite n={[1,2,3]} />
+
+## 九、局限：Flash 仍然受老师和任务分布约束
+
+MiMo-v2-Flash 的 MOPD 路线有几个需要谨慎的地方：
+
+1. **teacher 选择决定上限**：老师如果在某领域不强，token-level reward 只会复制错误偏好。
+2. **多老师可能冲突**：数学、代码、agent 老师的格式和策略未必一致，需要路由和权重管理。
+3. **OPD 不能替代探索**：它擅长复制已有强策略，不一定发现老师没有的新解法。
+4. **Flash 性能依赖系统栈**：MTP、batching、KV cache 和 serving 实现都会影响实际加速。
+5. **benchmark 不等于生产流量**：SWE-Bench 很有价值，但真实工程任务还包含权限、依赖、环境和长期上下文管理。
+
+## 小结
+
+MiMo-v2-Flash 展示的是 OPD 的部署侧价值：不是为了证明一个 KL 公式更漂亮，而是为了把多领域强老师的策略压进一个 15B 激活的 Flash MoE。MOPD 让学生在自己的轨迹上同时接收老师的密集过程信号和可验证结果奖励，配合混合注意力与 MTP 投机解码，形成从训练到推理的完整效率路线。
+
+## 参考资料
+
+<References>
+1. Bangjun Xiao et al. (2026). *MiMo-v2-Flash Technical Report*. arXiv: [2601.02780](https://arxiv.org/abs/2601.02780). —— 本文主报告，介绍 309B/15B MoE、混合注意力、MTP 投机解码和 Multi-Teacher On-Policy Distillation。
+2. Rishabh Agarwal et al. (2024). *On-policy Distillation of Language Models: Learning from Self-Generated Mistakes*. ICLR 2024, arXiv: [2306.13649](https://arxiv.org/abs/2306.13649). —— OPD / GKD 基础框架。
+3. Zhuolin Yang et al. (2026). *Nemotron-Cascade 2: Post-Training LLMs with Cascade RL and Multi-Domain On-Policy Distillation*. arXiv: [2603.19220](https://arxiv.org/abs/2603.19220). —— 多域 OPD 与能力回退恢复的对照案例。
+4. veRL contributors (2026). *On-Policy Distillation (OPD)*. [verl.readthedocs.io/en/latest/algo/opd.html](https://verl.readthedocs.io/en/latest/algo/opd.html). —— MOPD、teacher routing 与 OPD loss 的工程背景。
+</References>

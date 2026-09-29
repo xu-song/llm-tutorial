@@ -4,54 +4,55 @@ export const metadata = paperMetadata("attention-transformer");
 
 <PaperHeader slug="attention-transformer" />
 
-# 🔁 Transformer:注意力就是你所需要的一切
+# Transformer：注意力就是你所需要的一切
 
-2017 年,Google Brain 与 Research 的八人团队发表了一篇标题嚣张的论文:*Attention Is All You Need*。他们把机器翻译主流架构里的**循环网络(RNN)与卷积(Conv)全部扔掉**,只留注意力机制,结果 WMT 2014 英德翻译 **28.4 BLEU**、英法 **41.8 BLEU**,双双刷出单模型新纪录——而训练只花 8 张 P100 共 3.5 天。这篇论文后来成了整个现代 AI 的地基:GPT、Claude、DeepSeek、GLM,全部运行在它定义的架构上。这篇笔记拆解它的三个核心件:缩放点积注意力、多头机制、位置编码,并回答一个初学者最常见的疑问:**那个 $\sqrt{d_k}$ 到底为什么非要除不可?**
+2017 年，Google Brain 与 Research 的八人团队发表了一篇标题嚣张的论文：*Attention Is All You Need*<Cite n={1} />。他们把机器翻译主流架构里的**循环网络（RNN）与卷积（Conv）全部扔掉**，只留注意力机制，结果 WMT 2014 英德翻译 **28.4 BLEU**、英法 **41.8 BLEU**，双双刷出单模型新纪录——而训练只花 8 张 P100 共 3.5 天。<Cite n={1} />这篇论文后来成了整个现代 AI 的地基：GPT、Claude、DeepSeek、GLM，全部运行在它定义的架构上。这篇笔记拆解它的三个核心件：缩放点积注意力、多头机制、位置编码，并回答一个初学者最常见的疑问：**那个 $\sqrt{d_k}$ 到底为什么非要除不可？**
 
-> 📌 前置:知道[神经网络](/tutorials/neural-network)的「层 + 非线性 + 反向传播」、以及 [softmax 与交叉熵](/tutorials/cross-entropy-kl) 就够了;本篇自包含,是全站大模型相关内容的架构地基。
+> 📌 前置：知道[神经网络](/tutorials/neural-network)的「层 + 非线性 + 反向传播」、以及 [softmax 与交叉熵](/tutorials/cross-entropy-kl) 就够了；本篇自包含，是全站大模型相关内容的架构地基。
 
-## 一、动机:顺序计算是瓶颈
+## 一、动机：顺序计算是瓶颈
 
-2017 年之前,序列建模被 RNN/LSTM 统治。RNN 按时间步逐个处理 token,$t$ 步的计算依赖 $t-1$ 步的隐藏状态——这个设计带来两个不可修复的问题:
+2017 年之前，序列建模被 RNN/LSTM 统治<Cite n={3} />。RNN 按时间步逐个处理 token,$t$ 步的计算依赖 $t-1$ 步的隐藏状态——这个设计带来两个不可修复的问题：
 
-1. **无法并行**。一个长度为 $n$ 的序列必须串行走 $n$ 步,GPU 的大规模并行能力完全用不上,训练时间随序列长度线性恶化;
-2. **长程依赖衰减**。序列开头的信息要经过 $O(n)$ 步传递才能影响结尾,梯度在长链条中消失或爆炸,「第 1 个词与第 500 个词的关系」很难学。
+1. **无法并行**。一个长度为 $n$ 的序列必须串行走 $n$ 步，GPU 的大规模并行能力完全用不上，训练时间随序列长度线性恶化；
+2. **长程依赖衰减**。序列开头的信息要经过 $O(n)$ 步传递才能影响结尾，梯度在长链条中消失或爆炸，「第 1 个词与第 500 个词的关系」很难学。
 
-论文的 Table 1 精确量化了三种层的三笔账(每层、序列长 $n$、维度 $d$):
+论文的 Table 1 精确量化了三种层的三笔账(每层、序列长 $n$、维度 $d$)<Cite n={1} />：
 
 | 层类型 | 每层计算量 | 顺序操作数 | 最大路径长度 |
 |---|---|---|---|
 | 自注意力 | $O(n^2\cdot d)$ | $O(1)$ | $O(1)$ |
-| 循环(RNN) | $O(n\cdot d^2)$ | $O(n)$ | $O(n)$ |
-| 卷积(Conv) | $O(k\cdot n\cdot d^2)$ | $O(1)$ | $O(\log_k n)$ |
+| 循环（RNN） | $O(n\cdot d^2)$ | $O(n)$ | $O(n)$ |
+| 卷积（Conv） | $O(k\cdot n\cdot d^2)$ | $O(1)$ | $O(\log_k n)$ |
 
-自注意力的杀手锏在第二、三列:**顺序操作数为 1**——所有位置同时算,天然吃满 GPU 并行;**任意两 token 的信息路径长度为 1**——第 1 个词与第 500 个词直接交互,一步到位,长程依赖不再衰减。代价在第一列:计算量随序列长度平方增长。这个 $O(n^2)$ 成了后来所有稀疏注意力(如 [DeepSeek-V3.2 的 DSA](/papers/deepseek-v3-2))要解决的问题——但在 2017 年,序列还短,并行性带来的收益远盖过平方开销。
+自注意力的杀手锏在第二、三列：**顺序操作数为 1**——所有位置同时算，天然吃满 GPU 并行；**任意两 token 的信息路径长度为 1**——第 1 个词与第 500 个词直接交互，一步到位，长程依赖不再衰减。代价在第一列：计算量随序列长度平方增长。这个 $O(n^2)$ 成了后来所有稀疏注意力(如 [DeepSeek-V3.2 的 DSA](/papers/deepseek-v3-2))要解决的问题——但在 2017 年，序列还短，并行性带来的收益远盖过平方开销。
 
-## 二、缩放点积注意力:一个公式,三个矩阵
+## 二、缩放点积注意力：一个公式，三个矩阵
 
-注意力要回答的问题:**当前 token 应该从哪些前文 token 取信息、各取多少?** 论文用三个矩阵把它参数化:每个 token 的向量 $\mathbf{x}$ 乘三组投影得到查询(Query)、键(Key)、值(Value)——Q 是「我在找什么」,K 是「我能提供什么」,V 是「我实际携带的信息」。注意力就是「用 Q 和所有 K 算匹配度,按匹配度加权取 V」:
+注意力要回答的问题：**当前 token 应该从哪些前文 token 取信息、各取多少？** 论文用三个矩阵把它参数化：每个 token 的向量 $\mathbf{x}$ 乘三组投影得到查询（Query）、键（Key）、值（Value）——Q 是「我在找什么」，K 是「我能提供什么」，V 是「我实际携带的信息」。<Cite n={1} />注意力就是「用 Q 和所有 K 算匹配度，按匹配度加权取 V」:
 
 $$
 \operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\Big(\frac{QK^{\top}}{\sqrt{d_k}}\Big)V
 $$
 
-直觉版本:一场「检索」。每个 token 发出查询,所有 token 挂出键;查询与键做点积衡量匹配度,softmax 把匹配度变成一组和为 1 的权重,最后按权重把值混合回来。**没有循环、没有卷积,整个「序列内部通信」只靠矩阵乘法。**
+直觉版本：一场「检索」。每个 token 发出查询，所有 token 挂出键；查询与键做点积衡量匹配度，softmax 把匹配度变成一组和为 1 的权重，最后按权重把值混合回来。**没有循环、没有卷积，整个「序列内部通信」只靠矩阵乘法。**
 
-论文原版结构图(左)与缩放点积注意力的计算流程(右)——注意 $QK^{\top}$ 后的 scale 与 softmax 方框:
+论文原版结构图（左）与缩放点积注意力的计算流程（右）——注意 $QK^{\top}$ 后的 scale 与 softmax 方框：
 
 <figure className="my-6 grid gap-4 sm:grid-cols-2">
-  <img src="./fig-architecture.png" alt="Transformer 整体架构:编码器(左)与解码器(右)的堆叠结构" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
-  <img src="./fig-attention.png" alt="缩放点积注意力:MatMul → Scale → Mask → SoftMax → MatMul" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-architecture.png" alt="Transformer 整体架构：编码器（左）与解码器（右）的堆叠结构" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-attention.png" alt="缩放点积注意力：MatMul → Scale → Mask → SoftMax → MatMul" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="sm:col-span-2 mt-1 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Vaswani et al., <em>Attention Is All You Need</em>(arXiv:1706.03762)Figure 1(左)与 Figure 2 左(右)
+    <span className="figure-caption-main">缩放点积注意力：MatMul → Scale → Mask → SoftMax → MatMul</span>
+    <span className="figure-caption-source">图源：Vaswani et al., <em>Attention Is All You Need</em>（arXiv:1706.03762）Figure 1（左）与 Figure 2 左（右）</span>
   </figcaption>
 </figure>
 
 ### 为什么要除以 $\sqrt{d_k}$?
 
-这是论文最常被问的一步。假设 $q$ 与 $k$ 的各分量是均值 0、方差 1 的独立随机变量,点积 $q\cdot k=\sum_{i=1}^{d_k}q_ik_i$ 的方差是 $d_k$——**点积的标准差随维度 $\sqrt{d_k}$ 增长**。$d_k=64$ 时点积动辄 ±8;若不缩放,softmax 的输入是一堆大正负数,输出会塌缩成 one-hot:**匹配的权重≈1,其余≈0,梯度几乎为零**。除以 $\sqrt{d_k}$ 恰好把点积方差拉回 1,让 softmax 工作在梯度健康的区间。论文脚注给出了这个方差论证,并直言怀疑这是高维下表现差的主因。
+这是论文最常被问的一步。<Cite n={1} />假设 $q$ 与 $k$ 的各分量是均值 0、方差 1 的独立随机变量，点积 $q\cdot k=\sum_{i=1}^{d_k}q_ik_i$ 的方差是 $d_k$——**点积的标准差随维度 $\sqrt{d_k}$ 增长**。$d_k=64$ 时点积动辄 ±8；若不缩放，softmax 的输入是一堆大正负数，输出会塌缩成 one-hot：**匹配的权重≈1，其余≈0，梯度几乎为零**。除以 $\sqrt{d_k}$ 恰好把点积方差拉回 1，让 softmax 工作在梯度健康的区间。论文脚注给出了这个方差论证，并直言怀疑这是高维下表现差的主因。<Cite n={1} />
 
-用 numpy 完整跑一遍前向——先看一个 token 如何「注意」整句话,再看不除 $\sqrt{d_k}$ 会发生什么:
+用 numpy 完整跑一遍前向——先看一个 token 如何「注意」整句话，再看不除 $\sqrt{d_k}$ 会发生什么：
 
 <CodeRunner defaultCode={String.raw`
 import numpy as np
@@ -91,65 +92,256 @@ print()
 print("不缩放时点积方差 = d_k =", d_k, " -> softmax 饱和 -> 梯度消失")
 `} />
 
-## 三、多头注意力:并行问不同的问题
+## 三、多头注意力：并行问不同的问题
 
-单次注意力只有一个「提问角度」。多头机制把 $d_{\text{model}}$ 切成 $h$ 份,每份独立做注意力,再拼接:
+单次注意力只有一个「提问角度」。多头机制把 $d_{\text{model}}$ 切成 $h$ 份，每份独立做注意力，再拼接：
 
 $$
 \operatorname{MultiHead}(Q,K,V)=\operatorname{Concat}(\text{head}_1,\dots,\text{head}_h)\,W^{O},\qquad \text{head}_i=\operatorname{Attention}(QW_i^{Q},\,KW_i^{K},\,VW_i^{V})
 $$
 
-论文取 $h=8$、$d_k=d_v=d_{\text{model}}/h=64$:8 个头各自在 64 维子空间里学一种关系——有的头盯句法依赖,有的头盯指代消解(后续可解释性研究证实了这种自发分工)。因为总维度不变(8 × 64 = 512),多头与「全维单头」计算量几乎相同——**免费买来的表达力**。这个「多头」思想后来一路延伸:MoE 可以看作 FFN 层的多头化(多专家),注意力头数本身也成了架构调参的独立轴([GLM-4.5](/papers/glm-45) 干脆把头数加到 96 换基准分)。
+论文取 $h=8$、$d_k=d_v=d_{\text{model}}/h=64$<Cite n={1} />：8 个头各自在 64 维子空间里学一种关系——有的头盯句法依赖，有的头盯指代消解（后续可解释性研究证实了这种自发分工）。因为总维度不变(8 × 64 = 512)，多头与「全维单头」计算量几乎相同——**免费买来的表达力**。这个「多头」思想后来一路延伸：MoE 可以看作 FFN 层的多头化（多专家），注意力头数本身也成了架构调参的独立轴([GLM-4.5](/papers/glm-45) 干脆把头数加到 96 换基准分)。
 
-论文原版的多头机制图——$h$ 组线性投影并行做注意力,拼接后再过 $W^O$:
+论文原版的多头机制图——$h$ 组线性投影并行做注意力，拼接后再过 $W^O$:
 
 <figure className="my-6">
-  <img src="./fig-multihead.png" alt="多头注意力:h 组投影并行的缩放点积注意力,输出拼接后线性变换" className="mx-auto h-auto max-w-xs rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./fig-multihead.png" alt="多头注意力：h 组投影并行的缩放点积注意力，输出拼接后线性变换" className="mx-auto h-auto max-w-xs rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Vaswani et al., <em>Attention Is All You Need</em>(arXiv:1706.03762)Figure 2 右
+    <span className="figure-caption-main">多头注意力：h 组投影并行的缩放点积注意力，输出拼接后线性变换</span>
+    <span className="figure-caption-source">图源：Vaswani et al., <em>Attention Is All You Need</em>（arXiv:1706.03762）Figure 2 右</span>
   </figcaption>
 </figure>
 
-## 四、位置编码与残差:补回被丢掉的信息
+## 四、位置编码与残差：补回被丢掉的信息
 
-**注意力本身是排列不变的**——打乱序列顺序,注意力输出只是同步打乱,「谁在谁前面」的信息消失了。RNN 天然带顺序,Transformer 必须显式补回。论文的做法是把位置编成正弦/余弦波加到输入向量上:
+**注意力本身是排列不变的**——打乱序列顺序，注意力输出只是同步打乱，「谁在谁前面」的信息消失了。RNN 天然带顺序，Transformer 必须显式补回。论文的做法是把位置编成正弦/余弦波加到输入向量上：
 
 $$
 PE_{(pos,2i)}=\sin\!\Big(\frac{pos}{10000^{2i/d_{\text{model}}}}\Big),\qquad PE_{(pos,2i+1)}=\cos\!\Big(\frac{pos}{10000^{2i/d_{\text{model}}}}\Big)
 $$
 
-不同维度 $i$ 对应不同频率的波,波长从 $2\pi$ 到 $10000\cdot 2\pi$ 构成几何级数——像一套不同刻度的尺子,低维量细粒度位置、高维量粗粒度位置。选三角函数而非可学习的位置嵌入,是因为它能**外推到训练没见过的长度**,且 $PE_{pos+k}$ 可以表示成 $PE_{pos}$ 的线性函数,模型容易学到相对位置关系。(后来的模型基本都换成了旋转位置编码 RoPE,但「用一个函数把位置编码进注意力」的思路正是从这里来的。)
+不同维度 $i$ 对应不同频率的波，波长从 $2\pi$ 到 $10000\cdot 2\pi$ 构成几何级数——像一套不同刻度的尺子，低维量细粒度位置、高维量粗粒度位置。选三角函数而非可学习的位置嵌入，是因为它能**外推到训练没见过的长度**，且 $PE_{pos+k}$ 可以表示成 $PE_{pos}$ 的线性函数，模型容易学到相对位置关系。<Cite n={1} />（后来的模型基本都换成了旋转位置编码 RoPE<Cite n={4} />，但「用一个函数把位置编码进注意力」的思路正是从这里来的。）
 
-每个子层(注意力、FFN)外面都套**残差连接 + LayerNorm**:
+每个子层（注意力、FFN）外面都套**残差连接 + LayerNorm**:
 
 $$
 \mathbf{x}'=\operatorname{LayerNorm}\big(\mathbf{x}+\operatorname{Sublayer}(\mathbf{x})\big)
 $$
 
-残差让梯度直通底层、LayerNorm 稳定各层分布——这套组合使「堆 6 层编码器 + 6 层解码器」($N=6$、$d_{\text{model}}=512$、FFN 中间维 $d_{ff}=2048$)能稳定端到端训练。FFN 本体是普通的两层全连接(中间 GELU/ReLU),占参数大头——它是后来 MoE 改造的对象([DeepSeek-V3](/papers/deepseek-v3) 把它换成 256 个专家),注意力层反而基本没动。
+残差让梯度直通底层、LayerNorm 稳定各层分布——这套组合使「堆 6 层编码器 + 6 层解码器」($N=6$、$d_{\text{model}}=512$、FFN 中间维 $d_{ff}=2048$)能稳定端到端训练。<Cite n={1} />FFN 本体是普通的两层全连接(中间 GELU/ReLU)，占参数大头——它是后来 MoE 改造的对象([DeepSeek-V3](/papers/deepseek-v3) 把它换成 256 个专家)，注意力层反而基本没动。
 
-解码器多一个约束:训练时用**因果掩码**把「看向未来」的位置设为 $-\infty$(softmax 后为 0),保证自回归性质——这就是今天所有 GPT 系模型的生成约束;解码器还多一个「编码器-解码器注意力」子层,让解码位置可以查询源句(现代 decoder-only 模型已把它去掉)。
+解码器多一个约束：训练时用**因果掩码**把「看向未来」的位置设为 $-\infty$（softmax 后为 0），保证自回归性质——这就是今天所有 GPT 系模型的生成约束；解码器还多一个「编码器-解码器注意力」子层，让解码位置可以查询源句（现代 decoder-only 模型已把它去掉）。
 
 ## 五、关键实验数字
 
-- **翻译**:WMT 2014 英德 28.4 BLEU(超此前最佳集成系统 2 BLEU 以上),英法 41.8 BLEU(单模型新纪录);base 模型 27.3,只花 $3.3\times10^{18}$ FLOPs——远低于当时所有竞品;
-- **训练成本**:base 模型 8 张 P100 跑 12 小时(10 万步),big 模型 3.5 天(30 万步);参数量分别约 65M 与 213M——放在 2025 年是「玩具规模」;
-- **泛化**:论文结尾用**几乎零修改**的架构做英文成分句法分析,拿到有竞争力的成绩——「架构通用性」的最早证据,直接预言了后来 BERT/GPT 的「预训练一次、微调处处」范式;
-- **训练细节**:Adam + 4000 步 warmup 学习率、标签平滑 $\epsilon_{ls}=0.1$(伤困惑度但涨 BLEU)——这些配方里的每一项后来都被反复研究。
+- **翻译**：WMT 2014 英德 28.4 BLEU（超此前最佳集成系统 2 BLEU 以上），英法 41.8 BLEU（单模型新纪录）；base 模型 27.3，只花 $3.3\times10^{18}$ FLOPs——远低于当时所有竞品<Cite n={1} />；
+- **训练成本**：base 模型 8 张 P100 跑 12 小时（10 万步），big 模型 3.5 天（30 万步）；参数量分别约 65M 与 213M——放在 2025 年是「玩具规模」<Cite n={1} />；
+- **泛化**：论文结尾用**几乎零修改**的架构做英文成分句法分析，拿到有竞争力的成绩——「架构通用性」的最早证据，直接预言了后来 BERT/GPT 的「预训练一次、微调处处」范式<Cite n={1} />；
+- **训练细节**：Adam + 4000 步 warmup 学习率、标签平滑 $\epsilon_{ls}=0.1$（伤困惑度但涨 BLEU）<Cite n={1} />——这些配方里的每一项后来都被反复研究。
 
-## 六、局限与八年后的回看
+## 六、源码走读：三个实现里的同一个公式
 
-1. **平方复杂度**:Table 1 第一列的 $O(n^2\cdot d)$ 在长上下文时代成为主要矛盾,催生了稀疏注意力、线性注意力、状态空间模型(Mamba)一整条研究线;
-2. **KV cache 膨胀**:自回归解码要缓存每个 token 的 K/V,推理显存随长度线性涨——[DeepSeek-V3 的 MLA](/papers/deepseek-v3) 把它压缩 57 倍,是对本文架构最大的后续修正之一;
-3. **位置编码的外推弱点**:绝对正弦编码外推能力有限,后续被 ALiBi、RoPE 逐步取代;RoPE 又派生出 YaRN 等长上下文扩展技术;
-4. **原文并未解决「怎么训练大模型」**:论文只有 6 层、512 维;层归一化的位置(Pre-LN vs Post-LN)、QK-Norm、初始化、优化器稳定性等大模型训练难题都是后来社区补的——但它定义的「注意力 + 残差 + FFN + 位置编码」骨架,八年未变。
+论文读到这里，$\operatorname{softmax}(QK^\top/\sqrt{d_k})V$ 还只是纸面公式。下面从三个真实开源实现里节选核心代码，看这个公式如何落地、又如何演化——它们分别是教学注解版、PyTorch 生产内核版、以及现代 LLM（Llama）里的形态：
+
+| 实现 | 定位 | 看点 |
+|---|---|---|
+| [annotated-transformer](https://github.com/harvardnlp/annotated-transformer/blob/master/the_annotated_transformer.py)（哈佛 NLP） | 教学注解版 | 论文公式的直译，极简可读 |
+| [PyTorch `scaled_dot_product_attention`](https://github.com/pytorch/pytorch/blob/main/torch/nn/functional.py) | 生产内核版 | 一次调用背后自动 dispatch 到 flash / mem-efficient / math 后端 |
+| [transformers `modeling_llama.py`](https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py) | 现代 LLM 形态 | GQA + RoPE 对 2017 年 MHA 的改写 |
+
+### 1. 缩放点积注意力：annotated-transformer 的 `attention()`
+
+annotated-transformer<Cite n={6} /> 是 Sasha Rush 团队给论文写的逐行注解实现，`attention()` 就是 Eq(1) 的直译——三行主计算与公式严格一一对应：
+
+```python
+# 节选自 the_annotated_transformer.py（节选，注释为本站所加）
+def attention(query, key, value, mask=None, dropout=None):
+    "Compute 'Scaled Dot Product Attention'"
+    d_k = query.size(-1)
+    # QK^T / sqrt(d_k)：对应论文 Eq(1) 的缩放点积
+    scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+    if mask is not None:
+        # mask 语义：0 的位置填 -1e9，softmax 后权重≈0
+        # 上三角为 0 的因果掩码即「不许看未来」（解码器，论文 3.1 节）
+        scores = scores.masked_fill(mask == 0, -1e9)
+    p_attn = scores.softmax(dim=-1)        # 对 key 维做 softmax
+    if dropout is not None:
+        p_attn = dropout(p_attn)            # 论文 3.4 节：残差 dropout 前施加于注意力权重
+    return torch.matmul(p_attn, value), p_attn  # 加权混合 value，即 Eq(1) 的最后一步
+```
+
+注意这里的 `mask` 是**加性布尔语义**（`0` = 屏蔽）。调用方传入的 `subsequent_mask(size)` 用 `torch.triu(..., diagonal=1)` 生成下三角为 1 的矩阵——1 表示「允许注意」，正好实现解码器的因果约束。这段代码用 `-1e9` 代替 $-\infty$，工程上避免了 NaN，数学上等价（softmax 后该位置权重为 0）。
+
+### 2. 多头机制：`MultiHeadedAttention.forward`
+
+论文 3.2.2 节的「投影 → 并行注意力 → 拼接 → 输出投影」四步，在 `forward` 里就是带编号的四段<Cite n={6} />：
+
+```python
+# 节选自 the_annotated_transformer.py（节选，注释为本站所加）
+def forward(self, query, key, value, mask=None):
+    "Implements Figure 2"
+    if mask is not None:
+        # 同一个 mask 广播到所有 h 个头（1, 1, L, S）
+        mask = mask.unsqueeze(1)
+    nbatches = query.size(0)
+
+    # 1) 三组线性投影 d_model => h x d_k，一步 reshape 成 (batch, h, L, d_k)
+    #    即论文 Eq(2) 的 QW_i^Q / KW_i^K / VW_i^V
+    query, key, value = [
+        lin(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+        for lin, x in zip(self.linears, (query, key, value))
+    ]
+
+    # 2) h 个头并行做注意力（一次批量调用，不是 h 次循环）
+    x, self.attn = attention(
+        query, key, value, mask=mask, dropout=self.dropout
+    )
+
+    # 3) 拼接：transpose 回 (batch, L, h, d_k) 再 view 成 (batch, L, h*d_k)
+    #    即论文 Eq(2) 的 Concat(head_1, ..., head_h)
+    x = (
+        x.transpose(1, 2)
+        .contiguous()
+        .view(nbatches, -1, self.h * self.d_k)
+    )
+    del query
+    del key
+    del value
+    return self.linears[-1](x)   # 4) 输出投影 W^O，即 Eq(2) 最后的矩阵乘
+```
+
+值得留意两点：`__init__` 里 `clones(nn.Linear(d_model, d_model), 4)`——前三组是 $W^Q/W^K/W^V$，第四组是 $W^O$，代码用「同一个形状克隆四次」回避了命名的烦琐；「多头并行」不是 for 循环，而是把 heads 折进 batch 维做**一次批量矩阵乘**——这正是论文 Table 1 里「顺序操作数 $O(1)$」在实现层的写照。
+
+### 3. PyTorch `scaled_dot_product_attention`：一行调用，三种内核
+
+2017 年的 `attention()` 要显式物化 $n\times n$ 的注意力矩阵（显存 $O(n^2)$）。PyTorch 2.0 起，官方把这个公式收进 `F.scaled_dot_product_attention`<Cite n={7} />，其文档给出的「等价数学定义」与上文几乎相同，但真身是按输入自动 dispatch 的多后端内核：
+
+```python
+# 节选自 torch/nn/functional.py 的 scaled_dot_product_attention 文档（节选，注释为本站所加）
+# Efficient implementation equivalent to the following:
+def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
+        is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
+    L, S = query.size(-2), key.size(-2)
+    scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+    attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+    if is_causal:
+        assert attn_mask is None
+        # is_causal=True：内置下三角因果掩码，不用自己构造 mask 矩阵
+        temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
+        attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+    if attn_mask is not None:
+        if attn_mask.dtype == torch.bool:
+            attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+        else:
+            attn_bias = attn_mask + attn_bias     # 浮点 mask 直接加到 score 上
+    if enable_gqa:
+        # GQA：Q 头数是 KV 头数的整数倍时，自动扩展 KV，免手动 repeat
+        key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
+        value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
+    attn_weight = query @ key.transpose(-2, -1) * scale_factor
+    attn_weight += attn_bias
+    attn_weight = torch.softmax(attn_weight, dim=-1)
+    attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+    return attn_weight @ value
+```
+
+这行调用背后，PyTorch 会依据设备、dtype、mask 形状在三个后端里自动选择：**FlashAttention-2**、**Memory-Efficient Attention**、以及 C++ 实现的 **math 后端**<Cite n={7} />。前两者通过分块计算（tiling）避免物化完整注意力矩阵，把长序列的显存从 $O(n^2)$ 压到 $O(n)$——公式一字未改，$O(n^2)$ 复杂度也还在，但「公式怎么算」的工程实现完成了从教学代码到编译内核的跨越（flash 类内核的原理见 [FlashAttention](https://arxiv.org/abs/2205.14135)<Cite n={5} />）。
+
+一个容易踩的坑：SDPA 的布尔 `attn_mask` 语义是 **True = 参与注意**，与 `nn.MultiheadAttention` 的 `key_padding_mask`（True = 屏蔽）正好相反——文档专门加了迁移警告。
+
+### 4. 现代 LLM 的形态：Llama 的 GQA + RoPE
+
+HuggingFace transformers 里 Llama 的 `LlamaAttention`，docstring 依然写着 *"Multi-headed attention from 'Attention Is All You Need' paper"*<Cite n={8} />——但实现已经过两轮改造：
+
+```python
+# 节选自 transformers/models/llama/modeling_llama.py（节选，注释为本站所加）
+class LlamaAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config, layer_idx):
+        ...
+        # GQA：Q 头数 / KV 头数 = 每组共享的 Q 头数（如 Llama-3 8B：32 Q / 8 KV）
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = self.head_dim**-0.5            # 1/sqrt(d_k)，Eq(1) 的缩放原样保留
+
+        self.q_proj = nn.Linear(config.hidden_size,
+                                config.num_attention_heads * self.head_dim, ...)
+        # k/v 投影输出维度只乘 KV 头数——KV 头比 Q 头少，KV cache 随之缩小
+        self.k_proj = nn.Linear(config.hidden_size,
+                                config.num_key_value_heads * self.head_dim, ...)
+        self.v_proj = nn.Linear(config.hidden_size,
+                                config.num_key_value_heads * self.head_dim, ...)
+        self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim,
+                                config.hidden_size, ...)
+```
+
+forward 主流程只剩五步（位置投影、RoPE 旋转、cache 追加、注意力和输出投影），其中 RoPE 与 GQA 是两处关键改写：
+
+```python
+# 节选自 transformers/models/llama/modeling_llama.py（节选，注释为本站所加）
+def forward(self, hidden_states, position_embeddings=None, attention_mask=None, ...):
+    hidden_shape = (*hidden_states.shape[:-1], -1, self.head_dim)
+    query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+    key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+    value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+    cos, sin = position_embeddings
+    # RoPE：把位置编码从「加在输入上」改成「旋转 Q/K 向量」，
+    # 相对位置信息直接进入点积（替代论文 3.5 节的绝对正弦编码）
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+    if past_key_values is not None:
+        # 自回归解码：新 token 的 K/V 追加进缓存，避免重算历史
+        key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+
+    # 按 config 分发到 sdpa / flash / flex / eager 等注意力实现
+    attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+        self.config._attn_implementation, eager_attention_forward
+    )
+    attn_output, attn_weights = attention_interface(
+        self, query_states, key_states, value_states, attention_mask,
+        dropout=0.0 if not self.training else self.attention_dropout,
+        scaling=self.scaling, **kwargs)
+
+    attn_output = attn_output.reshape(*hidden_states.shape[:-1], -1).contiguous()
+    attn_output = self.o_proj(attn_output)
+    return attn_output, attn_weights
+```
+
+与 2017 年原版对照，三个变化恰好对应本页第四章的伏笔：**RoPE**（旋转 $Q/K$ 而非相加，解决了绝对编码外推弱的问题<Cite n={4} />）、**GQA**（多个 Q 头共享一组 KV，KV cache 缩小数倍——2017 年论文里每个 Q 头都有独立的 K/V）、**因果掩码成为默认**（decoder-only 时代，`is_causal=True`，编码器-解码器注意力整层消失）。而 $QK^\top/\sqrt{d_k}$ 的缩放因子，作为 `self.scaling = head_dim**-0.5` 一行保留至今——八年过去，公式一个字符没变。
+
+### 源码链接
+
+- [the_annotated_transformer.py](https://github.com/harvardnlp/annotated-transformer/blob/master/the_annotated_transformer.py)（harvardnlp/annotated-transformer，亦被镜像至 hyperrealm 名下）
+- [torch/nn/functional.py 中的 scaled_dot_product_attention](https://github.com/pytorch/pytorch/blob/main/torch/nn/functional.py) 与 [SDPA 官方文档](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
+- [transformers modeling_llama.py](https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py)
+
+## 七、局限与八年后的回看
+
+1. **平方复杂度**：Table 1 第一列的 $O(n^2\cdot d)$ 在长上下文时代成为主要矛盾，催生了稀疏注意力、线性注意力、状态空间模型（Mamba）一整条研究线；
+2. **KV cache 膨胀**：自回归解码要缓存每个 token 的 K/V，推理显存随长度线性涨——[DeepSeek-V3 的 MLA](/papers/deepseek-v3) 把它压缩 57 倍，是对本文架构最大的后续修正之一；
+3. **位置编码的外推弱点**：绝对正弦编码外推能力有限，后续被 ALiBi、RoPE 逐步取代<Cite n={4} />；RoPE 又派生出 YaRN 等长上下文扩展技术；
+4. **原文并未解决「怎么训练大模型」**：论文只有 6 层、512 维；层归一化的位置（Pre-LN vs Post-LN）、QK-Norm、初始化、优化器稳定性等大模型训练难题都是后来社区补的——但它定义的「注意力 + 残差 + FFN + 位置编码」骨架，八年未变。
 
 ## 小结
 
-- **缩放点积注意力** $\operatorname{softmax}(QK^\top/\sqrt{d_k})V$:查询-键匹配、softmax 加权取值;除以 $\sqrt{d_k}$ 是因为点积方差随维度线性增长,不缩放会让 softmax 饱和、梯度消失。
-- **多头**:8 个 64 维子空间并行做注意力再拼接,总计算量不变,表达力免费翻倍。
-- **并行性是真正的贡献**:顺序操作 $O(n)$ → $O(1)$、任意两 token 路径长度 $O(1)$,GPU 才华第一次在序列建模上完全释放——这是它能吃下后来所有 scaling law 的前提。
-- **位置编码 + 残差 + LayerNorm** 补回顺序信息、撑起深度;解码器因果掩码定义了自回归生成。
-- 28.4/41.8 BLEU、12 小时训练、句法分析泛化——2017 年的论文用最小的篇幅论证了标题:**注意力,就是你所需要的一切**。
+- **缩放点积注意力** $\operatorname{softmax}(QK^\top/\sqrt{d_k})V$：查询-键匹配、softmax 加权取值；除以 $\sqrt{d_k}$ 是因为点积方差随维度线性增长，不缩放会让 softmax 饱和、梯度消失。
+- **多头**：8 个 64 维子空间并行做注意力再拼接，总计算量不变，表达力免费翻倍。
+- **并行性是真正的贡献**：顺序操作 $O(n)$ → $O(1)$、任意两 token 路径长度 $O(1)$，GPU 才华第一次在序列建模上完全释放——这是它能吃下后来所有 scaling law 的前提。
+- **位置编码 + 残差 + LayerNorm** 补回顺序信息、撑起深度；解码器因果掩码定义了自回归生成。
+- 28.4/41.8 BLEU、12 小时训练、句法分析泛化——2017 年的论文用最小的篇幅论证了标题：**注意力，就是你所需要的一切**。
 
-读本站后续所有内容——从[大模型解码](/tutorials/llm-decoding)的策略,到 [GRPO](/papers/grpo-deepseek-r1)、[DPO](/papers/dpo-rafailov) 的对齐目标——你会发现它们全部运行在这篇论文定义的架构上。Transformer 论文值得精读的原因不是它有多复杂,而是它**用最少的部件换来了最大的通用性**:理解了 $\operatorname{softmax}(QK^\top/\sqrt{d_k})V$ 这一个公式,你就理解了今天所有大模型的心脏。
+读本站后续所有内容——从[大模型解码](/tutorials/llm-decoding)的策略，到 [GRPO](/papers/grpo-deepseek-r1)、[DPO](/papers/dpo-rafailov) 的对齐目标——你会发现它们全部运行在这篇论文定义的架构上。Transformer 论文值得精读的原因不是它有多复杂，而是它**用最少的部件换来了最大的通用性**：理解了 $\operatorname{softmax}(QK^\top/\sqrt{d_k})V$ 这一个公式，你就理解了今天所有大模型的心脏。
+
+## 参考资料
+
+<References>
+1. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, Illia Polosukhin (2017). *Attention Is All You Need*. NeurIPS 2017, arXiv: [1706.03762](https://arxiv.org/abs/1706.03762). —— 本文主论文，支撑 Transformer 架构、缩放点积注意力、多头注意力、位置编码、Table 1、Figures 1/2 与 WMT 2014 BLEU / 训练成本数字。
+2. Bahdanau, Cho, Bengio (2015). *Neural Machine Translation by Jointly Learning to Align and Translate*. arXiv: [1409.0473](https://arxiv.org/abs/1409.0473). —— 注意力机制在神经机器翻译中的早期背景。
+3. Hochreiter and Schmidhuber (1997). *Long Short-Term Memory*. Neural Computation. —— RNN / LSTM 长程依赖背景，用于理解 Transformer 要摆脱的顺序瓶颈。
+4. Su et al. (2021). *RoFormer: Enhanced Transformer with Rotary Position Embedding*. arXiv: [2104.09864](https://arxiv.org/abs/2104.09864). —— 后续 RoPE 位置编码背景，帮助理解正弦位置编码的演进。
+5. Dao et al. (2022). *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness*. arXiv: [2205.14135](https://arxiv.org/abs/2205.14135). —— 后续注意力内核优化背景，说明 Transformer 的核心瓶颈如何被系统层继续改造。
+6. Rush 等人 (2018). *The Annotated Transformer*. [harvardnlp/annotated-transformer](https://github.com/harvardnlp/annotated-transformer/blob/master/the_annotated_transformer.py). —— 论文的逐行注解开源实现（`attention()` 与 `MultiHeadedAttention.forward`），支撑源码走读第 1、2 节的代码节选与注释。
+7. PyTorch 官方文档. *scaled_dot_product_attention*. [pytorch.org/docs](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)，实现位于 [pytorch/pytorch](https://github.com/pytorch/pytorch/blob/main/torch/nn/functional.py) 的 `torch/nn/functional.py`。 —— 支撑源码走读第 3 节：等价数学定义、flash / mem-efficient / math 三后端 dispatch 与 `attn_mask` 布尔语义。
+8. HuggingFace transformers. *modeling_llama.py*. [huggingface/transformers](https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py). —— 支撑源码走读第 4 节：LlamaAttention 的 GQA 投影维度、RoPE 应用与注意力后端分发。
+</References>

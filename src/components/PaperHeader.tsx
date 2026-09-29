@@ -2,16 +2,12 @@ import Link from "next/link";
 import { getPaper } from "@/lib/papers";
 import { getTagHint, getTagIcon } from "@/lib/paper-tags";
 
-/**
- * 论文页顶部结构化元信息卡:阅读笔记标题、论文原标题、作者、会议·年份、
- * 关键词标签、arXiv/PDF/代码 外链,以及摘要。放在 <article> 顶部、正文之上。
- * 字段缺失时对应行不渲染。
- */
 export default function PaperHeader({ slug }: { slug: string }) {
   const p = getPaper(slug);
   if (!p) return null;
 
   const venueYear = [p.venue, p.year].filter(Boolean).join(" · ");
+  const motivation = splitMotivation(p.motivation);
 
   const links: { label: string; href: string; emoji: string }[] = [];
   if (p.arxivUrl) links.push({ label: "arXiv", href: p.arxivUrl, emoji: "📄" });
@@ -72,19 +68,36 @@ export default function PaperHeader({ slug }: { slug: string }) {
         </div>
       )}
 
-      {/* 摘要 */}
-      {p.abstract && (
-        <details className="mt-4 group">
-          <summary className="cursor-pointer text-sm font-semibold text-zinc-600 select-none dark:text-zinc-400">
-            摘要
-            <span className="ml-1 text-zinc-400 group-open:hidden">展开 ▾</span>
-            <span className="ml-1 hidden text-zinc-400 group-open:inline">收起 ▴</span>
-          </summary>
-          <p className="mt-2 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-            {p.abstract}
-          </p>
-        </details>
+      {motivation && (
+        <section className="mt-4 rounded-lg border border-zinc-200 bg-zinc-50/70 px-3 py-2.5 text-sm dark:border-zinc-800 dark:bg-zinc-900/40">
+          <div className="space-y-1.5">
+            <p className="leading-6 text-zinc-700 dark:text-zinc-300">
+              <span className="mr-2 font-semibold text-red-600 dark:text-red-300">痛点</span>
+              {motivation.problem}
+            </p>
+            <p className="leading-6 text-zinc-700 dark:text-zinc-300">
+              <span className="mr-2 font-semibold text-emerald-600 dark:text-emerald-300">突破</span>
+              {motivation.solution}
+            </p>
+          </div>
+        </section>
       )}
     </div>
   );
+}
+
+function splitMotivation(motivation?: string) {
+  if (!motivation) return null;
+  const match = /^(.*?。)(.*)$/.exec(motivation);
+  if (!match) {
+    return {
+      problem: motivation,
+      solution: "继续往下看这篇论文如何拆解并解决这个问题。",
+    };
+  }
+  return {
+    problem: match[1],
+    solution:
+      match[2].trim() || "继续往下看这篇论文如何拆解并解决这个问题。",
+  };
 }

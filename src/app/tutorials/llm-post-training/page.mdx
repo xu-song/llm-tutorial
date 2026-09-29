@@ -1,0 +1,441 @@
+import { tutorialMetadata } from "@/lib/tutorials";
+
+export const metadata = tutorialMetadata("llm-post-training");
+
+# 🧰 大模型后训练：从 Base Model 到可用助手
+
+预训练得到的 Base Model 很像一个“会续写互联网文本的压缩器”：它有知识、有语言能力，也可能会解题，但它**不天然知道自己是助手**。你问它一个问题，它可能续写论文、补全网页、模仿论坛吵架，也可能把系统提示、用户意图、安全边界混在一起。
+
+后训练要解决的不是“模型会不会预测下一个 token”——那是预训练已经做的事；后训练要解决的是：**模型能不能按指令做事、能不能偏向更好的回答、能不能在可验证任务上推理、能不能安全地使用工具、能不能便宜稳定地部署。**
+
+> 💡 **关键洞察**：大模型后训练不是某一个算法，而是一套数据—训练—评测—再造数据的闭环系统。SFT、RLHF、DPO、RLVR、GRPO、拒绝采样、蒸馏、安全训练、工具轨迹训练，都只是这套系统里的不同齿轮。
+
+## 后训练到底是什么
+
+**大模型后训练（LLM post-training）** 指的是：在大规模预训练之后，继续用指令数据、偏好反馈、规则奖励、老师模型、工具轨迹、安全数据和评测反馈来优化模型行为的阶段。Tulu 3 的提法是“指令微调、人类反馈强化学习和其他各类微调技术的集合”（Lambert et al., 2024）。它的目标不是从零学语言，而是把一个“通用续写器”塑造成一个“可用助手 / 推理模型 / 工具 Agent”。<Cite n={11} />
+
+先把几个容易混淆的词拆开：
+
+| 名词 | 它是什么 | 和后训练的关系 |
+|---|---|---|
+| **预训练** | 在大规模语料上做 next-token prediction | 产出 Base Model，是后训练的起点 |
+| **继续预训练** | 在领域语料、代码、长上下文数据上继续 next-token prediction | 常发生在后训练前后，但目标仍偏“补知识/补分布” |
+| **微调** | 用较小数据继续训练模型 | 是一种训练动作，不等于完整后训练系统 |
+| **SFT / 指令微调** | 用 prompt-response 示范教模型按格式回答 | 后训练的常见第一步 |
+| **对齐** | 让模型行为更符合人类偏好、安全规则和产品目标 | 是后训练的重要目标，但不覆盖蒸馏、工具、评测等全部内容 |
+| **强化学习** | 从奖励信号优化策略 | 是后训练中的一类方法，不是后训练本身 |
+
+所以，后训练、对齐、强化学习三者的关系更像：
+
+```text
+大模型后训练
+├─ 指令微调 / SFT
+├─ 偏好优化 / 对齐：RLHF、DPO、IPO、KTO、ORPO、SimPO
+├─ 可验证奖励强化学习：RLVR、GRPO、DAPO
+├─ 拒绝采样 / Best-of-N / 数据再生成
+├─ 蒸馏：离线蒸馏、在线蒸馏、混合蒸馏
+├─ 安全、红队、宪法式反馈
+├─ 工具调用与 Agent 轨迹训练
+└─ 评测闭环与数据飞轮
+```
+
+## 一张流水线图
+
+工业里的后训练流水线不一定完全线性，但可以用下面这张“主干图”建立直觉。Tulu 3 给出了一个完整的开放实现：从 Base Model 出发，先策划数据并做 SFT，再在偏好数据上做 DPO，最后用可验证奖励做 RL，全程由一套评测套件驱动数据方向：<Cite n={11} />
+
+```text
+Base Model
+  → SFT / Instruction Tuning
+  → Preference Optimization：RLHF / DPO / IPO / KTO / ORPO / SimPO
+  → Verifiable RL：RLVR / GRPO / DAPO
+  → Rejection Sampling / Best-of-N / Self-Refine
+  → Distillation：offline / on-policy / mixed
+  → Safety + Tool / Agent Training
+  → Evaluation Loop
+  → 下一轮数据与训练
+```
+
+<figure className="my-6">
+  <img src="./tulu3-pipeline.svg" alt="Tulu 3 后训练配方总览：左侧为提示策划与数据混合，模型从 Base Model 依次经过监督微调得到 Tulu3-SFT、直接偏好优化得到 Tulu3-DPO、可验证奖励强化学习得到 Tulu3；下方为评测套件流程——识别核心技能、去污染、开发集与未见评测" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">Tulu 3 后训练配方总览：数据策划与混合喂给 SFT，偏好数据（on-policy 与 off-policy）喂给 DPO，可验证奖励提示喂给 RLVR，评测套件负责识别短板并指导数据方向</span>
+    <span className="figure-caption-source">图源：Lambert et al., <em>Tulu 3: Pushing Frontiers in Open Language Model Post-Training</em>（arXiv:2411.15124）Figure 1</span>
+  </figcaption>
+</figure>
+
+| 阶段 | 输入信号 | 训练目标 | 最常见收益 | 主要风险 |
+|---|---|---|---|---|
+| SFT | 高质量示范回答 | 模仿示范 | 学会指令格式、对话风格、基本任务 | 模仿上限、示范偏差、过度格式化 |
+| RLHF | 人类偏好、奖励模型 | 最大化奖励并受 KL 约束 | 更 helpful、更符合偏好 | reward hacking、奖励模型偏差 |
+| DPO 家族 | 成对偏好或单样本反馈 | 直接优化偏好损失 | 简化 RLHF 流程、训练稳定 | 离线数据覆盖不足、偏好噪声 |
+| RLVR / GRPO | 规则 verifier、代码测试、标准答案 | 用可验证奖励优化推理 | 数学、代码、形式化任务变强 | 奖励稀疏、长度偏置、verifier 被钻 |
+| 拒绝采样 | 多个候选 + 打分器 | 选出更好样本回灌 | 快速提升数据质量 | 打分器失真、候选同质化 |
+| 蒸馏 | 老师输出、logits、轨迹 | 学老师或压缩老师能力 | 降成本、固化 RL 能力 | 继承老师错误、暴露偏差 |
+| 安全训练 | 红队、policy、宪法规则 | 限制危险行为 | 降低越狱、滥用和幻觉风险 | 过拒答、边界不一致 |
+| 工具 / Agent | 工具轨迹、环境反馈 | 学会调用外部系统 | 多步任务、联网、代码执行 | 长程信用分配、环境不稳定 |
+| 评测闭环 | benchmark、线上反馈、红队结果 | 找短板并生成新数据 | 迭代速度变快 | 数据污染、刷榜、评测过拟合 |
+
+> 🧭 **选型直觉**：有示范就先 SFT；有偏好就做 DPO/RLHF；有标准答案就做 RLVR；有强老师就蒸馏；有真实环境就训练工具/Agent；不知道短板在哪，就先建评测闭环。
+
+## SFT：从会续写到会听指令
+
+SFT（Supervised Fine-Tuning）是后训练的第一块地基。形式上它仍然是监督学习：给模型一批 `prompt → response` 示范，用交叉熵让模型提高示范回答的概率。它教给模型的不是“世界知识本身”，而是**如何把已有能力组织成用户想要的形式**：<Cite n={1} />
+
+- 用户问问题时，应该回答而不是续写用户的话；
+- 多轮对话里，应该区分系统、用户、助手角色；
+- 数学题、代码题、翻译、摘要、拒答各有不同格式；
+- 语气、长度、结构要符合产品预期。
+
+这和[模仿学习](/tutorials/imitation-learning)很像：专家示范告诉你“应该怎么做”，但没告诉你“两个可行回答里哪个更好”。所以 SFT 稳定、便宜、可控，却也有明显上限：**它会模仿数据分布，而不是主动优化偏好。**<Cite n={1} />
+
+InstructGPT 的经验很有代表性：论文报告称，1.3B 参数的 InstructGPT 在人类评估中胜过了 175B 的 GPT-3，说明对可用性而言，**示范数据的量和质，比模型本身大 100 倍更划算**（Ouyang et al., 2022）。<Cite n={1} />
+
+如果想补齐这个数学直觉，可以先看[实战：分类与语言模型的损失](/tutorials/ml-losses)和[交叉熵与 KL 散度](/tutorials/cross-entropy-kl)。
+
+## 偏好优化：从“像示范”到“更好”
+
+人类很难给一个回答打绝对分，却很容易比较两个回答：“A 比 B 更有帮助”“B 虽然流畅但编造了引用”“A 拒答太死，B 边界更合适”。这就是偏好优化的入口。
+
+经典 [RLHF](/tutorials/rlhf) 流水线通常分三步：
+
+```text
+SFT 模型 → 收集成对偏好 → 训练奖励模型 → PPO / REINFORCE 优化策略
+```
+
+奖励模型把“人类更喜欢哪个回答”压成一个标量奖励，PPO 或 REINFORCE 再提高高奖励回答的概率，同时用 KL 约束把模型拴在参考模型附近，避免它为了奖励跑偏（Christiano et al., 2017；Ouyang et al., 2022）。这个思路来自强化学习，所以理解 [策略梯度](/tutorials/policy-gradient)和[前向 / 反向 KL](/tutorials/forward-reverse-kl)会很有帮助。<Cite n={[1,2]} />
+
+DPO 则走了另一条路：它把带 KL 约束的偏好优化改写成一个直接在偏好对上训练的监督式损失，不再显式训练奖励模型，也不需要在线采样（Rafailov et al., 2023）。后续的 IPO、KTO、ORPO、SimPO 又分别在偏好噪声、单样本反馈、参考模型依赖、单阶段训练等方向做了工程化改造。<Cite n={[3,4,5,6,7]} />
+
+| 方法 | 需要奖励模型？ | 需要在线采样？ | 适合场景 | 代价 |
+|---|---|---|---|---|
+| RLHF / PPO | ✅ | ✅ | 要持续探索、奖励可学习 | 训练复杂、显存和采样成本高 |
+| DPO | ❌ | ❌ | 有高质量成对偏好数据 | 依赖离线数据覆盖 |
+| IPO | ❌ | ❌ | 偏好标签有噪声 | 仍需成对数据 |
+| KTO | ❌ | ❌ | 只有“好/坏”单样本反馈 | 信号比成对偏好弱 |
+| ORPO / SimPO | ❌ | ❌ | 想简化 SFT + 偏好优化流程 | 超参和数据质量敏感 |
+
+> ⚠️ **边界提醒**：DPO 家族省掉了 RL 循环，但也放弃了在线探索。它擅长“从已有偏好数据里学习”，不擅长“让模型自己试错发现新策略”。
+
+## RLVR 与 GRPO：当答案可以被判对错
+
+如果任务是开放聊天，人类偏好或奖励模型很重要；但如果任务是数学、代码、形式化证明、结构化约束，很多时候答案可以被自动验证：
+
+- 数学题：最终答案能否和标准答案等价；
+- 代码题：生成程序能否通过单元测试；
+- 形式化证明：证明能否被 proof checker 接受；
+- 工具任务：环境状态是否达到目标。
+
+这就是 RLVR（Reinforcement Learning with Verifiable Rewards，可验证奖励强化学习）的核心：**用规则判分或执行器反馈取代学习型奖励模型**（Lambert et al., 2024）。<Cite n={11} />它减少了奖励模型幻觉和偏好漂移，但也把风险转移到 verifier 本身：规则会漏判，测试会不完备，格式奖励会被钻空子。
+
+[GRPO 与可验证奖励](/tutorials/grpo-rlvr)讲的是这条线最典型的算法组合：GRPO 用同一道题的一组回答互相当基线，省掉 PPO 里昂贵的 critic（Shao et al., 2024）；RLVR 用“答案对不对”给奖励，省掉奖励模型。<Cite n={8} />
+
+| 维度 | RLHF / PPO | RLVR / GRPO |
+|---|---|---|
+| 奖励来源 | 人类偏好训练出的奖励模型 | 标准答案、规则、测试、环境反馈 |
+| 优势估计 | critic / value model | 同题多样本组内相对优势 |
+| 擅长任务 | 开放对话、风格、安全偏好 | 数学、代码、推理、可执行任务 |
+| 主要风险 | reward hacking、奖励模型偏差 | 稀疏奖励、长度偏置、难度偏置、verifier hacking |
+
+> 🎯 一句话：RLHF 解决“人更喜欢什么”，RLVR 解决“答案到底对不对”。前者适合开放偏好，后者适合可验证任务。
+
+## 拒绝采样：先多生成，再挑好的
+
+拒绝采样（rejection sampling）和 Best-of-N 的思想很朴素：同一个 prompt 让模型生成多个候选，再用人类、奖励模型、verifier 或 judge 选出更好的那个。它既可以作为推理时策略，也可以作为数据再生成手段：把被选中的样本回灌到 SFT 或偏好训练里。<Cite n={9} />
+
+```python
+candidates = model.sample(prompt, n=16)
+scores = [judge(prompt, answer) for answer in candidates]
+best = candidates[argmax(scores)]
+train_on(best)
+```
+
+下面这个玩具示例演示了 Best-of-N 的核心权衡：judge 怎么打分，决定了模型会学出什么。试着改一改权重，看“最好回答”怎么变：
+
+<CodeRunner title="Best-of-N：打分器决定模型学什么" language="python" defaultCode={`import numpy as np
+
+rng = np.random.default_rng(3)
+
+# 同一个 prompt 下模型生成的 N 个候选回答
+# 每个回答有四个可测属性: 正确性, 有用性, 长度, 流畅的格式
+N = 8
+correctness = rng.binomial(1, 0.35, N)       # 答案对不对 (verifier 判)
+helpfulness = rng.normal(0.6, 0.2, N)        # judge 打的帮助分
+length = rng.integers(50, 2000, N)           # 回答长度 (token)
+style = rng.binomial(1, 0.7, N)              # 格式是否漂亮
+
+def score(w_correct, w_help, w_len, w_style):
+    """打分器 = 各属性的加权和。RL/BoN 会把被选样本回灌训练,
+    于是模型的进化方向完全由这套权重决定。"""
+    return (w_correct * correctness
+            + w_help * helpfulness
+            + w_len * (length / 1000)
+            + w_style * style)
+
+# 三种打分策略, 同一批候选, 选出的"最佳回答"完全不同
+strategies = {
+    "只看对错 (RLVR 式)":        score(1.0, 0.0, 0.0, 0.0),
+    "对错 + 帮助 (均衡)":        score(1.0, 1.0, 0.0, 0.0),
+    "帮助 + 长度 (被 hack)":     score(0.0, 1.0, 1.0, 0.0),
+}
+
+for name, s in strategies.items():
+    best = int(np.argmax(s))
+    print(f"{name}")
+    print(f"  选中候选 #{best}: 正确={correctness[best]}, "
+          f"帮助={helpfulness[best]:.2f}, 长度={length[best]}, 格式={style[best]}")
+    print(f"  平均正确率 (全体候选): {correctness.mean():.2f}")
+    print()
+
+# 观察: 第三种策略总选最长、最会讨好 judge 的回答,
+# 正确性没人在乎 —— 这就是 reward hacking 的雏形。
+`} />
+
+它的价值在于把“模型偶尔能生成好答案”变成“训练数据里高质量答案的比例更高”。DeepSeek-R1 一类流水线里，RL 后采样、过滤、再 SFT、再 RL，就是这种数据飞轮的典型形态（DeepSeek-AI, 2025）。<Cite n={9} />
+
+但拒绝采样不是免费午餐：如果候选都很差，选不出好样本；如果 judge 有漏洞，模型会把漏洞放大；如果只选短期高分答案，可能牺牲多样性和鲁棒性。
+
+## 蒸馏：把昂贵能力压回便宜模型
+
+训练出一个强模型只是第一步，真正部署时还要考虑成本、延迟、显存和吞吐。蒸馏的作用是把昂贵模型或昂贵训练过程得到的能力，迁移到更便宜、更合适的模型里。<Cite n={12} />
+
+站内已经有一组蒸馏教程：
+
+- [知识蒸馏](/tutorials/knowledge-distillation)：老师用软标签把“暗知识”传给学生；
+- [在线蒸馏](/tutorials/on-policy-distillation)：学生自己生成，老师在学生轨迹上逐 token 纠正；
+- [混合蒸馏](/tutorials/mixed-distillation)：把离线的便宜和在线的覆盖按比例混合；
+- [学生超越老师](/tutorials/student-beats-teacher)：解释为什么 student 有时能超过 teacher。
+
+在大模型后训练里，蒸馏常见于四种场景：
+
+| 场景 | 蒸馏什么 | 为什么有用 |
+|---|---|---|
+| 强模型 → 小模型 | 回答、logits、推理轨迹 | 降低部署成本 |
+| RL 模型 → SFT 模型 | RL 后的好行为 | 固化 RL 搜索到的能力 |
+| 长思维链 → 短回答 | long CoT 的结果或压缩轨迹 | 提高推理速度 |
+| 多老师 → 单学生 | 多领域专家能力 | 合并能力、简化服务架构 |
+
+> 💡 **关键区别**：SFT 是学数据集里的示范；蒸馏是学老师模型的行为分布；RL 是从奖励里探索。三者经常串在一起，而不是互相替代。<Cite n={[12,13]} />
+
+## 合成数据：后训练的数据飞轮
+
+后训练越来越像一个数据飞轮：模型生成数据，评测器发现问题，过滤器筛掉坏样本，人类或规则补关键标签，再把新数据喂回模型。<Cite n={[10,11]} />
+
+合成数据可以出现在很多位置：<Cite n={[10,11]} />
+
+- **指令合成**：扩充 prompt 类型和任务覆盖；
+- **回答合成**：用强模型生成高质量 response；
+- **偏好合成**：让 judge 比较两个回答，形成 preference pair；
+- **推理轨迹合成**：生成 step-by-step 解题过程；
+- **工具轨迹合成**：记录搜索、调用 API、读结果、继续推理的多步路径；
+- **安全数据合成**：构造越狱、红队、边界案例；
+- **评测驱动生成**：从模型失败样本反推新训练样本。
+
+合成数据的质量不来自“合成”二字本身，而来自三件事的配合：**生成器够强、过滤器够严、评测器够可靠**。缺任何一个，飞轮都可能变成噪声放大器。
+
+## 安全后训练：不是只加拒答样本
+
+安全后训练要处理的不是一个单独分类任务，而是一组互相拉扯的边界：帮助用户、保持诚实、避免伤害、遵守政策、不过度拒答。
+
+常见信号包括：<Cite n={[10,14]} />
+
+- 红队样本和越狱样本；
+- policy 标注和拒答边界；
+- 宪法式反馈（Constitutional AI / RLAIF）（Bai et al., 2022）；
+- 安全奖励模型或安全 judge；
+- 上线后的违规反馈和回归测试。
+
+安全训练最难的地方在于“边界一致性”：模型既不能对危险请求顺从，也不能把正常教育、研究、新闻分析一概拒掉。它和 [RLHF 里的 reward hacking](/tutorials/rlhf#reward-hacking当代理奖励被钻空子) 是同一个大问题的不同侧面：**代理目标和真实目标之间只要有缝，优化就会把缝撬开。**
+
+## 工具与 Agent：从单轮回答到多步行动
+
+工具调用把后训练从“回答文本”推向“在环境里行动”。一个工具型模型不仅要会写答案，还要会：
+
+```text
+观察问题 → 制定计划 → 选择工具 → 调用工具 → 读取结果 → 修正计划 → 输出答案
+```
+
+SFT 可以教会函数调用格式（Schick et al., 2023），偏好优化可以教会“什么时候该用工具”，环境反馈或 RL 可以教会“多步任务最终有没有完成”（Yao et al., 2022）。<Cite n={[15,16]} />这类训练的难点是长程信用分配：最终失败可能来自第一步计划错、第三步工具选错、第五步读结果漏了，也可能来自环境本身不稳定。
+
+所以 Agent 后训练往往依赖：sandbox、任务环境、轨迹过滤、自动评测、失败回放。<Cite n={[15,16]} />可以把它理解成“后训练 + 软件工程测试环境”的结合。
+
+相关论文笔记可以看：[Kimi K2](/papers/kimi-k2)、[GLM-4.5](/papers/glm-45)、[UI-TARS-2](/papers/ui-tars-2)。
+
+## 评测闭环：后训练的方向盘
+
+没有评测，后训练就只是在“感觉变好了”。评测在后训练里至少有五个作用：
+
+1. **发布门禁**：模型能不能上线；
+2. **回归检测**：新训练有没有破坏旧能力；
+3. **数据生成方向**：失败样本指向下一批训练数据；
+4. **奖励 / verifier 校准**：打分器是否还代表真实目标；
+5. **安全红队**：发现越狱、滥用和边界漏洞。
+
+这也是为什么后训练不是一次性流程，而是循环：<Cite n={[10,11,17]} />
+
+```text
+训练 → 评测 → 找失败模式 → 造数据 / 改奖励 / 改 verifier → 再训练 → 再评测
+```
+
+站内的[模型评估](/tutorials/model-evaluation)和[交叉验证](/tutorials/cross-validation)讲的是更基础的评估思想；放到大模型后训练里，评测还要额外面对数据污染、benchmark 过拟合、上下文长度差异、judge 偏差和线上分布漂移。<Cite n={17} />
+
+## 方法选型速查表
+
+| 你手里有什么 | 优先考虑 | 为什么 | 小心什么 |
+|---|---|---|---|
+| 高质量示范回答 | SFT | 稳定、便宜、先教格式 | 示范偏差、模仿上限 |
+| 成对偏好 | DPO / RLHF | 直接学习“哪个回答更好” | 偏好噪声、数据覆盖不足 |
+| 可自动判对错 | RLVR / GRPO | 不必训练奖励模型 | verifier 漏洞、奖励稀疏 |
+| 强 teacher | 蒸馏 / OPD / 混合蒸馏 | 降成本、迁移能力 | 学生轨迹偏移、继承错误 |
+| 多个候选答案 | 拒绝采样 / Best-of-N | 快速提高数据质量 | judge 失真、候选同质化 |
+| 工具环境 | tool SFT + agentic RL | 学会多步行动 | 长程信用分配 |
+| 安全规则与红队样本 | safety SFT / preference / RLAIF | 明确行为边界 | 过拒答、边界不一致 |
+| benchmark / 线上失败样本 | eval-driven data loop | 针对短板迭代 | 数据污染、刷榜 |
+
+## 为什么说它是一个大领域
+
+后训练之所以应该单独成类，不是因为某个算法特别火，而是因为它横跨了**数据工程、监督学习、强化学习、偏好学习、程序验证、安全治理、工具环境、评测科学和部署工程**。同一个模型发布前后，往往会经历多轮数据筛选、SFT、偏好优化、RLVR、拒绝采样、蒸馏、安全校准和回归评测；每一环都能展开成单独专题。
+
+更容易混淆的是，“post-training”在不同语境下还会指不同东西：大模型对齐社区通常指**预训练之后的行为塑造**；系统部署社区有时也把量化、剪枝、校准称作 post-training quantization / optimization。本文讨论的是前者，但真正产品化时，两条线会在“如何把模型安全、便宜、稳定地上线”处汇合。
+
+| 支线 | 典型问题 | 站内已有关联内容 | 适合继续扩展 |
+|---|---|---|---|
+| 指令数据与 SFT | 数据从哪里来？如何混合、去重、去污染？ | [模仿学习](/tutorials/imitation-learning)、[实战：LM 损失](/tutorials/ml-losses) | 教程：指令微调与数据配方；精读：Self-Instruct、FLAN、Tulu 3 |
+| 偏好数据 | 偏好对、单样本好坏、多属性打分如何采？ | [从 RL 到 RLHF](/tutorials/rlhf)、[DPO 论文精读](/papers/dpo-rafailov) | 教程：偏好数据构造；精读：UltraFeedback、HelpSteer |
+| 奖励模型 | 人类比较如何变成标量奖励？RM 为什么会被 hack？ | [从 RL 到 RLHF](/tutorials/rlhf)、[PPO 论文精读](/papers/ppo-schulman) | 教程：奖励模型；精读：Summarize from Human Feedback、InstructGPT |
+| 偏好优化算法 | PPO、DPO、IPO、KTO、ORPO、SimPO 各自解决什么？ | [从 RL 到 RLHF](/tutorials/rlhf)、[前向 / 反向 KL](/tutorials/forward-reverse-kl)、[DPO 论文精读](/papers/dpo-rafailov)、[PPO 论文精读](/papers/ppo-schulman) | 教程：偏好优化算法谱系；精读：KTO、ORPO、SimPO |
+| 可验证奖励与推理 RL | 数学、代码、证明题怎么用 verifier 给奖励？ | [GRPO 与可验证奖励](/tutorials/grpo-rlvr)、[DeepSeek-R1 / GRPO](/papers/grpo-deepseek-r1)、[Kimi K1.5](/papers/kimi-k15)、[DeepSeek-V3.2](/papers/deepseek-v3-2) | 教程：RLVR 工程实践；精读：DeepSeekMath、Tulu 3 |
+| 过程监督与验证器 | 只看最终答案够不够？step-level reward 怎么标？ | [GRPO 与可验证奖励](/tutorials/grpo-rlvr)、[UI-TARS-2](/papers/ui-tars-2) | 教程：ORM vs PRM；精读：Let’s Verify Step by Step |
+| 拒绝采样与搜索 | Best-of-N、majority vote、self-refine 怎么变成训练数据？ | [大模型解码](/tutorials/llm-decoding)、[DeepSeek-R1 / GRPO](/papers/grpo-deepseek-r1)、[Kimi K1.5](/papers/kimi-k15) | 教程：采样—过滤—再训练；精读：WebGPT |
+| 蒸馏与压缩 | 强模型、RL 模型、长 CoT 如何压回可部署模型？ | [知识蒸馏](/tutorials/knowledge-distillation)、[在线蒸馏](/tutorials/on-policy-distillation)、[混合蒸馏](/tutorials/mixed-distillation)、[学生超越老师](/tutorials/student-beats-teacher)、[OPD 论文精读](/papers/opd-agarwal)、[MiniLLM](/papers/minillm-gu)、[Thinking Machines OPD](/papers/tml-opd)、[Rethinking OPD](/papers/rethinking-opd)、[Qwen3](/papers/qwen3)、[MiMo-v2-Flash](/papers/mimo-v2-flash)、[Nemotron-Cascade 2](/papers/nemotron-cascade-2) | 教程：推理蒸馏；精读：DeepSeek-R1 蒸馏 |
+| 安全与宪法式训练 | 如何减少危险顺从、越狱、过拒答和价值冲突？ | [从 RL 到 RLHF](/tutorials/rlhf#reward-hacking当代理奖励被钻空子)、[Llama 3 报告相关引用](#参考资料) | 教程：安全后训练；精读：Constitutional AI、Self-Correction |
+| 工具与 Agent | 如何让模型学会搜索、调用 API、执行代码、多步行动？ | [多智能体强化学习](/tutorials/multi-agent-rl)、[Kimi K2](/papers/kimi-k2)、[GLM-4.5](/papers/glm-45)、[GLM-5](/papers/glm-5)、[UI-TARS-2](/papers/ui-tars-2) | 教程：工具调用训练；精读：WebGPT、ReAct、Toolformer、ToolLLM、AgentTuning |
+| 评测与数据闭环 | benchmark 如何驱动数据生成？如何防污染和刷榜？ | [模型评估](/tutorials/model-evaluation)、[交叉验证](/tutorials/cross-validation)、[DeepSeek-R1 / GRPO](/papers/grpo-deepseek-r1) | 教程：后训练评测闭环；精读：HELM、Tulu 3 |
+| 多模态后训练 | VLM 如何做指令、偏好、安全、工具与 OCR/GUI 训练？ | [Qwen3-VL](/papers/qwen3-vl)、[InternVL3.5](/papers/internvl35)、[UI-TARS-2](/papers/ui-tars-2)、[DeepSeek-OCR](/papers/deepseek-ocr) | 教程：多模态后训练；精读：Qwen3-VL、UI-TARS-2 |
+
+这张表也说明：如果后续继续扩展本站，“大模型后训练”不应只新增一个 RLVR 分支，而应该成为连接**指令数据、偏好优化、推理 RL、蒸馏、安全、Agent 与评测**的上层目录。当前已经新增的是这篇总览页；下面列出的更多教程和论文精读还只是路线图，后续可以逐篇落地。
+
+## 可新增的教程与论文精读路线图
+
+可以按“先教程、后论文精读”的方式扩展，避免一上来就堆论文名。表中带链接的是站内已经存在的页面；未带链接的是建议后续新增的页面。
+
+| 优先级 | 建议新增教程 | 解决的读者问题 | 已有站内入口 | 可配套论文精读 |
+|---|---|---|---|---|
+| P0 | 指令微调与数据配方 | SFT 数据如何构造、清洗、混合？为什么少量高质量数据能显著改变行为？ | [模仿学习](/tutorials/imitation-learning)、[实战：LM 损失](/tutorials/ml-losses) | Self-Instruct、FLAN、Instruction Tuning with GPT-4、Tulu 3 |
+| P0 | 偏好数据与奖励模型 | 偏好对如何收集？RM 为什么既有用又危险？ | [从 RL 到 RLHF](/tutorials/rlhf)、[PPO 论文精读](/papers/ppo-schulman) | Christiano et al.、Learning to summarize from human feedback、InstructGPT |
+| P0 | 偏好优化算法谱系 | PPO、DPO、IPO、KTO、ORPO、SimPO 的输入、损失和适用边界是什么？ | [从 RL 到 RLHF](/tutorials/rlhf)、[DPO 论文精读](/papers/dpo-rafailov) | [DPO](/papers/dpo-rafailov)、[PPO](/papers/ppo-schulman)、KTO、ORPO、SimPO |
+| P0 | RLVR 工程实践 | verifier、采样、格式奖励、难度控制、长度偏置怎么处理？ | [GRPO 与可验证奖励](/tutorials/grpo-rlvr)、[DeepSeek-R1 / GRPO](/papers/grpo-deepseek-r1) | DeepSeekMath、[DeepSeek-R1](/papers/grpo-deepseek-r1)、Tulu 3 |
+| P1 | ORM vs PRM：结果监督与过程监督 | 什么时候只看最终答案，什么时候要给每一步打分？ | [GRPO 与可验证奖励](/tutorials/grpo-rlvr)、[UI-TARS-2](/papers/ui-tars-2) | Let’s Verify Step by Step、PRM800K 相关工作 |
+| P1 | 拒绝采样、Best-of-N 与数据飞轮 | 多采样、过滤、回灌如何提升数据质量？何时会放大奖励漏洞？ | [大模型解码](/tutorials/llm-decoding)、[DeepSeek-R1 / GRPO](/papers/grpo-deepseek-r1) | [DeepSeek-R1](/papers/grpo-deepseek-r1)、WebGPT |
+| P1 | 合成指令与 Evol-Instruct | 如何自动造指令、造代码题、扩展任务覆盖？ | [实战：LM 损失](/tutorials/ml-losses)、[模型评估](/tutorials/model-evaluation) | Self-Instruct、WizardCoder / Evol-Instruct、UltraFeedback |
+| P1 | 安全后训练与 RLAIF | 宪法式反馈、安全 judge、红队样本如何进入训练闭环？ | [RLHF reward hacking](/tutorials/rlhf#reward-hacking当代理奖励被钻空子) | Constitutional AI、Self-Correction、Llama 3 safety |
+| P1 | 工具调用与 Agent 后训练 | 函数调用、搜索、API、浏览器、代码执行轨迹怎么训练？ | [多智能体强化学习](/tutorials/multi-agent-rl)、[Kimi K2](/papers/kimi-k2)、[GLM-4.5](/papers/glm-45)、[GLM-5](/papers/glm-5)、[UI-TARS-2](/papers/ui-tars-2) | WebGPT、ReAct、Toolformer、ToolLLM、AgentTuning |
+| P2 | 后训练评测与数据污染 | 评测如何指导下一轮数据？如何避免 benchmark 过拟合？ | [模型评估](/tutorials/model-evaluation)、[交叉验证](/tutorials/cross-validation) | HELM、Tulu 3、Llama 3 |
+| P2 | 推理蒸馏与长 CoT 压缩 | 如何把 RL / 搜索得到的推理能力压回便宜模型？ | [知识蒸馏](/tutorials/knowledge-distillation)、[在线蒸馏](/tutorials/on-policy-distillation)、[混合蒸馏](/tutorials/mixed-distillation)、[学生超越老师](/tutorials/student-beats-teacher) | [OPD](/papers/opd-agarwal)、[MiniLLM](/papers/minillm-gu)、[Thinking Machines OPD](/papers/tml-opd)、[Qwen3](/papers/qwen3)、[MiMo-v2-Flash](/papers/mimo-v2-flash) |
+| P2 | 多模态与 GUI Agent 后训练 | 视觉语言模型、OCR、GUI 操作、工具轨迹如何对齐？ | [Qwen3-VL](/papers/qwen3-vl)、[InternVL3.5](/papers/internvl35)、[UI-TARS-2](/papers/ui-tars-2)、[DeepSeek-OCR](/papers/deepseek-ocr) | [Qwen3-VL](/papers/qwen3-vl)、[InternVL3.5](/papers/internvl35)、[UI-TARS-2](/papers/ui-tars-2) |
+
+一个比较自然的写作顺序是：先补 P0 的三篇“地基教程”（SFT 数据、奖励模型、偏好优化谱系），再补 RLVR 工程实践；等这四篇稳定后，再展开过程监督、安全、Agent 和评测闭环。
+
+## 站内学习路径
+
+如果你想按顺序补全这张地图，可以这样读：
+
+1. 先看[大模型解码](/tutorials/llm-decoding)：理解训练好的模型如何一个 token 一个 token 生成文字；
+2. 再看[从 RL 到 RLHF](/tutorials/rlhf)：理解 SFT、奖励模型、PPO、DPO 这条偏好优化主线；
+3. 再看[GRPO 与可验证奖励](/tutorials/grpo-rlvr)：理解 RLVR 为什么适合数学、代码和推理；
+4. 再看[知识蒸馏](/tutorials/knowledge-distillation)、[在线蒸馏](/tutorials/on-policy-distillation)、[混合蒸馏](/tutorials/mixed-distillation)：理解能力如何从老师搬到学生；
+5. 最后看[学生超越老师](/tutorials/student-beats-teacher)：理解为什么“蒸馏 = 永远不超过老师”这个直觉并不完整。
+
+## ❓ 常见问题 FAQ
+
+**Q：后训练是不是就是 fine-tuning？**
+不是。fine-tuning 是“继续训练模型”这个动作；后训练是围绕可用性、偏好、安全、推理、工具、部署建立的一整套流程。SFT 是后训练的一部分，但后训练远不止 SFT。
+
+**Q：后训练是不是就是 alignment？**
+也不是。alignment 强调模型行为符合人类意图和安全边界；后训练还包括蒸馏、工具轨迹、评测闭环、推理 RL、部署压缩等更工程化的目标。
+
+**Q：为什么不把“大模型后训练”直接放进“强化学习”？**
+因为强化学习只是后训练的一条分支。SFT、DPO、拒绝采样、蒸馏、安全数据、工具轨迹训练都可能完全不跑 RL。把后训练归到强化学习下面，会低估这个领域的范围。
+
+**Q：RLVR 会取代 RLHF 吗？**
+不会。RLVR 适合答案可验证的任务，RLHF 适合开放偏好和对话质量。数学、代码可以用规则判分；“回答是否礼貌、是否过度拒答、是否有帮助”通常仍需要偏好数据或 judge。
+
+**Q：为什么后训练越来越依赖蒸馏？**
+因为 RL、搜索、多候选采样和强 teacher 都很贵。蒸馏能把昂贵过程得到的行为压回便宜模型，让能力更容易部署。但蒸馏本身不是能力的唯一来源，它常常负责“搬运和固化”。
+
+## ✏️ 动手作业
+
+1. **画自己的后训练流水线**：选一个任务（数学、客服、代码助手、工具 Agent），写出它需要哪些数据、奖励、评测和安全规则。
+2. **判断信号类型**：把“用户点赞”“单元测试通过”“人工示范回答”“GPT-4 生成的答案”“红队越狱样本”分别归到 SFT、偏好优化、RLVR、蒸馏或安全训练里。
+3. **设计一个 verifier**：给“代码题答案是否正确”写一个判分方案，列出它可能漏判和被 hack 的方式。
+4. **比较两条路线**：同样想提升数学能力，一条路线用 RLVR，另一条路线用强模型蒸馏。分别写出成本、风险和适用前提。
+
+## 🔭 讨论与展望
+
+后训练的趋势很清楚：它正在从“几个训练阶段”变成“一个持续运行的数据系统”。模型越强，短板越细，越不能指望单一算法解决所有问题。
+
+1. **奖励越来越多源**：人类偏好、AI judge、规则 verifier、工具环境、线上反馈会同时存在。关键问题不再是“用不用奖励”，而是“多个奖励冲突时信谁”。
+2. **数据越来越闭环**：模型失败样本会生成新数据，评测结果会反推训练集，训练集又会改变评测分布。闭环越快，越要防止数据污染和刷榜。
+3. **蒸馏越来越重要**：强模型负责探索，小模型负责部署，老师模型负责打分，学生模型负责落地。后训练的很多成本问题最终都会落到蒸馏和压缩上。
+4. **Agent 后训练会更像系统工程**：工具、浏览器、代码执行、文件系统、长程任务都把模型训练和软件测试绑在一起。未来的后训练不只是调 loss，也是搭环境、写评测、管数据。
+
+> 🎯 **一句话记住**：后训练不是“预训练之后再微调一下”，而是把 Base Model 变成可用系统的整套工程：用 SFT 教格式，用偏好优化教好坏，用 RLVR 教可验证推理，用蒸馏降成本，用安全和工具训练接入真实世界，再用评测闭环持续迭代。
+
+## 📌 小结
+
+| 概念 | 一句话 |
+|---|---|
+| Base Model | 预训练得到的通用续写模型，有能力但未必可控 |
+| SFT | 用示范回答教模型听指令、守格式 |
+| RLHF | 用人类偏好训练奖励，再用 RL 优化策略 |
+| DPO 家族 | 把偏好优化变成更简单的离线损失 |
+| RLVR | 用规则、答案、测试、环境反馈做可验证奖励 |
+| GRPO | 用同题多回答的组内相对分数省掉 critic |
+| 拒绝采样 | 多生成几个，选好的回灌为训练数据 |
+| 蒸馏 | 把强老师或昂贵训练过程的能力压进目标模型 |
+| 安全后训练 | 用红队、policy、偏好和评测约束行为边界 |
+| 工具 / Agent 训练 | 让模型在环境中观察、调用工具并完成多步任务 |
+| 评测闭环 | 用失败样本驱动下一轮数据和训练 |
+
+## 延伸阅读
+
+- **站内专题**：[从 RL 到 RLHF](/tutorials/rlhf) —— 偏好优化、奖励模型、PPO、DPO 的主线。
+- **站内专题**：[GRPO 与可验证奖励](/tutorials/grpo-rlvr) —— RLVR、GRPO、长度偏置、难度偏置与 DeepSeek-R1。
+- **站内专题**：[知识蒸馏](/tutorials/knowledge-distillation) → [在线蒸馏](/tutorials/on-policy-distillation) → [混合蒸馏](/tutorials/mixed-distillation) → [学生超越老师](/tutorials/student-beats-teacher) —— 蒸馏系列。
+- **站内论文笔记**：[DPO](/papers/dpo-rafailov)、[PPO](/papers/ppo-schulman)、[DeepSeek-R1 / GRPO](/papers/grpo-deepseek-r1)、[Kimi K2](/papers/kimi-k2)、[GLM-4.5](/papers/glm-45)。
+
+## 参考资料
+
+<References>
+1. Ouyang et al. (2022). *Training language models to follow instructions with human feedback*. arXiv: [2203.02155](https://arxiv.org/abs/2203.02155). —— InstructGPT/RLHF 的经典三阶段流水线：SFT、奖励模型、PPO。本篇 SFT 与 RLHF 章节的主要来源。
+2. Christiano et al. (2017). *Deep Reinforcement Learning from Human Preferences*. arXiv: [1706.03741](https://arxiv.org/abs/1706.03741). —— 从人类比较反馈学习奖励模型，再用强化学习优化策略，是 RLHF 思路的重要源头。
+3. Rafailov et al. (2023). *Direct Preference Optimization: Your Language Model is Secretly a Reward Model*. arXiv: [2305.18290](https://arxiv.org/abs/2305.18290). —— DPO 把带 KL 约束的偏好优化改写成直接监督式损失。本篇 DPO 家族章节的核心来源。
+4. Azar et al. (2023). *A General Theoretical Paradigm to Understand Learning from Human Preferences*. arXiv: [2310.12036](https://arxiv.org/abs/2310.12036). —— IPO 等偏好优化理论框架来源，用于理解 DPO 类方法的假设与噪声问题。
+5. Ethayarajh et al. (2024). *KTO: Model Alignment as Prospect Theoretic Optimization*. arXiv: [2402.01306](https://arxiv.org/abs/2402.01306). —— KTO 用单样本 desirable / undesirable 反馈做对齐，代表偏好数据形式的扩展。
+6. Hong et al. (2024). *ORPO: Monolithic Preference Optimization without Reference Model*. arXiv: [2403.07691](https://arxiv.org/abs/2403.07691). —— ORPO 将 SFT 与偏好优化合并到单阶段、参考模型无关目标。
+7. Meng et al. (2024). *SimPO: Simple Preference Optimization with a Reference-Free Reward*. arXiv: [2405.14734](https://arxiv.org/abs/2405.14734). —— SimPO 代表 reference-free 偏好优化路线，用长度归一化平均 log probability 和 margin 改造偏好目标。
+8. Shao et al. (2024). *DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models*. arXiv: [2402.03300](https://arxiv.org/abs/2402.03300). —— 提出 GRPO，用同题多回答的组内相对奖励替代 critic，是可验证推理 RL 的关键算法来源。
+9. DeepSeek-AI (2025). *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. arXiv: [2501.12948](https://arxiv.org/abs/2501.12948). —— DeepSeek-R1 的多阶段后训练流水线、RLVR、拒绝采样与蒸馏实践。本篇 RLVR、拒绝采样和流水线章节的重要来源。
+10. AI@Meta (2024). *The Llama 3 Herd of Models*. arXiv: [2407.21783](https://arxiv.org/abs/2407.21783). —— 工业级大模型后训练报告，覆盖 SFT、偏好数据、奖励模型、安全、评测与数据闭环。
+11. Lambert et al. (2024). *Tulu 3: Pushing Frontiers in Open Language Model Post-Training*. arXiv: [2411.15124](https://arxiv.org/abs/2411.15124). —— 开放后训练配方，系统覆盖 SFT、DPO、RLVR、拒绝采样与评测。
+12. Hinton, Vinyals, Dean (2015). *Distilling the Knowledge in a Neural Network*. arXiv: [1503.02531](https://arxiv.org/abs/1503.02531). —— 知识蒸馏奠基论文，解释 teacher soft targets 与温度软化。
+13. Agarwal et al. (2024). *On-Policy Distillation of Language Models: Learning from Self-Generated Mistakes*. arXiv: [2306.13649](https://arxiv.org/abs/2306.13649). —— GKD / on-policy distillation 框架，解释为什么学生自采样能缓解离线蒸馏的暴露偏差。
+14. Bai et al. (2022). *Constitutional AI: Harmlessness from AI Feedback*. arXiv: [2212.08073](https://arxiv.org/abs/2212.08073). —— Constitutional AI / RLAIF 的代表工作，是安全后训练和宪法式反馈的重要来源。
+15. Yao et al. (2022). *ReAct: Synergizing Reasoning and Acting in Language Models*. arXiv: [2210.03629](https://arxiv.org/abs/2210.03629). —— ReAct 提出 reasoning + acting 轨迹范式，是工具与 Agent 后训练的重要背景。
+16. Schick et al. (2023). *Toolformer: Language Models Can Teach Themselves to Use Tools*. arXiv: [2302.04761](https://arxiv.org/abs/2302.04761). —— Toolformer 展示模型如何用自监督方式学习工具调用，为工具训练章节提供背景。
+17. Liang et al. (2022). *Holistic Evaluation of Language Models*. arXiv: [2211.09110](https://arxiv.org/abs/2211.09110). —— HELM 强调多维度、标准化评测，是后训练评测闭环章节的参考来源。
+18. Chung et al. (2022). *Scaling Instruction-Finetuned Language Models*. arXiv: [2210.11416](https://arxiv.org/abs/2210.11416). —— FLAN 系列代表指令微调的数据混合与任务扩展路线，是后续“指令微调与数据配方”教程的核心来源之一。
+19. Wang et al. (2022). *Self-Instruct: Aligning Language Models with Self-Generated Instructions*. arXiv: [2212.10560](https://arxiv.org/abs/2212.10560). —— Self-Instruct 展示如何用模型自生成指令扩充 SFT 数据，是合成指令数据路线的重要来源。
+20. Peng et al. (2023). *Instruction Tuning with GPT-4*. arXiv: [2304.03277](https://arxiv.org/abs/2304.03277). —— 用强模型生成指令数据进行微调，支撑“强 teacher 造数据”的实践分支。
+21. Xu et al. (2023). *WizardCoder: Empowering Code Large Language Models with Evol-Instruct*. arXiv: [2306.08568](https://arxiv.org/abs/2306.08568). —— Evol-Instruct 在代码领域扩展复杂指令，是“合成指令与代码数据”分支的代表。
+22. Cui et al. (2023). *UltraFeedback: Boosting Language Models with Scaled AI Feedback*. arXiv: [2310.01377](https://arxiv.org/abs/2310.01377). —— 大规模 AI feedback 偏好数据集，适合支撑偏好数据与 judge 数据构造专题。
+23. Wang et al. (2023). *HelpSteer: Multi-attribute Helpfulness Dataset for SteerLM*. arXiv: [2311.09528](https://arxiv.org/abs/2311.09528). —— 多属性帮助性标注数据，说明偏好信号不只是一维胜负，还可以拆成多个可控维度。
+24. Stiennon et al. (2020). *Learning to summarize from human feedback*. arXiv: [2009.01325](https://arxiv.org/abs/2009.01325). —— 在摘要任务中从人类偏好训练奖励模型，是 InstructGPT 之前 RLHF 路线的重要代表。
+25. Cobbe et al. (2021). *Training Verifiers to Solve Math Word Problems*. arXiv: [2110.14168](https://arxiv.org/abs/2110.14168). —— 用 verifier 对多个候选解答排序，是数学推理、Best-of-N 和 verifier 路线的重要背景。
+26. Lightman et al. (2023). *Let’s Verify Step by Step*. arXiv: [2305.20050](https://arxiv.org/abs/2305.20050). —— 过程监督奖励模型（PRM）的代表工作，支撑“ORM vs PRM”后续教程方向。
+27. Nakano et al. (2021). *WebGPT: Browser-assisted question-answering with human feedback*. arXiv: [2112.09332](https://arxiv.org/abs/2112.09332). —— 浏览器辅助问答与人类反馈结合，是工具使用、引用、拒绝采样和偏好训练交汇的早期系统。
+28. Qin et al. (2023). *ToolLLM: Facilitating Large Language Models to Master 16000+ Real-world APIs*. arXiv: [2307.16789](https://arxiv.org/abs/2307.16789). —— 大规模真实 API 工具学习数据与评测，是工具调用训练专题的重要来源。
+29. Zeng et al. (2023). *AgentTuning: Enabling Generalized Agent Abilities for LLMs*. arXiv: [2310.12823](https://arxiv.org/abs/2310.12823). —— 面向 Agent 能力的指令与轨迹调优，是工具 / Agent 后训练分支的代表。
+30. Saunders et al. (2022). *Self-critiquing models for assisting human evaluators*. arXiv: [2206.05802](https://arxiv.org/abs/2206.05802). —— 自我批判模型辅助人类评估，是 AI feedback、安全审查和过程评估的相关背景。
+31. Schulman et al. (2017). *Proximal Policy Optimization Algorithms*. arXiv: [1707.06347](https://arxiv.org/abs/1707.06347). —— PPO 是 RLHF 与早期 LLM 对齐中常用的策略优化算法背景。
+32. Guo et al. (2024). *Discovering Preference Optimization Algorithms with and for Large Language Models*. arXiv: [2406.08414](https://arxiv.org/abs/2406.08414). —— 系统探索偏好优化目标的自动发现，说明偏好优化本身也正在成为可搜索、可设计的算法空间。
+</References>

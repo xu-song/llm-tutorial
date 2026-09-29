@@ -1,0 +1,121 @@
+import { paperMetadata } from "@/lib/papers";
+
+export const metadata = paperMetadata("nemotron-cascade-2");
+
+<PaperHeader slug="nemotron-cascade-2" />
+
+# Nemotron-Cascade 2：Cascade RL 与多域 OPD
+
+2026 年 3 月，NVIDIA 等作者发布 Nemotron-Cascade 2：一个 **30B MoE、3B 激活**的开放模型，主打高智能密度。<Cite n={1} />它的卖点不是把底座继续做大，而是把后训练做成级联：先 SFT，再扩展 Cascade RL 覆盖推理和 agentic domains，中间用 **Multi-Domain On-Policy Distillation（MOPD）** 把各领域最强中间模型的能力蒸回目标模型，缓解 benchmark regression。<Cite n={1} />
+
+> 📌 前置：这篇最适合放在 [OPD 总览](/papers/opd-agarwal)、[GRPO 与 RLVR](/papers/grpo-deepseek-r1)、[GLM-5](/papers/glm-5) 之后读。它关注的不是单个 loss 是否优雅，而是多阶段后训练中“能力涨了又掉”的工程问题。
+
+## 一、动机：小激活 MoE 如何追上大模型？
+
+Nemotron-Cascade 2 的目标很明确：用 30B 总参、3B 激活的 MoE，尽量接近前沿开放模型在数学、代码和智能体任务上的表现。<Cite n={1} />
+
+这背后有两个压力：
+
+1. **部署压力**：671B/37B 这类大 MoE 很强，但推理成本和服务复杂度高；3B 激活如果能打到高水平，性价比完全不同。
+2. **后训练回退**：在一个领域上做 RL，常常会让另一个领域掉分；数学涨了，指令遵循掉；代码涨了，通用对话掉。越是多域后训练，这个问题越严重。
+
+论文的答案是：不要把后训练看成一次单调提升，而要看成一个 cascade。<Cite n={1} />每一阶段可能产生新的专家高点，也可能带来别的 benchmark 回退；MOPD 的作用就是把这些中间高点收集起来，重新压回主模型。
+
+## 二、Cascade RL：后训练不是一轮，而是一串阶段
+
+arXiv 摘要对 Cascade RL 的细节展开有限，但它给出的定位很清楚：Nemotron-Cascade 2 相比前作，显著扩展 Cascade RL，使其覆盖更广泛的 reasoning 和 agentic domains。<Cite n={1} />
+
+可以把 Cascade RL 理解成一个后训练流水线：
+
+1. 先用 curated SFT 数据把模型带到可训练状态；
+2. 在数学、代码、智能体等任务上分阶段做 RL；
+3. 每个阶段都可能产生局部最强 checkpoint；
+4. 用蒸馏或模型选择把这些局部能力合并回来。
+
+这和 2025—2026 年许多前沿报告的趋势一致：单一“万能 RL 阶段”不够用了。因为不同任务的奖励、上下文、采样预算、探索难度不同，强行混在一起会互相干扰。
+
+## 三、MOPD：把各领域最强中间老师合回来
+
+论文标题里的第二个关键词是 **Multi-Domain On-Policy Distillation**。<Cite n={1} />根据摘要，MOPD 的目的有两个：<Cite n={1} />
+
+- 从不同领域最强的 intermediate teacher models 中学习；
+- 恢复 Cascade RL 过程中出现的 benchmark regression，同时保持新增能力。
+
+这非常像一个能力快照合并问题：
+
+| 阶段 | 可能得到的“老师” | 问题 |
+|---|---|---|
+| 数学 RL 后 | 数学最强 checkpoint | 代码或对话可能掉分 |
+| 代码 RL 后 | 代码最强 checkpoint | 数学或通用指令可能回退 |
+| Agent RL 后 | 工具任务最强 checkpoint | 静态问答可能变差 |
+| MOPD | 多个领域老师 | 在学生自己的状态上吸收多域能力 |
+
+MOPD 和普通离线合并的关键差异在于 on-policy：学生不是只模仿老师生成的标准答案，而是在自己 rollout 的状态上，由对应领域老师提供逐 token 信号。<Cite n={[1,2]} />这样可以降低“我只会老师轨迹，一到自己状态就不会”的暴露偏差。
+
+<figure className="my-6">
+  <img src="./fig-cascade-mopd.svg" alt="Nemotron-Cascade 2 的 Cascade RL 与 MOPD：SFT 起点经过数学、代码和智能体等 RL 阶段产生多个领域高点，MOPD 再把这些中间老师在学生自己的状态上蒸回统一模型，以减少能力回退" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
+    <span className="figure-caption-main">Nemotron-Cascade 2 的 Cascade RL 与 MOPD：SFT 起点经过数学、代码和智能体等 RL 阶段产生多个领域高点，MOPD 再把这些中间老师在学生自己的状态上蒸回统一模型，以减少能力回退</span>
+    <span className="figure-caption-source">图源：根据 Yang et al., <em>Nemotron-Cascade 2</em>（arXiv:2603.19220）摘要与 OPD / MOPD 机制重绘</span>
+  </figcaption>
+</figure>
+
+## 四、为什么 MOPD 适合 Cascade RL？
+
+Cascade RL 的副作用是：每阶段都会改变策略分布。策略分布变了，旧 benchmark 的输入-输出状态也会变。只用离线数据回放，很难覆盖新策略实际会进入的状态。
+
+MOPD 的优势在这里体现出来：<Cite n={[1,2]} />
+
+1. 当前 student 先生成；
+2. 样本按领域路由到不同 teacher；
+3. teacher 在 student-visited states 上打分；
+4. student 在自己当前分布附近吸收多个 teacher 的局部偏好。
+
+用 OPD 的语言说，MOPD 不是把多个老师的答案拼成一个数据集，而是把多个老师变成当前学生策略周围的“局部势场”。学生走到哪里，哪个领域老师就在那里给方向。
+
+## 五、结果读法：30B/3B 的智能密度
+
+摘要给出的最强卖点是：Nemotron-Cascade 2 在 2025 年 IMO、IOI、ICPC World Finals 上达到 gold medal-level performance，并称它是 DeepSeek-V3.2-Speciale-671B-A37B 之后，第二个在这些赛事达到金牌级表现的开放权重 LLM；相比 DeepSeek-V3.2-Speciale，它参数量少约 20 倍。<Cite n={[1,3]} />
+
+这组说法需要谨慎读：
+
+- “Gold medal-level”不是等价于正式参赛，也依赖评测协议；
+- 高难竞赛任务常依赖采样次数、思考 token 预算和验证方式；
+- 3B 激活参数强调的是推理成本密度，但总参、路由、系统实现同样重要。
+
+但即便保守理解，它仍然说明一个方向：小激活 MoE 不一定只能靠预训练规模追大模型，后训练阶段的级联 RL + 多域 OPD 可能把能力密度显著拉高。<Cite n={1} />
+
+## 六、和 DeepSeek / GLM / Kimi 路线的对照
+
+把 Nemotron-Cascade 2 放进 2026 年后训练图谱里，会看到几条共性：
+
+| 模型 / 路线 | 后训练关键词 | 共同趋势 |
+|---|---|---|
+| DeepSeek-V3.2 | 大规模 GRPO + 专家蒸馏 | 用 RL 找能力，再蒸回通用模型 |
+| GLM-5 | 异步 agent RL + 长程工程 | 后训练系统成为核心创新 |
+| Kimi K3 | 多教师 on-policy 蒸馏 | 按域和推理强度合并专家 |
+| Nemotron-Cascade 2 | Cascade RL + MOPD | 用多阶段 RL 与多域蒸馏管理能力回退 |
+
+它们共同说明：前沿后训练不再是“一个奖励函数 + 一个 PPO/GRPO 脚本”，而是一套能力管理系统。RL 负责探索和拉高上限，OPD 负责把阶段性能力稳定地搬运和合并。<Cite n={[1,2]} />
+
+## 七、局限：摘要能确认的东西还不够多
+
+这篇目前从公开摘要能确认的信息有限，读它时尤其要保留几个问号：
+
+1. **Cascade RL 的具体阶段**：摘要没有展开每个阶段的任务、奖励和超参。
+2. **MOPD 的损失细节**：是 forward KL、reverse KL，还是混合？teacher 如何选择？需要看全文。
+3. **benchmark 协议**：竞赛金牌级表现的采样预算、工具条件、pass@k 口径需要核对。
+4. **训练数据可复现性**：摘要说发布 checkpoint 和训练数据，但数据清洗、过滤、配比仍决定可复现程度。
+5. **agentic 能力边界**：摘要强调 reasoning 和 agentic capabilities，但不同 harness 下可比性可能很差。
+
+## 小结
+
+Nemotron-Cascade 2 的价值在于把 OPD 从单 teacher 蒸馏推进到多阶段、多领域后训练管理：Cascade RL 负责在数学、代码、智能体等方向拉高能力，MOPD 负责把各阶段最强中间老师的能力重新合并，减少 benchmark regression。它代表的不是一个新公式，而是一种后训练工程观：**能力不是一次训出来的，而是在多轮 RL 与多域蒸馏之间被收集、压缩和稳定下来的。**
+
+## 参考资料
+
+<References>
+1. Zhuolin Yang, Zihan Liu, Yang Chen, Wenliang Dai, Boxin Wang, Sheng-Chieh Lin, Chankyu Lee, Yangyi Chen, Dongfu Jiang, Jiafan He, Renjie Pi, Grace Lam, Nayeon Lee, Alexander Bukharin, Mohammad Shoeybi, Bryan Catanzaro, Wei Ping (2026). *Nemotron-Cascade 2: Post-Training LLMs with Cascade RL and Multi-Domain On-Policy Distillation*. arXiv: [2603.19220](https://arxiv.org/abs/2603.19220). —— 本文主论文，提出 Cascade RL + MOPD 后训练框架。
+2. veRL contributors (2026). *On-Policy Distillation (OPD)*. [verl.readthedocs.io/en/latest/algo/opd.html](https://verl.readthedocs.io/en/latest/algo/opd.html). —— 将 Nemotron-Cascade 2 列为 MOPD 相关后续工作，并给出多 teacher routing 的实现背景。
+3. DeepSeek-AI (2025). *DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models*. arXiv: [2512.02556](https://arxiv.org/abs/2512.02556). —— 对照阅读：大规模 GRPO 与专家蒸馏如何服务高难推理。
+</References>

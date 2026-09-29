@@ -2,19 +2,19 @@ import { tutorialMetadata } from "@/lib/tutorials";
 
 export const metadata = tutorialMetadata("continuous-control");
 
-# 🤖 连续控制:当动作不再可数
+# 🤖 连续控制：当动作不再可数
 
-前面所有价值方法都卡在同一个动作上:$a^* = \arg\max_a Q(s,a)$。动作**离散且不多**时,挨个比一遍就行。但机器人的关节力矩、方向盘转角、油门开度都是**连续实数**——有无穷多个动作,没法枚举、也没法逐一取 $\max$。这一篇讲专为连续动作设计的一族算法:**DDPG → TD3 → SAC**,它们是机器人控制、自动驾驶等真实连续系统的主力。
+前面所有价值方法都卡在同一个动作上：$a^* = \arg\max_a Q(s,a)$。动作**离散且不多**时，挨个比一遍就行。但机器人的关节力矩、方向盘转角、油门开度都是**连续实数**——有无穷多个动作，没法枚举、也没法逐一取 $\max$。这一篇讲专为连续动作设计的一族算法：**DDPG → TD3 → SAC**，它们是机器人控制、自动驾驶等真实连续系统的主力。
 
 ## 为什么 DQN 处理不了连续动作
 
-[DQN](/tutorials/dqn) 每一步都要 $\max_a Q(s,a)$ 来选动作。连续动作空间里这个 $\max$ 是一个**内层优化问题**,每步都解一次代价高到不可行。
+[DQN](/tutorials/dqn) 每一步都要 $\max_a Q(s,a)$ 来选动作。连续动作空间里这个 $\max$ 是一个**内层优化问题**，每步都解一次代价高到不可行。
 
-一个偷懒办法是**离散化**:把连续区间切成若干格再当离散动作用。但这有个两难——切太粗则精度不足,切太细则动作数爆炸(维度一多更是指数级)。**拖动下面的「动作维度 D」和「每维格数 K」**,亲眼看离散动作总数 $K^D$ 如何随维度爆炸:
+一个偷懒办法是**离散化**：把连续区间切成若干格再当离散动作用。但这有个两难——切太粗则精度不足，切太细则动作数爆炸（维度一多更是指数级）。**拖动下面的「动作维度 D」和「每维格数 K」**，亲眼看离散动作总数 $K^D$ 如何随维度爆炸：
 
 <ActionDiscretizationViz />
 
-下面再从代码看「切太粗则不准」的另一头:
+下面再从代码看「切太粗则不准」的另一头：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -31,46 +31,46 @@ for K in [5, 11, 101]:
 print("\\n-> 连续动作里,DQN 只能靠离散化逼近;要精细就得动作数爆炸")
 `} />
 
-## DDPG:让 actor 直接吐出最优动作
+## DDPG：让 actor 直接吐出最优动作
 
-**DDPG(Deep Deterministic Policy Gradient)** 的巧思:既然 $\max_a Q$ 难求,就**再训练一个网络专门去输出那个 argmax**[2]。于是它同时学两个网络(actor-critic 结构):
+**DDPG(Deep Deterministic Policy Gradient)** 的巧思：既然 $\max_a Q$ 难求，就**再训练一个网络专门去输出那个 argmax**[2]。<Cite n={2} />于是它同时学两个网络（actor-critic 结构）：
 
-- **确定性 actor** $\mu_\theta(s)$:直接输出一个具体动作(不是概率分布),充当 $\arg\max_a Q$ 的替身;
-- **critic** $Q_\phi(s,a)$:评估「在 $s$ 做 $a$ 有多好」。
+- **确定性 actor** $\mu_\theta(s)$：直接输出一个具体动作（不是概率分布），充当 $\arg\max_a Q$ 的替身；
+- **critic** $Q_\phi(s,a)$：评估「在 $s$ 做 $a$ 有多好」。
 
-### 确定性策略梯度定理:为什么 actor 能沿 critic 爬坡
+### 确定性策略梯度定理：为什么 actor 能沿 critic 爬坡
 
-[策略梯度](/tutorials/policy-gradient)篇的 REINFORCE 对**随机**策略 $\pi_\theta(a\mid s)$ 求期望、靠 log-likelihood 把梯度反传。但 DDPG 的 actor 是**确定性**的 $a=\mu_\theta(s)$——没有分布、没有采样,梯度怎么传?**确定性策略梯度定理(DPG)**(Silver et al., 2014)[2a] 给出答案。
+[策略梯度](/tutorials/policy-gradient)篇的 REINFORCE 对**随机**策略 $\pi_\theta(a\mid s)$ 求期望、靠 log-likelihood 把梯度反传。但 DDPG 的 actor 是**确定性**的 $a=\mu_\theta(s)$——没有分布、没有采样，梯度怎么传？**确定性策略梯度定理（DPG）**（Silver et al., 2014）[2a] 给出答案。
 
 #### 定理陈述
 
-设折扣回报 $J(\theta)=\mathbb E_{s\sim\rho^\mu}\!\big[Q^\mu(s,\mu_\theta(s))\big]$,其中 $\rho^\mu$ 是确定性策略 $\mu_\theta$ 诱导的状态分布。在温和条件下($Q$ 对 $a$ 可微、$\mu_\theta$ 对 $\theta$ 可微),DPG 定理给出:
+设折扣回报 $J(\theta)=\mathbb E_{s\sim\rho^\mu}\!\big[Q^\mu(s,\mu_\theta(s))\big]$，其中 $\rho^\mu$ 是确定性策略 $\mu_\theta$ 诱导的状态分布。在温和条件下（$Q$ 对 $a$ 可微、$\mu_\theta$ 对 $\theta$ 可微），DPG 定理给出：
 
 $$
 \nabla_\theta J(\theta)=\mathbb E_{s\sim\rho^\mu}\!\Big[\nabla_a Q^\mu(s,a)\big|_{a=\mu_\theta(s)}\cdot \nabla_\theta \mu_\theta(s)\Big]
 $$
 
-即**策略梯度 = 状态分布上的期望,期望内是「动作梯度 × 策略参数梯度」的链式乘积**。这是 DPG 的全部精华:把高维动作空间上的积分,降成了**只在状态上求期望**。
+即**策略梯度 = 状态分布上的期望，期望内是「动作梯度 × 策略参数梯度」的链式乘积**。这是 DPG 的全部精华：把高维动作空间上的积分，降成了**只在状态上求期望**。
 
 #### 链式法则推导
 
-为什么是这个形式?把 $J$ 对 $\theta$ 求导,关键是 $a$ 由 $\mu_\theta(s)$ 决定(确定性),用链式法则:
+为什么是这个形式？把 $J$ 对 $\theta$ 求导，关键是 $a$ 由 $\mu_\theta(s)$ 决定（确定性），用链式法则：
 
 $$
 \nabla_\theta J=\nabla_\theta\,\mathbb E_s\!\big[Q(s,\mu_\theta(s))\big]=\mathbb E_s\!\Big[\underbrace{\nabla_a Q(s,a)\big|_{a=\mu_\theta(s)}}_{\text{动作往哪挪 }Q\text{ 涨最快}}\cdot\underbrace{\nabla_\theta \mu_\theta(s)}_{\text{参数怎么挪才能让动作那样挪}}\Big]
 $$
 
-- $\nabla_a Q$:在状态 $s$ 处,$Q$ 关于动作的梯度——指出「动作往哪个方向微调能让 $Q$ 上升最快」(局部最陡上升方向);
-- $\nabla_\theta\mu_\theta(s)$:策略网络把参数 $\theta$ 的变化映射成动作 $\mu_\theta(s)$ 的变化——把这个「动作挪动」翻译回「参数挪动」;
+- $\nabla_a Q$：在状态 $s$ 处，$Q$ 关于动作的梯度——指出「动作往哪个方向微调能让 $Q$ 上升最快」（局部最陡上升方向）；
+- $\nabla_\theta\mu_\theta(s)$：策略网络把参数 $\theta$ 的变化映射成动作 $\mu_\theta(s)$ 的变化——把这个「动作挪动」翻译回「参数挪动」；
 - 两者点乘 = 「让参数朝能提升 $Q$ 的方向走」。
 
 actor 朝「让 $Q$ 上升最快的方向」调整动作——这正是 $\max_a Q$ 的连续可微替身。
 
 #### 为何方差远低于随机策略梯度
 
-随机策略梯度(stochastic PG,见 [policy-gradient 篇](/tutorials/policy-gradient))是 $\nabla_\theta J=\mathbb E_{s,a}\!\big[\nabla_a Q\cdot\nabla_\theta\log\pi(a\mid s)\big]$,要在 **(状态,动作)联合分布**上求期望,且依赖整条回报的采样 $G_t$(REINFORCE)——回报方差大、动作采样噪声也大。DPG 的期望**只在状态上**($s\sim\rho^\mu$),动作由 $\mu_\theta$ 确定性给出、无采样;梯度信号是局部导数 $\nabla_a Q$ 而非整条回报。两者方差可差一个数量级。
+随机策略梯度（stochastic PG，见 [policy-gradient 篇](/tutorials/policy-gradient)）是 $\nabla_\theta J=\mathbb E_{s,a}\!\big[\nabla_a Q\cdot\nabla_\theta\log\pi(a\mid s)\big]$，要在 **（状态，动作）联合分布**上求期望，且依赖整条回报的采样 $G_t$（REINFORCE）——回报方差大、动作采样噪声也大。DPG 的期望**只在状态上**（$s\sim\rho^\mu$），动作由 $\mu_\theta$ 确定性给出、无采样；梯度信号是局部导数 $\nabla_a Q$ 而非整条回报。两者方差可差一个数量级。
 
-下面这个玩具同时验证 DPG 链式法则的正确性,并对比 DPG 与 REINFORCE 的梯度方差:
+下面这个玩具同时验证 DPG 链式法则的正确性，并对比 DPG 与 REINFORCE 的梯度方差：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -117,19 +117,19 @@ print("   REINFORCE 要在 (状态,动作) 联合分布上求期望, 还依赖�
 
 #### 离策略版本与探索
 
-DPG 定理的 $s\sim\rho^\mu$ 要求按**目标策略** $\mu_\theta$ 的状态分布采样,但确定性策略不探索——按它采就永远走同一条路。实践用**离策略(off-policy)**:用一个**随机行为策略** $\beta(a\mid s)$(如带噪声的 $\mu_\theta+\text{noise}$)收集数据,DPG 改写为在 $\rho^\beta$ 上求期望(状态分布从 $\rho^\mu$ 换成 $\rho^\beta$,需分布修正项;DDPG 实践中常忽略该项,代价是有偏但工作良好):
+DPG 定理的 $s\sim\rho^\mu$ 要求按**目标策略** $\mu_\theta$ 的状态分布采样，但确定性策略不探索——按它采就永远走同一条路。实践用**离策略（off-policy）**：用一个**随机行为策略** $\beta(a\mid s)$（如带噪声的 $\mu_\theta+\text{noise}$）收集数据，DPG 改写为在 $\rho^\beta$ 上求期望（状态分布从 $\rho^\mu$ 换成 $\rho^\beta$，需分布修正项；DDPG 实践中常忽略该项，代价是有偏但工作良好）:
 
 $$
 \nabla_\theta J_\beta\approx\mathbb E_{s\sim\rho^\beta}\!\Big[\nabla_a Q^\mu(s,a)\big|_{a=\mu_\theta(s)}\cdot \nabla_\theta \mu_\theta(s)\Big]
 $$
 
-这样探索靠 $\beta$、学习靠 $\mu_\theta$,两者解耦——这是 DDPG/TD3/SAC 共用的离策略 actor-critic 范式。代价是**有偏**(依赖 critic 估得准 + 忽略分布修正),且确定性策略**自己不会探索**(见下「外挂噪声」)。
+这样探索靠 $\beta$、学习靠 $\mu_\theta$，两者解耦——这是 DDPG/TD3/SAC 共用的离策略 actor-critic 范式。代价是**有偏**（依赖 critic 估得准 + 忽略分布修正），且确定性策略**自己不会探索**（见下「外挂噪声」）。
 
-> 💡 **DPG 是随机策略梯度的「方差→0 极限」**:可证明,当随机策略 $\pi_\theta(a\mid s)$ 的方差趋于 0(退化为确定性 $\mu_\theta$),随机策略梯度定理的极限就是 DPG 定理。所以 DPG 不是另起炉灶,而是随机 PG 在确定性极限下的低方差版本——这给了它理论合法性,也解释了为何高维连续控制里 DPG 家族(DDPG/TD3/SAC)远比随机 PG(REINFORCE/A3C)好用。
+> 💡 **DPG 是随机策略梯度的「方差→0 极限」**：可证明，当随机策略 $\pi_\theta(a\mid s)$ 的方差趋于 0（退化为确定性 $\mu_\theta$），随机策略梯度定理的极限就是 DPG 定理。所以 DPG 不是另起炉灶，而是随机 PG 在确定性极限下的低方差版本——这给了它理论合法性，也解释了为何高维连续控制里 DPG 家族（DDPG/TD3/SAC）远比随机 PG（REINFORCE/A3C）好用。
 
-### critic 与目标网络:Polyak 软更新
+### critic 与目标网络：Polyak 软更新
 
-critic 照常用 TD 回归学,目标里用 $Q(s',\mu(s'))$ 近似 $\max$:
+critic 照常用 TD 回归学，目标里用 $Q(s',\mu(s'))$ 近似 $\max$：
 
 $$
 \max_\theta\ \mathbb{E}_{s\sim\mathcal D}\big[Q_\phi(s,\mu_\theta(s))\big]
@@ -138,19 +138,19 @@ L(\phi)=\mathbb{E}\Big[\big(Q_\phi(s,a)-\underbrace{(r+\gamma\,Q_{\phi^-}(s',\mu
 \qquad(\text{critic})
 $$
 
-注意目标里的 $\phi^-,\theta^-$ 是**目标网络**(带横杠),与在线网络 $\phi,\theta$ 分开。DQN 用**硬拷贝**(每隔 N 步整个复制),DDPG 改用 **Polyak 软更新**(指数滑动平均)[2]:
+注意目标里的 $\phi^-,\theta^-$ 是**目标网络**（带横杠），与在线网络 $\phi,\theta$ 分开。DQN 用**硬拷贝**（每隔 N 步整个复制），DDPG 改用 **Polyak 软更新**（指数滑动平均）[2]:
 
 $$
 \phi^- \leftarrow \rho\,\phi^- + (1-\rho)\,\phi,\qquad \theta^- \leftarrow \rho\,\theta^- + (1-\rho)\,\theta
 $$
 
-$\rho\approx 0.995$(每步只混入 0.5% 在线网络)。**为什么不用硬拷贝?** 硬拷贝时目标网络每隔 N 步「跳变」一次,TD 目标随之跳变、训练不稳;软更新让目标**每步都微调一点**,产生一个平滑、时间延迟的「移动靶」,显著降低发散风险。这是 DDPG/TD3/SAC 共用的稳定化技巧。
+$\rho\approx 0.995$（每步只混入 0.5% 在线网络）。**为什么不用硬拷贝？** 硬拷贝时目标网络每隔 N 步「跳变」一次，TD 目标随之跳变、训练不稳；软更新让目标**每步都微调一点**，产生一个平滑、时间延迟的「移动靶」，显著降低发散风险。这是 DDPG/TD3/SAC 共用的稳定化技巧。<Cite n={2} />
 
-### 探索:确定性策略 + 外挂噪声
+### 探索：确定性策略 + 外挂噪声
 
-确定性策略 $\mu_\theta(s)$ 自己不探索——给定 $s$ 永远输出同一个 $a$。DDPG 的解法是**外挂噪声**:训练时把动作加上噪声 $a=\mu_\theta(s)+\text{noise}$,测试时去掉用纯确定性动作。原论文用 **Ornstein-Uhlenbeck(OU)过程**(时间相关噪声)[2],后来发现**零均值高斯噪声效果相当**且更简单[1],现在多数实现用 Gaussian。这种「外挂」是 DDPG/TD3 的共同弱点——噪声尺度靠手调、与目标无关,见 SAC 小节如何把探索内建进目标。
+确定性策略 $\mu_\theta(s)$ 自己不探索——给定 $s$ 永远输出同一个 $a$。DDPG 的解法是**外挂噪声**：训练时把动作加上噪声 $a=\mu_\theta(s)+\text{noise}$，测试时去掉用纯确定性动作。原论文用 **Ornstein-Uhlenbeck(OU)过程**（时间相关噪声）[2]，后来发现**零均值高斯噪声效果相当**且更简单[1]，现在多数实现用 Gaussian。<Cite n={[1,2]} />这种「外挂」是 DDPG/TD3 的共同弱点——噪声尺度靠手调、与目标无关，见 SAC 小节如何把探索内建进目标。
 
-下面用一个极简版(线性 actor + 二次 critic,`numpy` 即可跑),看 actor 如何**不做任何离散化**、直接把动作梯度上升到最优:
+下面用一个极简版（线性 actor + 二次 critic，`numpy` 即可跑），看 actor 如何**不做任何离散化**、直接把动作梯度上升到最优：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -175,7 +175,7 @@ print(f"actor 收敛到 a={theta:.3f}(真最优 0.6)")
 print("-> 全程没有离散化、没有 argmax,actor 顺着 critic 的动作梯度爬到了最优")
 `} />
 
-上面的 toy 只演示了「actor 顺 critic 梯度爬坡」这一件事。把 DDPG 的完整每步更新拼起来——回放采样、critic 拟合 TD 目标、actor 沿动作梯度上升、目标网络 Polyak 软更新:
+上面的 toy 只演示了「actor 顺 critic 梯度爬坡」这一件事。把 DDPG 的完整每步更新拼起来——回放采样、critic 拟合 TD 目标、actor 沿动作梯度上升、目标网络 Polyak 软更新：
 
 ```
 # DDPG 训练一步 伪代码 (Lillicrap et al. 2016)
@@ -196,24 +196,25 @@ y = r + γ * (1-done) * Q_φ⁻(s', μ_θ⁻(s'))
 φ⁻ ← ρ·φ⁻ + (1-ρ)·φ ;  θ⁻ ← ρ·θ⁻ + (1-ρ)·θ
 ```
 
-## TD3:给 DDPG 打三个补丁
+## TD3：给 DDPG 打三个补丁
 
-DDPG 好用但**脆**——critic 容易高估 Q 值、训练发散。**TD3(Twin Delayed DDPG)** 先**诊断**病因,再开三副药[3]。
+DDPG 好用但**脆**——critic 容易高估 Q 值、训练发散。**TD3(Twin Delayed DDPG)** 先**诊断**病因，再开三副药[3]。
 
-### 病根:max 算子对带噪估计系统性上偏
+### 病根：max 算子对带噪估计系统性上偏
 
-TD3 论文的核心观察[3]:critic 的估计 $Q_\phi$ 带噪声(函数逼近误差),而 DDPG 的目标里用 $\max$/$\arg\max$ 取这个带噪估计的**最大值**——**$\max$ 对噪声是系统性上偏的**。直觉:假设所有动作真实 $Q^*=0$、critic 估计 $Q_\phi=Q^*+\text{noise}$,那 $\arg\max_a Q_\phi$ 选中的是「**噪声最大的那个动作**」,其 $Q_\phi$ 必然 $>0$——不是因为它真好,而是因为噪声把它抬高了。actor 跟着这个高估的 critic 爬,就把高估放大、正反馈到发散。
+TD3 论文的核心观察[3]：critic 的估计 $Q_\phi$ 带噪声（函数逼近误差），而 DDPG 的目标里用 $\max$/$\arg\max$ 取这个带噪估计的**最大值**——**$\max$ 对噪声是系统性上偏的**。直觉：假设所有动作真实 $Q^*=0$、critic 估计 $Q_\phi=Q^*+\text{noise}$，那 $\arg\max_a Q_\phi$ 选中的是「**噪声最大的那个动作**」，其 $Q_\phi$ 必然 $>0$——不是因为它真好，而是因为噪声把它抬高了。actor 跟着这个高估的 critic 爬，就把高估放大、正反馈到发散。<Cite n={3} />
 
-TD3 论文 Figure 1 把这个现象画得很直白——MuJoCo 的 Hopper-v1 与 Walker2d-v1 上,DDPG 的 critic 值估计随训练持续飙升、远超真实价值估计,高估一路膨胀;TD3 的双 critic 取小(Clipped Double Q)则把估计按回真实值附近:
+TD3 论文 Figure 1 把这个现象画得很直白——MuJoCo 的 Hopper-v1 与 Walker2d-v1 上，DDPG 的 critic 值估计随训练持续飙升、远超真实价值估计，高估一路膨胀；TD3 的双 critic 取小（Clipped Double Q）则把估计按回真实值附近：
 
 <figure className="my-6">
-  <img src="./td3-overestimation.svg" alt="TD3 论文 Figure 1:MuJoCo 环境上 DDPG 与 TD3(Clipped Double Q-learning)的价值高估对比,左为 Hopper-v1,右为 Walker2d-v1,DDPG 的价值估计随训练步数远超真实价值,TD3 的双 critic 取小把估计压回真实值附近" className="mx-auto h-auto max-w-xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./td3-overestimation.svg" alt="TD3 论文 Figure 1：MuJoCo 环境上 DDPG 与 TD3（Clipped Double Q-learning）的价值高估对比，左为 Hopper-v1，右为 Walker2d-v1，DDPG 的价值估计随训练步数远超真实价值，TD3 的双 critic 取小把估计压回真实值附近" className="mx-auto h-auto max-w-xl rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Fujimoto et al., <em>Addressing Function Approximation Error in Actor-Critic Methods</em>(arXiv:1802.09477)Figure 1
+    <span className="figure-caption-main">TD3 论文 Figure 1：MuJoCo 环境上 DDPG 与 TD3（Clipped Double Q-learning）的价值高估对比，左为 Hopper-v1，右为 Walker2d-v1，DDPG 的价值估计随训练步数远超真实价值，TD3 的双 critic 取小把估计压回真实值附近</span>
+    <span className="figure-caption-source">图源：Fujimoto et al., <em>Addressing Function Approximation Error in Actor-Critic Methods</em>(arXiv:1802.09477)Figure 1</span>
   </figcaption>
 </figure>
 
-下面用 python 复现这个现象,并看 TD3 的「双 critic 取小」如何抵消:
+下面用 python 复现这个现象，并看 TD3 的「双 critic 取小」如何抵消：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -252,18 +253,18 @@ print("机制: max 对噪声系统性上偏; min(Q1,Q2) 用独立第二估计砍
 
 ### 三副药
 
-基于这个诊断,TD3 开三副药[3]:
+基于这个诊断，TD3 开三副药[3]:<Cite n={3} />
 
-1. **孪生 critic + 取小(clipped double-Q)**:学**两个独立**的 critic $Q_{\phi_1},Q_{\phi_2}$,TD 目标里取**两者较小值** $\min_{i=1,2}Q_{\phi_i^-}$。直觉:两个独立估计的噪声方向不同,取小的那个更可能砍掉上偏(若一个高估,另一个通常没那么高估)。这就是上面演示里把 +0.56 压到 +0.28 的机制,与 [Double DQN](/tutorials/dqn) 同源。
-2. **延迟更新 actor**:critic 更新 $d$ 次才更新一次 actor($d=2$ 典型)。**为什么?** actor 朝 critic 的梯度爬,若 critic 还没收敛、梯度方向乱指,actor 就被带歪;等 critic 多更几步、估准了再去塑造策略,减少 per-update 误差。
-3. **目标策略平滑**:给目标动作加裁剪噪声 $a'=\mu_{\theta^-}(s')+\text{clip}(\epsilon,-c,c)$,$\epsilon\sim\mathcal N(0,\sigma)$。**为什么?** 防止 actor 钻 critic 估计里的**窄尖峰**——若 critic 在某个动作处有个虚假的尖峰高估,actor 会精确撞上去;给目标动作加噪声相当于「在邻域内平均」,平滑掉尖峰,让 Q 估计更可信。
+1. **孪生 critic + 取小（clipped double-Q）**：学**两个独立**的 critic $Q_{\phi_1},Q_{\phi_2}$，TD 目标里取**两者较小值** $\min_{i=1,2}Q_{\phi_i^-}$。直觉：两个独立估计的噪声方向不同，取小的那个更可能砍掉上偏（若一个高估，另一个通常没那么高估）。这就是上面演示里把 +0.56 压到 +0.28 的机制，与 [Double DQN](/tutorials/dqn) 同源。
+2. **延迟更新 actor**：critic 更新 $d$ 次才更新一次 actor（$d=2$ 典型）。**为什么？** actor 朝 critic 的梯度爬，若 critic 还没收敛、梯度方向乱指，actor 就被带歪；等 critic 多更几步、估准了再去塑造策略，减少 per-update 误差。
+3. **目标策略平滑**：给目标动作加裁剪噪声 $a'=\mu_{\theta^-}(s')+\text{clip}(\epsilon,-c,c)$，$\epsilon\sim\mathcal N(0,\sigma)$。**为什么？** 防止 actor 钻 critic 估计里的**窄尖峰**——若 critic 在某个动作处有个虚假的尖峰高估，actor 会精确撞上去；给目标动作加噪声相当于「在邻域内平均」，平滑掉尖峰，让 Q 估计更可信。
 
-### 三副药可视化:后两副药怎么起作用
+### 三副药可视化：后两副药怎么起作用
 
-上面那副「孪生 critic 取小」的药已经用 CodeRunner 演过(把过估计 +0.56 压到 +0.28)。后两副药——延迟更新 actor、目标策略平滑——同样可以脱离完整训练循环,用最小玩具直接看到机理。下面的演示把两副药各打一发:
+上面那副「孪生 critic 取小」的药已经用 CodeRunner 演过（把过估计 +0.56 压到 +0.28）。后两副药——延迟更新 actor、目标策略平滑——同样可以脱离完整训练循环，用最小玩具直接看到机理。下面的演示把两副药各打一发：
 
-- **目标策略平滑**:造一个真实 $Q(a)=-a^2$(最优 $a=0$)、critic 在 $a=0.6$ 处有个**虚假窄尖峰**的 landscape。无平滑时 $\arg\max$ critic 直奔尖峰($a=0.6$,真实 $Q=-0.36$,亏);加上 TD3 默认的 $\sigma=0.2$ 平滑后,尖峰被邻域平均摊平,$\arg\max$ 落回真实最优 $a\approx0$。这正是「给目标动作加裁剪噪声」的几何含义——它不改变 critic 本身,只改变 actor 看到的「平滑后 critic」。
-- **延迟更新 actor**:把一个 actor 参数 $\theta$ 从 0 推向真最优 3.0,critic 给带噪梯度 $g=-(\theta-3)+\text{noise}$,且噪声方差随 critic 更新次数递减(模拟 critic 逐步估准)。$d=1$(每步更 actor,DDPG)终点漂移 0.18;$d=2$(critic 更两次再更 actor,TD3)漂移 0.13,约降 30%——因为 actor 等到 critic 多更一步、梯度方向更可靠时才动,少被带歪。
+- **目标策略平滑**：造一个真实 $Q(a)=-a^2$（最优 $a=0$）、critic 在 $a=0.6$ 处有个**虚假窄尖峰**的 landscape.无平滑时 $\arg\max$ critic 直奔尖峰（$a=0.6$,真实 $Q=-0.36$,亏）;加上 TD3 默认的 $\sigma=0.2$ 平滑后,尖峰被邻域平均摊平,$\arg\max$ 落回真实最优 $a\approx0$.这正是「给目标动作加裁剪噪声」的几何含义——它不改变 critic 本身,只改变 actor 看到的「平滑后 critic」.
+- **延迟更新 actor**：把一个 actor 参数 $\theta$ 从 0 推向真最优 3.0,critic 给带噪梯度 $g=-(\theta-3)+\text{noise}$,且噪声方差随 critic 更新次数递减（模拟 critic 逐步估准）.$d=1$（每步更 actor,DDPG）终点漂移 0.18;$d=2$（critic 更两次再更 actor,TD3）漂移 0.13,约降 30%——因为 actor 等到 critic 多更一步、梯度方向更可靠时才动,少被带歪.
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -341,17 +342,17 @@ for d in [1, 2, 4]:
 print("  -> d=2 让 critic 多更一步再动 actor,终点漂移比 d=1 小约 30%")
 `} />
 
-> 💡 **三副药的分工**:第一副(孪生 critic 取小)治本——直击 $\max$ 对带噪估计的系统性上偏;后两副治标——延迟更新减少 actor 跟着未收敛 critic 乱跑的漂移、目标策略平滑防止 actor 钻 critic 的虚假窄尖峰。三副药都靠 Polyak 软更新撑着目标网络的稳定性。论文给的默认配置是 $d=2$(critic 更两次、actor 更一次)、$\sigma=0.2$(目标平滑噪声标准差)、$c=0.5$(噪声裁剪)[3]。
+> 💡 **三副药的分工**：第一副（孪生 critic 取小）治本——直击 $\max$ 对带噪估计的系统性上偏；后两副治标——延迟更新减少 actor 跟着未收敛 critic 乱跑的漂移、目标策略平滑防止 actor 钻 critic 的虚假窄尖峰。三副药都靠 Polyak 软更新撑着目标网络的稳定性。论文给的默认配置是 $d=2$（critic 更两次、actor 更一次）、$\sigma=0.2$（目标平滑噪声标准差）、$c=0.5$（噪声裁剪）[3]。
 
-目标值写出来就是:
+目标值写出来就是：
 
 $$
 y = r + \gamma\min_{i=1,2} Q_{\phi_i^-}\big(s',\ \mu_{\theta^-}(s')+\text{clip}(\epsilon,-c,c)\big),\quad \epsilon\sim\mathcal N(0,\sigma)
 $$
 
-三副药里,**孪生 critic 取小**是治本(直击过估计),后两副是治标(减小 per-update 误差、防钻尖峰);目标网络仍用 DDPG 的 Polyak 软更新。
+三副药里，**孪生 critic 取小**是治本（直击过估计），后两副是治标（减小 per-update 误差、防钻尖峰）；目标网络仍用 DDPG 的 Polyak 软更新。
 
-三副药如何在一次更新里合起来?就是在 DDPG 的骨架上,把 TD 目标换成「双 critic 取小 + 目标平滑」,再让 actor「延迟」更新:
+三副药如何在一次更新里合起来？就是在 DDPG 的骨架上，把 TD 目标换成「双 critic 取小 + 目标平滑」，再让 actor「延迟」更新：
 
 ```
 # TD3 训练一步 伪代码 (Fujimoto et al. 2018)
@@ -368,44 +369,44 @@ if step % d == 0:                         # --- 延迟更新:critic 更 d 次, a
     Polyak 软更新 φ1⁻, φ2⁻, θ⁻            # 目标网络缓慢跟随
 ```
 
-## SAC:把「多探索」写进目标
+## SAC：把「多探索」写进目标
 
-**SAC(Soft Actor-Critic)** 换个思路:actor 改回**随机策略** $\pi_\theta(a\mid s)$(通常是被 $\tanh$ 压扁的高斯),并把它「保持随机」这件事直接写进优化目标——这就是**最大熵强化学习(maximum entropy RL)**[1]:
+**SAC(Soft Actor-Critic)** 换个思路：actor 改回**随机策略** $\pi_\theta(a\mid s)$（通常是被 $\tanh$ 压扁的高斯），并把它「保持随机」这件事直接写进优化目标——这就是**最大熵强化学习（maximum entropy RL）**[1]:<Cite n={1} />
 
 $$
 J(\pi)=\sum_{t=0}^{\infty}\mathbb{E}_{(s_t,a_t)\sim\pi}\big[\,r(s_t,a_t)+\alpha\,\mathcal H\!\big(\pi(\cdot\mid s_t)\big)\,\big]
 $$
 
-每一步除了拿奖励 $r$,还**额外拿一项熵奖励** $\alpha\mathcal H(\pi)$($\mathcal H$ 是策略熵,$\alpha>0$ 是**温度**)。熵越大策略越随机,所以这一项在「奖赏探索」——别过早塌缩到一个脆弱的确定动作。$\alpha$ 大则更探索,小则更贪心。
+每一步除了拿奖励 $r$，还**额外拿一项熵奖励** $\alpha\mathcal H(\pi)$（$\mathcal H$ 是策略熵，$\alpha>0$ 是**温度**）。熵越大策略越随机，所以这一项在「奖赏探索」——别过早塌缩到一个脆弱的确定动作。$\alpha$ 大则更探索，小则更贪心。
 
-> 💡 **为什么是熵而不是加噪声?** DDPG/TD3 是「确定性策略 + 外挂噪声」——噪声是**外加**的、与目标无关,调大调小全靠手;SAC 把随机性**内建进目标**,探索强度由 $\alpha$ 统一调控、且可自动调节(见下),探索与利用的权衡被纳入同一优化问题,这是 SAC 更稳更省样本的根因。
+> 💡 **为什么是熵而不是加噪声？** DDPG/TD3 是「确定性策略 + 外挂噪声」——噪声是**外加**的、与目标无关，调大调小全靠手；SAC 把随机性**内建进目标**，探索强度由 $\alpha$ 统一调控、且可自动调节（见下），探索与利用的权衡被纳入同一优化问题，这是 SAC 更稳更省样本的根因。
 
-### 软 Bellman 与软 Q:熵改写了价值函数
+### 软 Bellman 与软 Q：熵改写了价值函数
 
-把熵奖励累计进价值,$V$ 和 $Q$ 都得「软化」。**软价值函数** $V^\pi$ 把当前及未来所有步的熵奖励都算进来;**软 Q 函数** $Q^\pi$ 则算上**除第一步外**所有步的熵(第一步的动作 $a$ 是给定的、不算它的熵)[1]:
+把熵奖励累计进价值，$V$ 和 $Q$ 都得「软化」。**软价值函数** $V^\pi$ 把当前及未来所有步的熵奖励都算进来；**软 Q 函数** $Q^\pi$ 则算上**除第一步外**所有步的熵（第一步的动作 $a$ 是给定的、不算它的熵）[1]:<Cite n={1} />
 
 $$
 V^\pi(s)=\mathbb{E}_{a\sim\pi}\big[Q^\pi(s,a)\big]+\alpha\,\mathcal H\!\big(\pi(\cdot\mid s)\big),\qquad
 Q^\pi(s,a)=\mathbb{E}_{s'\sim P}\big[r+\gamma V^\pi(s')\big]
 $$
 
-代入熵的定义 $\mathcal H(\pi)=-\mathbb{E}_{a\sim\pi}[\log\pi(a\mid s)]$,得到 **soft Bellman 方程**(注意目标里多了 $-\alpha\log\pi$ 这一项):
+代入熵的定义 $\mathcal H(\pi)=-\mathbb{E}_{a\sim\pi}[\log\pi(a\mid s)]$，得到 **soft Bellman 方程**（注意目标里多了 $-\alpha\log\pi$ 这一项）:
 
 $$
 Q^\pi(s,a)=\mathbb{E}_{s'\sim P,\,a'\sim\pi}\big[\,r(s,a,s')+\gamma\big(Q^\pi(s',a')-\alpha\log\pi(a'\mid s')\big)\,\big]
 $$
 
-对比标准 Bellman,唯一的差别就是目标里塞了个 $-\alpha\log\pi(a')$——它把「未来保持随机」的价值折现回来了。
+对比标准 Bellman，唯一的差别就是目标里塞了个 $-\alpha\log\pi(a')$——它把「未来保持随机」的价值折现回来了。
 
-### 策略定理:最优策略 ∝ exp(Q/α)
+### 策略定理：最优策略 ∝ exp(Q/α)
 
-最大熵目标有个漂亮的**闭式最优解**[1]:固定 $Q$,使 $V^\pi(s)$ 最大的策略是
+最大熵目标有个漂亮的**闭式最优解**[1]：固定 $Q$，使 $V^\pi(s)$ 最大的策略是<Cite n={1} />
 
 $$
 \pi^*(a\mid s)\propto \exp\!\Big(\tfrac{1}{\alpha}Q^*(s,a)\Big)
 $$
 
-即**玻尔兹曼/softmax 策略**:Q 越高的动作概率越大,但被 $\alpha$ 「软化」——$\alpha\to0$ 退化为贪婪 $\arg\max$,$\alpha\to\infty$ 退化为均匀分布。下面直观感受 $\alpha$ 如何控制策略的「尖锐度」:
+即**玻尔兹曼/softmax 策略**：Q 越高的动作概率越大，但被 $\alpha$ 「软化」——$\alpha\to0$ 退化为贪婪 $\arg\max$，$\alpha\to\infty$ 退化为均匀分布。下面直观感受 $\alpha$ 如何控制策略的「尖锐度」：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -427,60 +428,60 @@ print("\\nalpha 小 -> 塌缩到最优动作 a0(贪心);alpha 大 -> 趋近均�
 print("SAC 的 alpha 通常自动调温,让熵稳定在目标值附近(见下)。")
 `} />
 
-**实现上不直接归一化 exp**——连续动作没法对 $a$ 积分归一化。SAC 改用**重参数化(reparameterization)技巧**:把 $\pi_\theta(\cdot\mid s)$ 写成「状态 + 参数 + 独立噪声」的确定函数 $\tilde a_\theta(s,\xi)$,把对动作求期望转成对噪声 $\xi\sim\mathcal N(0,I)$ 求期望,这样梯度能通过 $\tilde a$ 反传到 $\theta$。常用的是 **squashed Gaussian** 策略[1]:
+**实现上不直接归一化 exp**——连续动作没法对 $a$ 积分归一化。SAC 改用**重参数化（reparameterization）技巧**：把 $\pi_\theta(\cdot\mid s)$ 写成「状态 + 参数 + 独立噪声」的确定函数 $\tilde a_\theta(s,\xi)$，把对动作求期望转成对噪声 $\xi\sim\mathcal N(0,I)$ 求期望，这样梯度能通过 $\tilde a$ 反传到 $\theta$。常用的是 **squashed Gaussian** 策略[1]:
 
 $$
 \tilde a_\theta(s,\xi)=\tanh\!\big(\mu_\theta(s)+\sigma_\theta(s)\odot\xi\big),\qquad \xi\sim\mathcal N(0,I)
 $$
 
-$\tanh$ 把动作压到有界区间(机器人关节力矩有物理范围),$\mu_\theta,\sigma_\theta$ 都由网络输出(注意:SAC 用**状态相关**的 $\sigma$,状态无关的 $\sigma$ 实测不工作[1])。
+$\tanh$ 把动作压到有界区间（机器人关节力矩有物理范围），$\mu_\theta,\sigma_\theta$ 都由网络输出（注意：SAC 用**状态相关**的 $\sigma$，状态无关的 $\sigma$ 实测不工作[1]）。<Cite n={1} />
 
-### 为什么非重参数化不可:两种随机梯度估计器的方差鸿沟
+### 为什么非重参数化不可：两种随机梯度估计器的方差鸿沟
 
-「梯度能通过 $\tilde a$ 反传」听着像实现细节,其实是 SAC 能不能训得动的**命门**。要对 $\nabla_\theta\mathbb E_{a\sim\pi_\theta}[f(a)]$ 求梯度(这里 $f$ 相当于软 Q 减熵),期望里的分布 $\pi_\theta$ 本身依赖 $\theta$,不能直接把 $\nabla_\theta$ 塞进期望。有两条正经路子[13]:
+「梯度能通过 $\tilde a$ 反传」听着像实现细节，其实是 SAC 能不能训得动的**命门**。要对 $\nabla_\theta\mathbb E_{a\sim\pi_\theta}[f(a)]$ 求梯度（这里 $f$ 相当于软 Q 减熵），期望里的分布 $\pi_\theta$ 本身依赖 $\theta$，不能直接把 $\nabla_\theta$ 塞进期望。有两条正经路子[13]:<Cite n={[13,14]} />
 
-- **得分函数估计器(score-function / REINFORCE / likelihood-ratio)**:用恒等式 $\nabla_\theta\mathbb E[f]=\mathbb E[f(a)\,\nabla_\theta\log\pi_\theta(a)]$。它**只看 $f$ 的取值**,把「往哪调 $\theta$」全交给 $\nabla_\theta\log\pi_\theta$ 这个随机权重——完全不利用 $f$ 对 $a$ 可导的信息,方差往往很大。[策略梯度](/tutorials/policy-gradient)走的就是这条路(因为语言/离散动作里 $f$ 对动作不可导)。
-- **重参数化 / pathwise 估计器**:把采样写成 $a=\tilde a_\theta(\xi)$、$\xi$ 与 $\theta$ 无关,于是 $\nabla_\theta\mathbb E_\xi[f(\tilde a_\theta(\xi))]=\mathbb E_\xi[\nabla_a f\cdot\nabla_\theta\tilde a_\theta]$。梯度**穿过采样**、直接用上 $f$ 的导数 $\nabla_a f$——多用了一份信息,方差通常小一个量级。这正是 VAE[14] 和 SAC 共用的招。
+- **得分函数估计器（score-function / REINFORCE / likelihood-ratio）**：用恒等式 $\nabla_\theta\mathbb E[f]=\mathbb E[f(a)\,\nabla_\theta\log\pi_\theta(a)]$.它**只看 $f$ 的取值**,把「往哪调 $\theta$」全交给 $\nabla_\theta\log\pi_\theta$ 这个随机权重——完全不利用 $f$ 对 $a$ 可导的信息,方差往往很大.[策略梯度](/tutorials/policy-gradient)走的就是这条路（因为语言/离散动作里 $f$ 对动作不可导）.
+- **重参数化 / pathwise 估计器**：把采样写成 $a=\tilde a_\theta(\xi)$、$\xi$ 与 $\theta$ 无关,于是 $\nabla_\theta\mathbb E_\xi[f(\tilde a_\theta(\xi))]=\mathbb E_\xi[\nabla_a f\cdot\nabla_\theta\tilde a_\theta]$.梯度**穿过采样**、直接用上 $f$ 的导数 $\nabla_a f$——多用了一份信息,方差通常小一个量级.这正是 VAE[14] 和 SAC 共用的招.
 
-两者都是**同一个真梯度的无偏估计**,差别只在方差。下面这个可交互直方图把两者放在最小目标 $J(\mu)=\mathbb E_{a\sim\mathcal N(\mu,\sigma^2)}[-(a-c)^2]$ 上并排跑(真梯度 $\mathrm dJ/\mathrm d\mu=-2(\mu-c)$ 已知),拖动批量 $N$ 看两条分布如何随批量收窄:
+两者都是**同一个真梯度的无偏估计**，差别只在方差。下面这个可交互直方图把两者放在最小目标 $J(\mu)=\mathbb E_{a\sim\mathcal N(\mu,\sigma^2)}[-(a-c)^2]$ 上并排跑（真梯度 $\mathrm dJ/\mathrm d\mu=-2(\mu-c)$ 已知），拖动批量 $N$ 看两条分布如何随批量收窄：
 
 <ReparamGradientViz />
 
-**读图**:两簇直方图都居中在真梯度处(无偏),但橙色(得分函数)明显更「胖」——本例方差约为绿色(重参数化)的 **4~5 倍**,且这个比值几乎不随 $N$ 变化(增大 $N$ 只是同步压两者)。连续动作里 $Q_\phi(s,a)$ 对 $a$ 光滑可导,白扔掉这份梯度信息用高方差的得分函数,actor 就会训得又慢又抖——**这就是 SAC 坚持重参数化的根本原因**,也是它和只能用得分函数的 [policy gradient](/tutorials/policy-gradient) 在实现上的分水岭。
+**读图**：两簇直方图都居中在真梯度处（无偏），但橙色（得分函数）明显更「胖」——本例方差约为绿色（重参数化）的 **4~5 倍**，且这个比值几乎不随 $N$ 变化（增大 $N$ 只是同步压两者）。连续动作里 $Q_\phi(s,a)$ 对 $a$ 光滑可导，白扔掉这份梯度信息用高方差的得分函数，actor 就会训得又慢又抖——**这就是 SAC 坚持重参数化的根本原因**，也是它和只能用得分函数的 [policy gradient](/tutorials/policy-gradient) 在实现上的分水岭。
 
-### tanh 的代价:动作被压扁,密度也要修正(Jacobian 修正项)
+### tanh 的代价：动作被压扁，密度也要修正（Jacobian 修正项）
 
 
-上面这个 $\tilde a=\tanh(\mu+\sigma\odot\xi)$ 看着人畜无害,但藏着一个**实现陷阱**:策略损失和 Q 目标里都出现 $\log\pi_\theta(\tilde a\mid s)$,而这个 $\log\pi$ **不等于**高斯 $\mu(u\mid s)$ 的 log 密度——$\tanh$ 把支撑从 $\mathbb R^n$ 压扁到 $(-1,1)^n$,体积被扭曲,密度必须按**换元公式(change of variables)**修正。
+上面这个 $\tilde a=\tanh(\mu+\sigma\odot\xi)$ 看着人畜无害，但藏着一个**实现陷阱**：策略损失和 Q 目标里都出现 $\log\pi_\theta(\tilde a\mid s)$，而这个 $\log\pi$ **不等于**高斯 $\mu(u\mid s)$ 的 log 密度——$\tanh$ 把支撑从 $\mathbb R^n$ 压扁到 $(-1,1)^n$，体积被扭曲，密度必须按**换元公式（change of variables）**修正。
 
-设 $u=\mu_\theta(s)+\sigma_\theta(s)\odot\xi$ 是无约束的 pre-tanh 动作(因式高斯),$\tilde a=\tanh(u)$ 是压扁后的真实动作。元素级 $\tanh$ 的 Jacobian 是对角阵 $\text{diag}(1-\tanh(u_i)^2)$,其行列式绝对值:
+设 $u=\mu_\theta(s)+\sigma_\theta(s)\odot\xi$ 是无约束的 pre-tanh 动作（因式高斯），$\tilde a=\tanh(u)$ 是压扁后的真实动作。元素级 $\tanh$ 的 Jacobian 是对角阵 $\text{diag}(1-\tanh(u_i)^2)$，其行列式绝对值：
 
 $$
 \Big|\det\frac{d\tilde{\mathbf a}}{d\mathbf u}\Big|=\prod_{i=1}^{n}\big(1-\tanh(u_i)^2\big)=\prod_{i=1}^{n}\text{sech}^2(u_i)
 $$
 
-(用了导数恒等式 $\tanh'(u)=1-\tanh^2(u)=\text{sech}^2(u)$。)由换元公式 $\pi(\tilde a\mid s)=\mu(u\mid s)\cdot|\det d\mathbf u/d\tilde{\mathbf a}|=\mu(u\mid s)\prod_i\frac{1}{1-\tanh(u_i)^2}$,两边取 log:
+（用了导数恒等式 $\tanh'(u)=1-\tanh^2(u)=\text{sech}^2(u)$。）由换元公式 $\pi(\tilde a\mid s)=\mu(u\mid s)\cdot|\det d\mathbf u/d\tilde{\mathbf a}|=\mu(u\mid s)\prod_i\frac{1}{1-\tanh(u_i)^2}$，两边取 log:
 
 $$
 \log\pi_\theta(\tilde a\mid s)=\log\mu(u\mid s)-\sum_{i=1}^{n}\log\!\big(1-\tanh(u_i)^2\big)
 $$
 
-第二项就是 **Jacobian 修正项**——它量化了 $\tanh$ 把高斯尾部「挤」到 $\pm1$ 附近、密度在边界堆积的挤捏效应。**省掉它会让 $\log\pi$ 算错、熵项 $\alpha\log\pi$ 失准、整个最大熵目标走形**;真实 SAC 实现里的 `log_prob` 都显式减了这一项[1]。
+第二项就是 **Jacobian 修正项**——它量化了 $\tanh$ 把高斯尾部「挤」到 $\pm1$ 附近、密度在边界堆积的挤捏效应。**省掉它会让 $\log\pi$ 算错、熵项 $\alpha\log\pi$ 失准、整个最大熵目标走形**；真实 SAC 实现里的 `log_prob` 都显式减了这一项[1]。<Cite n={1} />
 
-这个「密度在边界堆积」不是抽象说法,可以直接画出来。下图上半是 pre-tanh 高斯 $p_u(u)$,下半是压扁后的动作密度 $p_a(a)=p_u(\operatorname{atanh}a)/(1-a^2)$——分母 $(1-a^2)$ 正是 $\tanh$ 的 Jacobian $\text{sech}^2(u)$ 的等价写法。拖动 $\mu,\sigma$ 观察质量如何往 $\pm1$ 堆:
+这个「密度在边界堆积」不是抽象说法，可以直接画出来。下图上半是 pre-tanh 高斯 $p_u(u)$，下半是压扁后的动作密度 $p_a(a)=p_u(\operatorname{atanh}a)/(1-a^2)$——分母 $(1-a^2)$ 正是 $\tanh$ 的 Jacobian $\text{sech}^2(u)$ 的等价写法。拖动 $\mu,\sigma$ 观察质量如何往 $\pm1$ 堆：
 
 <SquashedGaussianViz />
 
-**读图**:当 $\mu$ 偏离 0(网络倾向某个大力矩)或 $\sigma$ 增大时,$\operatorname{atanh}$ 把越来越多概率质量映到 $|a|>0.9$ 的红带里,$p_a$ 在边界处高高翘起——因为 $1-a^2\to0$ 把密度放大到发散。这正是修正项不可省的直观原因:边界处的密度差了好几倍,漏掉 $-\sum_i\log(1-a_i^2)$ 就会系统性低估 $\log\pi$、进而在最大熵目标里错配熵项。它也解释了下一个坑——动作被推到边界时 $\tanh$ 饱和、$1-a^2$ 趋 0,不做数值处理就会数值爆炸:
+**读图**：当 $\mu$ 偏离 0（网络倾向某个大力矩）或 $\sigma$ 增大时，$\operatorname{atanh}$ 把越来越多概率质量映到 $|a|>0.9$ 的红带里，$p_a$ 在边界处高高翘起——因为 $1-a^2\to0$ 把密度放大到发散。这正是修正项不可省的直观原因：边界处的密度差了好几倍，漏掉 $-\sum_i\log(1-a_i^2)$ 就会系统性低估 $\log\pi$、进而在最大熵目标里错配熵项。它也解释了下一个坑——动作被推到边界时 $\tanh$ 饱和、$1-a^2$ 趋 0，不做数值处理就会数值爆炸：
 
-还有一个**数值稳定**坑:当 $|u_i|$ 较大时(动作被推向边界),$\tanh(u_i)^2$ 逼近 1,$1-\tanh(u_i)^2$ 下溢为 0,$\log(0)=-\infty$ 直接让训练崩。实现里用恒等式避开灾难性抵消:
+还有一个**数值稳定**坑：当 $|u_i|$ 较大时（动作被推向边界），$\tanh(u_i)^2$ 逼近 1，$1-\tanh(u_i)^2$ 下溢为 0，$\log(0)=-\infty$ 直接让训练崩。实现里用恒等式避开灾难性抵消：
 
 
 $$
 \log\!\big(1-\tanh(u)^2\big)=2\log\text{sech}(u)=2\big(\log 2-u-\text{softplus}(-2u)\big)
 $$
 
-(其中 $\text{softplus}(x)=\log(1+e^x)$。)推导:由 $1-\tanh^2=\text{sech}^2$ 得 $\log(1-\tanh^2)=2\log\text{sech}$;再把 $\text{sech}(u)=\frac{2e^{-u}}{1+e^{-2u}}$ 取 log 即得上式。下面的 CodeRunner 验证恒等式、用换元公式核对密度、并展示漏掉修正项会让 $\log\pi$ 偏多少:
+（其中 $\text{softplus}(x)=\log(1+e^x)$。）推导：由 $1-\tanh^2=\text{sech}^2$ 得 $\log(1-\tanh^2)=2\log\text{sech}$；再把 $\text{sech}(u)=\frac{2e^{-u}}{1+e^{-2u}}$ 取 log 即得上式。下面的 CodeRunner 验证恒等式、用换元公式核对密度、并展示漏掉修正项会让 $\log\pi$ 偏多少：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -545,40 +546,40 @@ print("      Jacobian 修正项 -sum log(1-tanh(u)^2) 正是量化这个挤捏�
 print("      实现里必须用稳定恒等式算, 否则大动作处 log(0)=-inf 直接崩。")
 `} />
 
-> 💡 **几何直觉**:$\tanh$ 在原点附近近似线性($\tanh'(0)=1$,几乎不扭曲体积),但在两端饱和($\tanh'(\pm\infty)\to0$,把高斯尾部狠狠挤向 $\pm1$)。Jacobian 修正项 $-\sum\log(1-\tanh(u_i)^2)$ 在 $u_i\approx0$ 时几乎为 0(无需修正),在 $|u_i|$ 大时变为大负数(密度被挤多了一截,要从 $\log\mu$ 里扣回去)。这就是为什么 SAC 实现里 `log_prob = gaussian_log_prob(u) - sum(log(1-tanh(u)^2))` —— 前者是高斯密度、后者是 tanh 的体积扭曲。
+> 💡 **几何直觉**：$\tanh$ 在原点附近近似线性（$\tanh'(0)=1$，几乎不扭曲体积），但在两端饱和（$\tanh'(\pm\infty)\to0$，把高斯尾部狠狠挤向 $\pm1$）。Jacobian 修正项 $-\sum\log(1-\tanh(u_i)^2)$ 在 $u_i\approx0$ 时几乎为 0（无需修正），在 $|u_i|$ 大时变为大负数（密度被挤多了一截，要从 $\log\mu$ 里扣回去）。这就是为什么 SAC 实现里 `log_prob = gaussian_log_prob(u) - sum(log(1-tanh(u)^2))` —— 前者是高斯密度、后者是 tanh 的体积扭曲。
 
-### $\alpha$ 自动调温:用对偶梯度把熵钉在目标值
+### $\alpha$ 自动调温：用对偶梯度把熵钉在目标值
 
-上面 line 380 说「SAC 的 $\alpha$ 通常自动调温,让熵稳定在目标值附近」——这里展开「自动调温」的机制。固定 $\alpha$ 有个实践痛点:**最优 $\alpha$ 随任务变化**。奖励尺度大的任务(如 humanoid 走路,回报量级上千)贪心收益高,$\alpha$ 应小;奖励尺度小的任务(如 pendulum,回报量级个位数)需多探索,$\alpha$ 应大。手调 $\alpha$ 跨任务不通用——SAC 的解法是把 $\alpha$ 也当成**被优化的变量**,用约束优化自动找它。
+上面 line 380 说「SAC 的 $\alpha$ 通常自动调温，让熵稳定在目标值附近」——这里展开「自动调温」的机制。固定 $\alpha$ 有个实践痛点：**最优 $\alpha$ 随任务变化**。奖励尺度大的任务（如 humanoid 走路，回报量级上千）贪心收益高，$\alpha$ 应小；奖励尺度小的任务（如 pendulum，回报量级个位数）需多探索，$\alpha$ 应大。手调 $\alpha$ 跨任务不通用——SAC 的解法是把 $\alpha$ 也当成**被优化的变量**，用约束优化自动找它。
 
-**约束式目标**:SAC 不直接固定 $\alpha$,而是要求策略熵**不低于一个目标熵** $\mathcal H_{\text{target}}$:
+**约束式目标**：SAC 不直接固定 $\alpha$，而是要求策略熵**不低于一个目标熵** $\mathcal H_{\text{target}}$：
 
 $$
 \max_{\pi,\theta}\ \mathbb E\!\left[\sum_t r_t + \alpha\,\mathcal H(\pi(\cdot|s_t))\right]\quad\text{s.t.}\quad \mathbb E_{s\sim\mathcal D}\big[-\log\pi(a|s)\big]\;\ge\;\mathcal H_{\text{target}}.
 $$
 
-即「最大化带熵奖励,但策略熵不能低于目标」。引入拉格朗日乘子 $\log\alpha$(对 $\alpha>0$ 用 $\log\alpha$ 作无约束变量,保证 $\alpha$ 始终为正),对偶目标是:
+即「最大化带熵奖励，但策略熵不能低于目标」。引入拉格朗日乘子 $\log\alpha$（对 $\alpha>0$ 用 $\log\alpha$ 作无约束变量，保证 $\alpha$ 始终为正），对偶目标是：
 
 $$
 J(\alpha)\;=\;\alpha\,\Big(\mathbb E_{s\sim\mathcal D}\big[-\log\pi(a|s)\big]\;-\;\mathcal H_{\text{target}}\Big).
 $$
 
-**对偶梯度**:对 $\log\alpha$ 求梯度,得一个极其简洁的更新规则:
+**对偶梯度**：对 $\log\alpha$ 求梯度，得一个极其简洁的更新规则：
 
 $$
 \frac{\partial J}{\partial\log\alpha}\;=\;\mathbb E\big[-\log\pi(a|s)\big]\;-\;\mathcal H_{\text{target}}\;=\;\mathcal H(\pi)\;-\;\mathcal H_{\text{target}}.
 $$
 
-- 熵 $\mathcal H(\pi)<\mathcal H_{\text{target}}$(探索不够):梯度为负,$\log\alpha$ 升 → $\alpha$ 升 → 熵奖励权重变大 → 策略被推向更随机 → 熵升;
-- 熵 $\mathcal H(\pi)>\mathcal H_{\text{target}}$(探索过多):梯度为正,$\log\alpha$ 降 → $\alpha$ 降 → 熵降。
+- 熵 $\mathcal H(\pi)<\mathcal H_{\text{target}}$（探索不够）：梯度为负，$\log\alpha$ 升 → $\alpha$ 升 → 熵奖励权重变大 → 策略被推向更随机 → 熵升；
+- 熵 $\mathcal H(\pi)>\mathcal H_{\text{target}}$（探索过多）：梯度为正，$\log\alpha$ 降 → $\alpha$ 降 → 熵降。
 
-这是个**负反馈控制回路**:熵偏离目标时,$\alpha$ 自动朝把熵拉回目标的方向移动。训练全程 $\alpha$ 不固定,而是随策略熵动态调节——任务奖励尺度大时策略自然变贪心(熵降),$\alpha$ 自动升回去维持探索;奖励尺度小时反之。
+这是个**负反馈控制回路**：熵偏离目标时，$\alpha$ 自动朝把熵拉回目标的方向移动。训练全程 $\alpha$ 不固定，而是随策略熵动态调节——任务奖励尺度大时策略自然变贪心（熵降），$\alpha$ 自动升回去维持探索；奖励尺度小时反之。
 
-**目标熵怎么定**:SAC 默认 $\mathcal H_{\text{target}}=-|\mathcal A|$(动作空间维度的负数,如 HalfCheetah $|\mathcal A|=6$ 则目标熵 $-6$)。这个取值的直觉:每维动作贡献 $-1$ nat 的熵下限,既保证不会过早塌缩,又允许策略在奖励明确时适度尖锐。Haarnoja et al. 2018 [1] 实验表明这个默认值跨大量 MuJoCo 任务都稳,无需逐任务调。
+**目标熵怎么定**：SAC 默认 $\mathcal H_{\text{target}}=-|\mathcal A|$（动作空间维度的负数，如 HalfCheetah $|\mathcal A|=6$ 则目标熵 $-6$）。这个取值的直觉：每维动作贡献 $-1$ nat 的熵下限，既保证不会过早塌缩，又允许策略在奖励明确时适度尖锐。Haarnoja et al. 2018 [1] 实验表明这个默认值跨大量 MuJoCo 任务都稳，无需逐任务调。<Cite n={1} />
 
-> ⚠️ 注意「自动调 $\alpha$」优化的是**对偶目标** $J(\alpha)$,不是直接最大化回报。$\alpha$ 收敛到「让熵等于目标熵」的值,而非「让回报最大」的值——理论上这两者在对偶最优下一致(强对偶性),但实践中目标熵选取本身是个超参($-|\mathcal A|$ 是经验默认),选不好仍会次优。自动调温消解的是「固定 $\alpha$ 跨任务不通用」的痛点,不是消解所有超参。
+> ⚠️ 注意「自动调 $\alpha$」优化的是**对偶目标** $J(\alpha)$，不是直接最大化回报。$\alpha$ 收敛到「让熵等于目标熵」的值，而非「让回报最大」的值——理论上这两者在对偶最优下一致（强对偶性），但实践中目标熵选取本身是个超参（$-|\mathcal A|$ 是经验默认），选不好仍会次优。自动调温消解的是「固定 $\alpha$ 跨任务不通用」的痛点，不是消解所有超参。
 
-下面的可运行示例展示对偶梯度如何让熵收敛到目标,以及自适应 $\alpha$ vs 固定 $\alpha$ 在不同任务上的回报差。
+下面的可运行示例展示对偶梯度如何让熵收敛到目标，以及自适应 $\alpha$ vs 固定 $\alpha$ 在不同任务上的回报差。
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -656,23 +657,23 @@ print("  -> 自适应 alpha 各任务都贴最优; 固定 alpha 在 reward_scale
 print("  -> 这就是 SAC 用对偶梯度自动调 alpha 的实践价值: 无需按任务手调")
 `} title="SAC alpha 自动调温: 对偶梯度 + 目标熵" />
 
-### 孪生 Q + 取小:治高估(同 TD3)
+### 孪生 Q + 取小：治高估（同 TD3）
 
-SAC 学**两个**软 Q 网络 $Q_{\phi_1},Q_{\phi_2}$,算目标与策略损失时都取**两者较小值** $\min_{j=1,2}Q_{\phi_j}$——和 TD3 同源的 clipped double-Q,专治 off-policy 价值法的高估偏置。Q 的回归目标(注意软项与「下一动作来自当前策略」)[1]:
+SAC 学**两个**软 Q 网络 $Q_{\phi_1},Q_{\phi_2}$，算目标与策略损失时都取**两者较小值** $\min_{j=1,2}Q_{\phi_j}$——和 TD3 同源的 clipped double-Q，专治 off-policy 价值法的高估偏置。Q 的回归目标（注意软项与「下一动作来自当前策略」）[1]:
 
 $$
 y(r,s',d)=r+\gamma(1-d)\Big(\min_{j=1,2}Q_{\phi_j^-}(s',\tilde a')-\alpha\log\pi_\theta(\tilde a'\mid s')\Big),\quad \tilde a'\sim\pi_\theta(\cdot\mid s')
 $$
 
-策略损失则是最大化软价值(取 $\min$ 防策略钻单个 Q 的尖峰):
+策略损失则是最大化软价值（取 $\min$ 防策略钻单个 Q 的尖峰）:
 
 $$
 \max_\theta\ \mathbb{E}_{s\sim\mathcal D,\,\xi\sim\mathcal N}\Big[\min_{j=1,2}Q_{\phi_j}\big(s,\tilde a_\theta(s,\xi)\big)-\alpha\log\pi_\theta\big(\tilde a_\theta(s,\xi)\mid s\big)\Big]
 $$
 
-目标 Q 网络用 **Polyak 软更新** $\phi^- \leftarrow \rho\phi^-+(1-\rho)\phi$(和 DDPG/TD3 一样,$\rho\approx0.995$)。
+目标 Q 网络用 **Polyak 软更新** $\phi^- \leftarrow \rho\phi^-+(1-\rho)\phi$（和 DDPG/TD3 一样，$\rho\approx0.995$）。
 
-把软 Bellman、重参数化 actor、双 Q 取小、α 自动调温合到一起,SAC 每步更新就是:
+把软 Bellman、重参数化 actor、双 Q 取小、α 自动调温合到一起，SAC 每步更新就是：
 
 ```
 # SAC 训练一步 伪代码 (Haarnoja et al. 2018)
@@ -692,59 +693,59 @@ y = r + γ*(1-done)*( min(Q_φ1⁻(s',ã'), Q_φ2⁻(s',ã')) - α*logπ' )
 Polyak 软更新 φ1⁻, φ2⁻
 ```
 
-对比 TD3:骨架几乎一样(双 Q 取小 + 目标网络),差别是 SAC 用**随机策略**、每个 Q 目标和 actor 目标都带一个 $-\alpha\log\pi$ 的熵项,把「保持探索」直接写进了优化目标,而不像 DDPG/TD3 靠外挂噪声。
+对比 TD3：骨架几乎一样（双 Q 取小 + 目标网络），差别是 SAC 用**随机策略**、每个 Q 目标和 actor 目标都带一个 $-\alpha\log\pi$ 的熵项，把「保持探索」直接写进了优化目标，而不像 DDPG/TD3 靠外挂噪声。
 
-### 温度 α 的自动调温:约束式熵
+### 温度 α 的自动调温：约束式熵
 
-$\alpha$ 手调很烦(任务奖励尺度一变就得重调)。SAC 的标准做法是把 $\alpha$ 也当成可学参数,用一个**熵约束**:让策略熵稳定在目标熵 $\bar{\mathcal H}$ 附近(常设 $\bar{\mathcal H}=-|\mathcal A|$,即动作维度的负数,连续控制的经验值)[1][1b]。
+$\alpha$ 手调很烦（任务奖励尺度一变就得重调）。SAC 的标准做法是把 $\alpha$ 也当成可学参数，用一个**熵约束**：让策略熵稳定在目标熵 $\bar{\mathcal H}$ 附近（常设 $\bar{\mathcal H}=-|\mathcal A|$，即动作维度的负数，连续控制的经验值）[1][1b]。
 
-#### α 是哪个约束的 Lagrange 乘子?——最大熵目标的对偶起源
+#### α 是哪个约束的 Lagrange 乘子？——最大熵目标的对偶起源
 
-要真正理解 α 为何这样更新,得先看清**最大熵目标其实是某个约束优化的 Lagrangian 松弛**。原问题不是「奖励 + α·熵」这么简单,而是一个**带熵下界约束的回报最大化**:
+要真正理解 α 为何这样更新，得先看清**最大熵目标其实是某个约束优化的 Lagrangian 松弛**。原问题不是「奖励 + α·熵」这么简单，而是一个**带熵下界约束的回报最大化**：
 
 $$
 \max_\pi\ \mathbb{E}_{(s_t,a_t)\sim\pi}\!\Big[\sum_{t}\gamma^t r(s_t,a_t)\Big]\qquad\text{s.t.}\quad \mathbb{E}_{a_t\sim\pi(\cdot\mid s_t)}\!\big[-\log\pi(a_t\mid s_t)\big]\ge \bar{\mathcal H}\quad\forall t
 $$
 
-即「在保证每一步策略熵不低于目标熵 $\bar{\mathcal H}$ 的前提下,最大化累计奖励」。对这条约束引入 Lagrange 乘子 $\alpha\ge 0$,Lagrangian 为
+即「在保证每一步策略熵不低于目标熵 $\bar{\mathcal H}$ 的前提下，最大化累计奖励」。对这条约束引入 Lagrange 乘子 $\alpha\ge 0$，Lagrangian 为
 
 $$
 \mathcal L(\pi,\alpha)=\mathbb{E}\!\Big[\sum_t\gamma^t r\Big]+\alpha\,\mathbb{E}\!\Big[\sum_t\gamma^t\big(\mathcal H(\pi(\cdot\mid s_t))-\bar{\mathcal H}\big)\Big]
 $$
 
-这正是本节开头那个最大熵目标 $J(\pi)=\sum_t\gamma^t\mathbb E[r+\alpha\mathcal H]$ 多出一个常数项 $-\alpha\bar{\mathcal H}$——而常数项不影响 $\pi$ 的优化。**所以最大熵 RL 目标 = 约束式熵问题的 Lagrangian 松弛,$\alpha$ 就是「熵下界约束」的 Lagrange 乘子**(约束的影子价格)。在强对偶条件下 $\max_\pi\min_{\alpha\ge0}\mathcal L=\min_{\alpha\ge0}\max_\pi\mathcal L$,可交替更新 $\pi$(内层)与 $\alpha$(外层)。
+这正是本节开头那个最大熵目标 $J(\pi)=\sum_t\gamma^t\mathbb E[r+\alpha\mathcal H]$ 多出一个常数项 $-\alpha\bar{\mathcal H}$——而常数项不影响 $\pi$ 的优化。**所以最大熵 RL 目标 = 约束式熵问题的 Lagrangian 松弛，$\alpha$ 就是「熵下界约束」的 Lagrange 乘子**（约束的影子价格）。在强对偶条件下 $\max_\pi\min_{\alpha\ge0}\mathcal L=\min_{\alpha\ge0}\max_\pi\mathcal L$，可交替更新 $\pi$（内层）与 $\alpha$（外层）。
 
-> 💡 **α 的方向直觉**:Lagrange 乘子的经济含义是「违反约束的代价」。策略熵**低于**目标 $\bar{\mathcal H}$(违反约束、探索不够)时,$\alpha$ 应当**变大**——给熵更重的奖励权重,把策略推回高熵区;熵**高于**目标(约束松弛、已经够乱)时,$\alpha$ 应当**变小**——让目标更专注于回报。这正是「恒温器」:熵是温度,$\alpha$ 是加热/制冷力度,把熵锁定在目标值附近。
+> 💡 **α 的方向直觉**：Lagrange 乘子的经济含义是「违反约束的代价」。策略熵**低于**目标 $\bar{\mathcal H}$（违反约束、探索不够）时，$\alpha$ 应当**变大**——给熵更重的奖励权重，把策略推回高熵区；熵**高于**目标（约束松弛、已经够乱）时，$\alpha$ 应当**变小**——让目标更专注于回报。这正是「恒温器」：熵是温度，$\alpha$ 是加热/制冷力度，把熵锁定在目标值附近。
 
 #### α 的对偶目标与 log 空间优化
 
-固定 $\pi$,$\alpha$ 的对偶目标(对 $\alpha$ 求最小,因为它是 max 问题的乘子、要做对偶下降):
+固定 $\pi$，$\alpha$ 的对偶目标（对 $\alpha$ 求最小，因为它是 max 问题的乘子、要做对偶下降）:
 
 $$
 \min_\alpha\ \mathbb{E}_{a_t\sim\pi_t}\Big[-\alpha\big(\log\pi_t(a_t\mid s_t)+\bar{\mathcal H}\big)\Big]
 $$
 
-样本意义上,$-\log\pi_t(a_t\mid s_t)$ 是策略熵 $\mathcal H(\pi_t)$ 的无偏估计,所以这个目标的期望等价于 $\min_\alpha\ \alpha\big(\mathcal H(\pi_t)-\bar{\mathcal H}\big)$——与上面 Lagrange 直觉完全一致。
+样本意义上，$-\log\pi_t(a_t\mid s_t)$ 是策略熵 $\mathcal H(\pi_t)$ 的无偏估计，所以这个目标的期望等价于 $\min_\alpha\ \alpha\big(\mathcal H(\pi_t)-\bar{\mathcal H}\big)$——与上面 Lagrange 直觉完全一致。
 
-**实现上不直接对 $\alpha$ 做梯度下降,而是对 $\log\alpha$ 优化**[1b]。两个理由:① $\log\alpha$ 的值域是 $(-\infty,\infty)$,梯度下降后 $\alpha=e^{\log\alpha}$ 自动保证 $\alpha>0$(Lagrange 乘子的非负约束天然满足),无需投影;② 奖励尺度跨任务差几个数量级,$\alpha$ 的合理量级也随之漂移,log 空间下更新步长对量级不敏感、更稳定(SB3 文档明确说明「we optimize the logarithm of the entropy coefficient ... this has proven to be more stable」,与原始实现一致)。对 $\log\alpha$ 的损失就是把上面的 $\alpha$ 换成 $e^{\log\alpha}$,梯度多一个 $\alpha$ 的 Jacobian,方向不变。
+**实现上不直接对 $\alpha$ 做梯度下降，而是对 $\log\alpha$ 优化**[1b]。两个理由：① $\log\alpha$ 的值域是 $(-\infty,\infty)$，梯度下降后 $\alpha=e^{\log\alpha}$ 自动保证 $\alpha>0$（Lagrange 乘子的非负约束天然满足），无需投影；② 奖励尺度跨任务差几个数量级，$\alpha$ 的合理量级也随之漂移，log 空间下更新步长对量级不敏感、更稳定（SB3 文档明确说明「we optimize the logarithm of the entropy coefficient 。。。 this has proven to be more stable」，与原始实现一致）。对 $\log\alpha$ 的损失就是把上面的 $\alpha$ 换成 $e^{\log\alpha}$，梯度多一个 $\alpha$ 的 Jacobian，方向不变。
 
-#### 目标熵启发式:$\bar{\mathcal H}=-|\mathcal A|$ 从哪来
+#### 目标熵启发式：$\bar{\mathcal H}=-|\mathcal A|$ 从哪来
 
-连续控制里目标熵几乎都设成 $\bar{\mathcal H}=-|\mathcal A|$(动作空间维度的负数,如 HalfCheetah $|\mathcal A|=6$ 则 $\bar{\mathcal H}=-6$)。这是个**经验启发式**而非理论值,其由来是:一个 $|\mathcal A|$ 维、各维独立的标准高斯策略,熵约为 $|\mathcal A|\cdot\frac12\log(2\pi e\sigma^2)$;取 $-|\mathcal A|$ 大致对应「每维熵约 $-1$ nat」,即策略比「各维方差很小的窄峰」再略乱一点——一个「比贪心略乱、保证持续探索」的强度。SB3 等实现把 `-|A|` 作为 `target_entropy` 默认值,部分实现用 `-|A|/2`。**它不是最优值**(最优目标熵随任务而变),但作为「不用手调的合理默认」已足够——这才是 SAC「即插即用」的真正含义:不是 α 不用调,而是把「调 α」换成了「设一个粗略合理的目标熵,让 α 自动追」。
+连续控制里目标熵几乎都设成 $\bar{\mathcal H}=-|\mathcal A|$（动作空间维度的负数，如 HalfCheetah $|\mathcal A|=6$ 则 $\bar{\mathcal H}=-6$）。这是个**经验启发式**而非理论值，其由来是：一个 $|\mathcal A|$ 维、各维独立的标准高斯策略，熵约为 $|\mathcal A|\cdot\frac12\log(2\pi e\sigma^2)$；取 $-|\mathcal A|$ 大致对应「每维熵约 $-1$ nat」，即策略比「各维方差很小的窄峰」再略乱一点——一个「比贪心略乱、保证持续探索」的强度。SB3 等实现把 `-|A|` 作为 `target_entropy` 默认值，部分实现用 `-|A|/2`。**它不是最优值**（最优目标熵随任务而变），但作为「不用手调的合理默认」已足够——这才是 SAC「即插即用」的真正含义：不是 α 不用调，而是把「调 α」换成了「设一个粗略合理的目标熵，让 α 自动追」。
 
-#### 梯度方向:熵低则 α 升、熵高则 α 降
+#### 梯度方向：熵低则 α 升、熵高则 α 降
 
-把上面的对偶目标对 $\log\alpha$ 求梯度(取期望后),样本梯度正比于 $\mathcal H(\pi)-\bar{\mathcal H}$:
+把上面的对偶目标对 $\log\alpha$ 求梯度（取期望后），样本梯度正比于 $\mathcal H(\pi)-\bar{\mathcal H}$：
 
 $$
 \frac{\partial J}{\partial \log\alpha}\ \propto\ \mathcal H(\pi_t)-\bar{\mathcal H}
 $$
 
-- $\mathcal H(\pi_t)<\bar{\mathcal H}$(策略太确定):梯度 $<0$,梯度下降 $\log\alpha\leftarrow\log\alpha-\eta\cdot(\text{负})$ 使 $\log\alpha$ **增大** → $\alpha$ 升 → 加大熵奖励 → 鼓励探索;
-- $\mathcal H(\pi_t)>\bar{\mathcal H}$(已经够乱):梯度 $>0$,$\log\alpha$ **减小** → $\alpha$ 降 → 更贪心;
-- $\mathcal H(\pi_t)=\bar{\mathcal H}$:梯度 $=0$,$\alpha$ 持平,系统平衡。
+- $\mathcal H(\pi_t)<\bar{\mathcal H}$（策略太确定）：梯度 $<0$，梯度下降 $\log\alpha\leftarrow\log\alpha-\eta\cdot(\text{负})$ 使 $\log\alpha$ **增大** → $\alpha$ 升 → 加大熵奖励 → 鼓励探索；
+- $\mathcal H(\pi_t)>\bar{\mathcal H}$（已经够乱）：梯度 $>0$，$\log\alpha$ **减小** → $\alpha$ 降 → 更贪心；
+- $\mathcal H(\pi_t)=\bar{\mathcal H}$：梯度 $=0$，$\alpha$ 持平，系统平衡。
 
-下面这个 toy 把这套调温机制跑起来:用一个 2 维高斯策略,人为控制其熵在目标附近波动,看 α 如何反应。
+下面这个 toy 把这套调温机制跑起来：用一个 2 维高斯策略，人为控制其熵在目标附近波动，看 α 如何反应。
 
 <CodeRunner defaultCode={`# SAC alpha 自动调温 toy: 熵低 -> alpha 升, 熵高 -> alpha 降
 import math
@@ -771,63 +772,63 @@ print("观察: 熵低于目标(-2)时 alpha 逐步升高; 高于目标时 alpha 
 print("这就是 SAC 的恒温器: alpha 不是手调常数, 而是追着目标熵自动调的影子价格。")
 `} />
 
-#### 与安全 RL 的 λ:同一个 Lagrangian 对偶,两种约束
+#### 与安全 RL 的 λ：同一个 Lagrangian 对偶，两种约束
 
-**这是本篇两条主线的一次会师**。本节 SAC 的 α 与上一节「安全强化学习:约束 MDP 与 CPO」里 CMDP 的 $\lambda$ 是**同一个 Lagrangian 对偶技巧**,只是用在两个方向相反的约束上:
+**这是本篇两条主线的一次会师**。本节 SAC 的 α 与上一节「安全强化学习：约束 MDP 与 CPO」里 CMDP 的 $\lambda$ 是**同一个 Lagrangian 对偶技巧**，只是用在两个方向相反的约束上：
 
 | | SAC 的 α | safe RL 的 λ |
 |---|---|---|
 | 约束对象 | 策略熵**下界** $\mathcal H\ge\bar{\mathcal H}$ | 累计代价**上界** $\mathbb E[\sum\gamma^k c]\le d$ |
-| 约束含义 | 「至少要这么乱」(保证探索) | 「至多能花这么多」(保证安全) |
-| 对偶变量 | α(熵的价格) | λ(代价的价格) |
-| 违反约束时 | α **升**(加价鼓励探索) | λ **升**(加价压制代价) |
+| 约束含义 | 「至少要这么乱」（保证探索） | 「至多能花这么多」（保证安全） |
+| 对偶变量 | α（熵的价格） | λ（代价的价格） |
+| 违反约束时 | α **升**（加价鼓励探索） | λ **升**（加价压制代价） |
 | 松弛后目标 | $\max\ \mathbb E[\sum r]+\alpha(\mathcal H-\bar{\mathcal H})$ | $\max\ \mathbb E[\sum r]-\lambda(\mathbb E[\sum c]-d)$ |
 | 更新方式 | 交替更新 $\pi$ 与 α(primal-dual) | 交替更新 $\pi$ 与 λ(primal-dual,CPO/RCPO) |
 
-两者都是「把一个带约束的 max 问题,通过 Lagrange 乘子转成无约束 max-min 问题,再 primal-dual 交替求解」——α 和 λ 都是约束的影子价格,都随约束违反程度自动升降。差别只在约束的方向:**SAC 约束探索不能太少(下界),safe RL 约束代价不能太多(上界)**。理解了其中之一,另一个就是同一个套路换个约束。这也是为什么两者都面临 primal-dual 极限环的风险(RCPO 那节提到的振荡),都用「把乘子当可学参数 + 一阶交替」来近似求解。
+两者都是「把一个带约束的 max 问题，通过 Lagrange 乘子转成无约束 max-min 问题，再 primal-dual 交替求解」——α 和 λ 都是约束的影子价格，都随约束违反程度自动升降。差别只在约束的方向：**SAC 约束探索不能太少（下界），safe RL 约束代价不能太多（上界）**。理解了其中之一，另一个就是同一个套路换个约束。这也是为什么两者都面临 primal-dual 极限环的风险（RCPO 那节提到的振荡），都用「把乘子当可学参数 + 一阶交替」来近似求解。
 
-> 💡 **一句话记住**:SAC 把「保持探索」写成熵下界约束,α 是它的 Lagrange 乘子(影子价格),在 log 空间按「熵低于目标就升、高于目标就降」自动调温——这套 primal-dual 套路与 safe RL 的 λ 是同一招,只是约束方向相反。
+> 💡 **一句话记住**：SAC 把「保持探索」写成熵下界约束，α 是它的 Lagrange 乘子（影子价格），在 log 空间按「熵低于目标就升、高于目标就降」自动调温——这套 primal-dual 套路与 safe RL 的 λ 是同一招，只是约束方向相反。
 
 ### DDPG / TD3 / SAC 对比
 
 | 维度 | DDPG | TD3 | SAC |
 |---|---|---|---|
-| 策略类型 | 确定性 $\mu(s)$ | 确定性 $\mu(s)$ | 随机 $\pi(a\mid s)$(squashed Gaussian) |
-| 探索 | 外挂高斯/OU 噪声 | 外挂高斯噪声 | 内建(熵奖励) |
+| 策略类型 | 确定性 $\mu(s)$ | 确定性 $\mu(s)$ | 随机 $\pi(a\mid s)$（squashed Gaussian） |
+| 探索 | 外挂高斯/OU 噪声 | 外挂高斯噪声 | 内建（熵奖励） |
 | 孪生 Q 取小 | ✗ | ✓ | ✓ |
-| 目标策略平滑 | ✗ | ✓ | (随机性自带类似效果) |
-| 温度 $\alpha$ | — | — | 自动调温(约束式熵) |
-| 样本效率/稳定性 | 低(易发散) | 中 | 高(连续控制默认首选) |
+| 目标策略平滑 | ✗ | ✓ | （随机性自带类似效果） |
+| 温度 $\alpha$ | — | — | 自动调温（约束式熵） |
+| 样本效率/稳定性 | 低（易发散） | 中 | 高（连续控制默认首选） |
 
-凭出色的探索与样本效率,SAC 成为**当今连续控制的默认首选**[1]。
+凭出色的探索与样本效率，SAC 成为**当今连续控制的默认首选**[1]。
 
-> 💡 一句话串起来:**DDPG** 用确定性 actor 替掉难求的 $\max$;**TD3** 给它加孪生 critic / 延迟更新 / 目标平滑三个补丁治不稳;**SAC** 用「奖励 + 熵」的随机策略把探索做足。它们都是 **off-policy actor-critic**——[策略梯度](/tutorials/policy-gradient) 的思想 + [DQN](/tutorials/dqn) 的回放/目标网络,合起来对付连续动作。
+> 💡 一句话串起来：**DDPG** 用确定性 actor 替掉难求的 $\max$；**TD3** 给它加孪生 critic / 延迟更新 / 目标平滑三个补丁治不稳；**SAC** 用「奖励 + 熵」的随机策略把探索做足。它们都是 **off-policy actor-critic**——[策略梯度](/tutorials/policy-gradient) 的思想 + [DQN](/tutorials/dqn) 的回放/目标网络，合起来对付连续动作。
 
-## REDQ:集成 critic 降过估计,解锁高 UTD
+## REDQ：集成 critic 降过估计，解锁高 UTD
 
-上面三个算法都卡在同一个天花板:**样本效率**。SAC 已经是连续控制里的样本效率冠军,但要在 MuJoCo 上练好仍需上百万步环境交互。想再往上提,直觉的招是**高 UTD(update-to-data)比**——每收集 1 步数据就多做几次梯度更新(比如 $G=20$:1 步数据,20 次更新),把同一批回放数据榨干。可长期以来,高 UTD 几乎是 **model-based** RL(MBPO 一类,靠学到的世界模型生成额外数据)的专利;**model-free** 一上高 UTD 就崩——根因正是**过估计偏差**在多次更新下被反复放大。
+上面三个算法都卡在同一个天花板：**样本效率**。SAC 已经是连续控制里的样本效率冠军，但要在 MuJoCo 上练好仍需上百万步环境交互。想再往上提，直觉的招是**高 UTD（update-to-data）比**——每收集 1 步数据就多做几次梯度更新（比如 $G=20$：1 步数据，20 次更新），把同一批回放数据榨干。可长期以来，高 UTD 几乎是 **model-based** RL（MBPO 一类，靠学到的世界模型生成额外数据）的专利；**model-free** 一上高 UTD 就崩——根因正是**过估计偏差**在多次更新下被反复放大。
 
-REDQ(Randomized Ensemble Double Q-Learning,Chen et al., ICLR 2021 [11])的洞见是:**只要把过估计压住,model-free 也能吃下高 UTD**,从而追平甚至超过 model-based 的样本效率,而且参数更少、wall-clock 更快。它是 SAC 的直接改进——把 SAC 的 twin Q 换成「N 个 Q 的集成 + 随机子集取小」。
+REDQ（Randomized Ensemble Double Q-Learning,Chen et al., ICLR 2021 [11]）的洞见是：**只要把过估计压住，model-free 也能吃下高 UTD**，从而追平甚至超过 model-based 的样本效率，而且参数更少、wall-clock 更快。它是 SAC 的直接改进——把 SAC 的 twin Q 换成「N 个 Q 的集成 + 随机子集取小」。<Cite n={11} />
 
-### 病根回顾:max 对带噪 Q 系统性上偏
+### 病根回顾：max 对带噪 Q 系统性上偏
 
-[DQN](/tutorials/dqn) 篇讲过 **maximization bias**:$\max$ 是凸操作,对带噪 Q 估计会系统性上偏 $\mathbb E[\max_a \hat Q]\ge\max_a Q$。TD3/SAC 用 **clipped double-Q**(孪生 critic 取小 $\min(Q_1,Q_2)$)压它,但只有 2 个 Q,抑制力有限——尤其在高 UTD 下,每步多次更新会让残余的过估计像滚雪球一样累积,价值发散、策略崩溃。
+[DQN](/tutorials/dqn) 篇讲过 **maximization bias**：$\max$ 是凸操作，对带噪 Q 估计会系统性上偏 $\mathbb E[\max_a \hat Q]\ge\max_a Q$。TD3/SAC 用 **clipped double-Q**（孪生 critic 取小 $\min(Q_1,Q_2)$）压它，但只有 2 个 Q，抑制力有限——尤其在高 UTD 下，每步多次更新会让残余的过估计像滚雪球一样累积，价值发散、策略崩溃。
 
-那能不能多放几个 Q 取 min?直接 $\min$ 全部 $N$ 个 Q 会**系统性低估**(underestimation)——min 也是凸操作的反面,把噪声里最负的那个挑出来。REDQ 的关键设计正是在「过估计」与「低估」之间找到一个**偏差可控、方差可调**的中间点。
+那能不能多放几个 Q 取 min？直接 $\min$ 全部 $N$ 个 Q 会**系统性低估**（underestimation）——min 也是凸操作的反面，把噪声里最负的那个挑出来。REDQ 的关键设计正是在「过估计」与「低估」之间找到一个**偏差可控、方差可调**的中间点。
 
 ### REDQ 三件套
 
 REDQ 在 SAC 基础上叠了三样东西 [11]:
 
-1. **高 UTD 比 $G=20$**:每步环境交互做 20 次梯度更新。这是样本效率的直接来源——同样多的数据多榨几次梯度。但如前所述,高 UTD 是「过估计放大器」,必须配下面的集成 critic 才不崩。
-2. **$N=10$ 个 Q critic 集成**:维护 10 个独立随机初始化的 Q 网络,每步全更新。这是「大池子」,为下一步的随机子集取小提供低偏差基础。
-3. **in-target minimization over random $M=2$ subset**:每次算 TD target,从 10 个 Q 里**随机抽 2 个**取 min(不是固定某两个,也不是全部 10 个取 min)。这是「偏差-方差分离」的关键旋钮。
+1. **高 UTD 比 $G=20$**：每步环境交互做 20 次梯度更新。这是样本效率的直接来源——同样多的数据多榨几次梯度。但如前所述，高 UTD 是「过估计放大器」，必须配下面的集成 critic 才不崩。
+2. **$N=10$ 个 Q critic 集成**：维护 10 个独立随机初始化的 Q 网络，每步全更新。这是「大池子」，为下一步的随机子集取小提供低偏差基础。
+3. **in-target minimization over random $M=2$ subset**：每次算 TD target，从 10 个 Q 里**随机抽 2 个**取 min（不是固定某两个，也不是全部 10 个取 min）。这是「偏差-方差分离」的关键旋钮。
 
-注意 REDQ **不用 TD3 的 target policy smoothing**(目标动作加 clipped 噪声)——SAC 本身用 stochastic target action(从策略里采一个动作),已自带类似的平滑效果。所以 REDQ = SAC(熵正则 + reparameterization)+ N-Q 集成随机子集取小 + 高 UTD,没有额外照搬 TD3 的平滑招。
+注意 REDQ **不用 TD3 的 target policy smoothing**（目标动作加 clipped 噪声）——SAC 本身用 stochastic target action（从策略里采一个动作），已自带类似的平滑效果。所以 REDQ = SAC（熵正则 + reparameterization）+ N-Q 集成随机子集取小 + 高 UTD，没有额外照搬 TD3 的平滑招。
 
-### 偏差-方差分离:Theorem 1 与 Theorem 2
+### 偏差-方差分离：Theorem 1 与 Theorem 2
 
-REDQ 最漂亮的理论贡献是**把偏差和方差的旋钮拆开了**——这正是孪生 Q(M=N=2,M 与 N 绑死)做不到的。设 $N$ 个 Q 估计 $Q^i = Q^\pi + e^i$,$e^i$ 独立同分布零均值噪声;TD target 的 post-update bias 记 $Z_{M,N}$(固定 $s,a,s'$,随机性来自 $e^i$ 与抽子集):
+REDQ 最漂亮的理论贡献是**把偏差和方差的旋钮拆开了**——这正是孪生 Q（M=N=2，M 与 N 绑死）做不到的。设 $N$ 个 Q 估计 $Q^i = Q^\pi + e^i$，$e^i$ 独立同分布零均值噪声；TD target 的 post-update bias 记 $Z_{M,N}$（固定 $s,a,s'$，随机性来自 $e^i$ 与抽子集）:
 
 $$
 Z_{M,N} \triangleq \gamma\Big(\max_{a'}\min_{j\in\mathcal M} Q^j(s',a') - \max_{a'} Q^\pi(s',a')\Big)
@@ -835,15 +836,15 @@ $$
 
 其中 $\mathcal M$ 是从 $\{1,\dots,N\}$ 里随机抽的 size-$M$ 子集。Chen et al. 2021 证明了 [11]:
 
-> **Theorem 1(偏差由 $M$ 控制)**:(a) 对任意固定 $M$,$\mathbb E[Z_{M,N}]$ **不依赖 $N$**;(b) $\mathbb E[Z_{1,N}]\ge 0$($M=1$ 即普通单 Q,过估计);(c) $\mathbb E[Z_{M+1,N}]\le\mathbb E[Z_{M,N}]$($M$ 越大 min 越小,从过估计滑向低估);(d) 存在 $M$ 使 $\mathbb E[Z_{M,N}]<0$(足够大 $M$ 进入低估区)。
+> **Theorem 1（偏差由 $M$ 控制）**：（a） 对任意固定 $M$，$\mathbb E[Z_{M,N}]$ **不依赖 $N$**；（b） $\mathbb E[Z_{1,N}]\ge 0$（$M=1$ 即普通单 Q，过估计）;(c) $\mathbb E[Z_{M+1,N}]\le\mathbb E[Z_{M,N}]$（$M$ 越大 min 越小，从过估计滑向低估）；（d） 存在 $M$ 使 $\mathbb E[Z_{M,N}]<0$（足够大 $M$ 进入低估区）。
 
-也就是说,**$M$ 单独控制偏差的方向和大小**:小 $M$ 偏过估计,大 $M$ 偏低估,中间能找到近无偏的点;而 $N$ 完全不进偏差表达式。这跟 Maxmin Q-learning(直接 $\min$ 全部 $N$ 个,$M=N$ 绑死)形成鲜明对比——后者动 $N$ 就同时动了偏差,无法独立调。
+也就是说，**$M$ 单独控制偏差的方向和大小**：小 $M$ 偏过估计，大 $M$ 偏低估，中间能找到近无偏的点；而 $N$ 完全不进偏差表达式。这跟 Maxmin Q-learning（直接 $\min$ 全部 $N$ 个，$M=N$ 绑死）形成鲜明对比——后者动 $N$ 就同时动了偏差，无法独立调。
 
-> **Theorem 2(方差由 $N$ 控制,仅限 Weighted 变体)**:定义 **Weighted** target $Y_{M,N}$ 为对**全部** $\binom{N}{M}$ 个 size-$M$ 子集的 min 取平均,则 $\mathrm{Var}(Y_{M,N})\le G_M(N)$,且 $\lim_{N\to\infty}\mathrm{Var}(Y_{M,N})=0$。
+> **Theorem 2（方差由 $N$ 控制，仅限 Weighted 变体）**：定义 **Weighted** target $Y_{M,N}$ 为对**全部** $\binom{N}{M}$ 个 size-$M$ 子集的 min 取平均，则 $\mathrm{Var}(Y_{M,N})\le G_M(N)$，且 $\lim_{N\to\infty}\mathrm{Var}(Y_{M,N})=0$。
 
-这里有个**必须分清的细节**(Chen et al. 2021 [11] §3):Theorem 2 的方差下降**只对 Weighted 变体**(平均全部子集)严格成立——子集数 $\binom{N}{M}$ 随 $N$ 增长,平均越平滑,方差趋于 0。而**标准 REDQ**(每步只随机抽 1 个子集)的单步 target 方差 $v_M$ 实际**不随 $N$ 变**——每次抽一个 size-$M$ 子集的分布与 $N$ 无关。那标准 REDQ 里大 $N$ 图什么?主要靠两件事:① 策略梯度用 $N$ 个 Q 的**平均**(Alg.1 line 12),② 大集成带来训练多样性,各 Q 学到不同视角。所以口诀是:**$M$ 管偏差(对标准/Weighted 都成立),$N$ 管方差(只对 Weighted 严格成立,标准 REDQ 靠平均 + 多样性间接获益)**。
+这里有个**必须分清的细节**（Chen et al. 2021 [11] §3）：Theorem 2 的方差下降**只对 Weighted 变体**（平均全部子集）严格成立——子集数 $\binom{N}{M}$ 随 $N$ 增长，平均越平滑，方差趋于 0。而**标准 REDQ**（每步只随机抽 1 个子集）的单步 target 方差 $v_M$ 实际**不随 $N$ 变**——每次抽一个 size-$M$ 子集的分布与 $N$ 无关。那标准 REDQ 里大 $N$ 图什么？主要靠两件事：① 策略梯度用 $N$ 个 Q 的**平均**（Alg.1 line 12），② 大集成带来训练多样性，各 Q 学到不同视角。所以口诀是：**$M$ 管偏差（对标准/Weighted 都成立），$N$ 管方差（只对 Weighted 严格成立，标准 REDQ 靠平均 + 多样性间接获益）**。
 
-下面的代码用蒙特卡洛把 Theorem 1 的(a)(c)和 Theorem 2 的方向都跑出来看:
+下面的代码用蒙特卡洛把 Theorem 1 的（a）（c）和 Theorem 2 的方向都跑出来看：
 
 <CodeRunner defaultCode={`# === REDQ: 集成 critic + 随机子集取小,治过估计 + 解锁高 UTD ===
 import numpy as np
@@ -996,76 +997,76 @@ print("   REDQ-OFE 变体: Ant/Humanoid 上达 SAC 的约 7x 样本效率 (到 5
 print("   意义: 打破 'model-based 才有高样本效率' 迷信, model-free 集成 critic 也能做到")
 `} title="REDQ:集成 critic 降过估计,解锁高 UTD" />
 
-### 谱系:从 twin-Q 到 N-Q 集成
+### 谱系：从 twin-Q 到 N-Q 集成
 
-把连续控制 critic 的演进串起来,就是一条「过估计抑制」的精进之路:
+把连续控制 critic 的演进串起来，就是一条「过估计抑制」的精进之路：
 
 | 算法 | critic 数 | target 取小方式 | UTD 比 | 关键定位 |
 |---|---|---|---|---|
-| DDPG | 1 | —(无) | 1 | 开山,但单 Q 高估易崩 |
-| TD3 | 2(孪生) | $\min(Q_1,Q_2)$(固定两个) | 1 | clipped double-Q 治高估 |
-| SAC | 2(孪生) | $\min(Q_1,Q_2)$(固定两个) | 1 | + 熵正则,连续控制默认首选 |
-| **REDQ** | **10(集成)** | **随机抽 $M=2$ 取 min** | **20** | 集成 + 高 UTD,model-free 追平 model-based |
+| DDPG | 1 | —（无） | 1 | 开山，但单 Q 高估易崩 |
+| TD3 | 2（孪生） | $\min(Q_1,Q_2)$（固定两个） | 1 | clipped double-Q 治高估 |
+| SAC | 2（孪生） | $\min(Q_1,Q_2)$（固定两个） | 1 | + 熵正则，连续控制默认首选 |
+| **REDQ** | **10（集成）** | **随机抽 $M=2$ 取 min** | **20** | 集成 + 高 UTD,model-free 追平 model-based |
 
-演进逻辑:**DDPG 单 Q 高估 → TD3/SAC twin Q 取小压一头但抑制力有限 → REDQ 把 2 个 Q 扩成 10 个集成、固定取小改成随机子集取小,偏差(M)和方差(N)两个旋钮拆开独立调,这才扛得住高 UTD 不崩**。M=N 绑死的 Maxmin Q-learning 是反例——动 N 就同时动了偏差,无法像 REDQ 这样独立调。
+演进逻辑：**DDPG 单 Q 高估 → TD3/SAC twin Q 取小压一头但抑制力有限 → REDQ 把 2 个 Q 扩成 10 个集成、固定取小改成随机子集取小，偏差（M）和方差（N）两个旋钮拆开独立调，这才扛得住高 UTD 不崩**。M=N 绑死的 Maxmin Q-learning 是反例——动 N 就同时动了偏差，无法像 REDQ 这样独立调。
 
-> 💡 **一句话记住**:REDQ = SAC + N-Q 集成随机子集取小 + 高 UTD。$M$ 管偏差(小 $M$ 偏过估计、大 $M$ 偏低估),$N$ 管方差(只对平均全部子集的 Weighted 变体严格成立,标准 REDQ 靠平均 + 多样性间接获益)——两个旋钮拆开,才让 model-free 吃下高 UTD,追平 model-based 的样本效率。
+> 💡 **一句话记住**：REDQ = SAC + N-Q 集成随机子集取小 + 高 UTD。$M$ 管偏差（小 $M$ 偏过估计、大 $M$ 偏低估），$N$ 管方差（只对平均全部子集的 Weighted 变体严格成立，标准 REDQ 靠平均 + 多样性间接获益）——两个旋钮拆开，才让 model-free 吃下高 UTD，追平 model-based 的样本效率。
 
-## 多模态策略:高斯之外,扩散登场
+## 多模态策略：高斯之外，扩散登场
 
-前面四套算法(DDPG/TD3/SAC/REDQ)都在打磨**critic**——怎么把 $Q$ 估准、不高估、低方差。但它们共享一个**没被质疑的前提**:actor 用单峰策略类。DDPG 是确定性 $\mu_\theta(s)$(delta 分布)、SAC 是 squashed Gaussian $\tanh(\mu+\sigma\odot\xi)$(单峰)。这在大多数 MuJoCo 任务上够用,可一旦**最优动作分布本身是多模态的**,单峰策略就会从根上失败。
+前面四套算法（DDPG/TD3/SAC/REDQ）都在打磨**critic**——怎么把 $Q$ 估准、不高估、低方差。但它们共享一个**没被质疑的前提**：actor 用单峰策略类。DDPG 是确定性 $\mu_\theta(s)$（delta 分布）、SAC 是 squashed Gaussian $\tanh(\mu+\sigma\odot\xi)$（单峰）。这在大多数 MuJoCo 任务上够用，可一旦**最优动作分布本身是多模态的**，单峰策略就会从根上失败。
 
-### 病根:单峰策略在多模态数据上「模式平均」
+### 病根：单峰策略在多模态数据上「模式平均」
 
-机器人连续控制里多模态动作分布极常见:**避障时「向左绕」和「向右绕」两种策略都合理**、**抓取时多个抓取角都可行**、**导航时绕左或绕右走都通**。设某状态下专家动作有两个等概率模式 $a=-1$(向左绕)和 $a=+1$(向右绕)。SAC 的高斯策略 $\pi(a\mid s)=\mathcal N(\mu(s),\sigma^2)$ 在这批数据上做最大似然,均值 $\mu$ 会被拉到两峰中间的 $0$——一个**两个模式都没命中**的「直撞障碍物」动作。这就是**模式平均(mode averaging)**:单峰策略拟合多峰数据时,最大似然把均值拖到两个模式之间,采样出的动作两个模式都不像。
+机器人连续控制里多模态动作分布极常见：**避障时「向左绕」和「向右绕」两种策略都合理**、**抓取时多个抓取角都可行**、**导航时绕左或绕右走都通**。设某状态下专家动作有两个等概率模式 $a=-1$（向左绕）和 $a=+1$（向右绕）。SAC 的高斯策略 $\pi(a\mid s)=\mathcal N(\mu(s),\sigma^2)$ 在这批数据上做最大似然，均值 $\mu$ 会被拉到两峰中间的 $0$——一个**两个模式都没命中**的「直撞障碍物」动作。这就是**模式平均（mode averaging）**：单峰策略拟合多峰数据时，最大似然把均值拖到两个模式之间，采样出的动作两个模式都不像。
 
-> 💡 **为什么高斯必塌均值、扩散不会**:高斯策略只有单峰,双峰数据的最大似然把均值拉到两峰中间(一个都没命中)。扩散模型的反向过程是**迭代的、条件于状态的随机过程**——含噪样本落在两峰之间时,去噪梯度 $\nabla_a\log p(a\mid s)$ 会把它推向最近的那一峰,于是从多个噪声样本出发的去噪轨迹会**按数据分布的比例分到两个峰上**,而不是全堆在中间。学的是**分布** $p(a\mid s)$ 而非点估计,这是根本区别。
+> 💡 **为什么高斯必塌均值、扩散不会**：高斯策略只有单峰，双峰数据的最大似然把均值拉到两峰中间（一个都没命中）。扩散模型的反向过程是**迭代的、条件于状态的随机过程**——含噪样本落在两峰之间时，去噪梯度 $\nabla_a\log p(a\mid s)$ 会把它推向最近的那一峰，于是从多个噪声样本出发的去噪轨迹会**按数据分布的比例分到两个峰上**，而不是全堆在中间。学的是**分布** $p(a\mid s)$ 而非点估计，这是根本区别。
 
-### 扩散策略:把 actor 写成条件去噪扩散模型
+### 扩散策略：把 actor 写成条件去噪扩散模型
 
-**扩散策略(Diffusion Policy)**(Chi et al., RSS 2023 [12])把图像生成里的去噪扩散概率模型(DDPM)搬来生成动作序列:不预测单个动作,而是学**动作序列的条件分布** $p(\mathbf A_{t:t+T_p}\mid \mathbf O_t)$,其中 $\mathbf O_t$ 是最近 $T_o$ 步观测、$\mathbf A_{t:t+T_p}$ 是未来 $T_p$ 步动作。
+**扩散策略（Diffusion Policy）**（Chi et al., RSS 2023 [12]）把图像生成里的去噪扩散概率模型（DDPM）搬来生成动作序列：不预测单个动作，而是学**动作序列的条件分布** $p(\mathbf A_{t:t+T_p}\mid \mathbf O_t)$，其中 $\mathbf O_t$ 是最近 $T_o$ 步观测、$\mathbf A_{t:t+T_p}$ 是未来 $T_p$ 步动作。<Cite n={12} />
 
-**前向加噪**(训练时构造样本):对干净动作序列 $\mathbf A^0$ 逐步加高斯噪声
+**前向加噪**（训练时构造样本）：对干净动作序列 $\mathbf A^0$ 逐步加高斯噪声
 $$\mathbf A^k=\sqrt{\bar\alpha_k}\,\mathbf A^0+\sqrt{1-\bar\alpha_k}\,\boldsymbol\epsilon,\qquad \boldsymbol\epsilon\sim\mathcal N(0,I)$$
-其中 $\bar\alpha_k$ 是噪声表(论文用 iDDPM 的 square cosine schedule)。
+其中 $\bar\alpha_k$ 是噪声表（论文用 iDDPM 的 square cosine schedule）。
 
-**训练目标**(去噪 MSE,条件于观测,非对抗):
+**训练目标**（去噪 MSE，条件于观测，非对抗）：
 $$\mathcal L=\mathbb E_{\mathbf A^0,\boldsymbol\epsilon,k}\big[\big\|\boldsymbol\epsilon-\boldsymbol\epsilon_\theta(\mathbf O_t,\,\mathbf A^0+\boldsymbol\epsilon,\,k)\big\|^2\big]$$
-$\boldsymbol\epsilon_\theta$ 是噪声预测网络,**观测 $\mathbf O_t$ 作为条件注入**——关键工程是只近似条件分布 $p(\mathbf A_t\mid\mathbf O_t)$ 而非联合分布 $p(\mathbf A_t,\mathbf O_t)$,这样视觉特征只算一次、所有去噪步复用,大幅省算力(论文 Eq. 5)。
+$\boldsymbol\epsilon_\theta$ 是噪声预测网络，**观测 $\mathbf O_t$ 作为条件注入**——关键工程是只近似条件分布 $p(\mathbf A_t\mid\mathbf O_t)$ 而非联合分布 $p(\mathbf A_t,\mathbf O_t)$，这样视觉特征只算一次、所有去噪步复用，大幅省算力（论文 Eq. 5）。
 
-**反向去噪**(推理时生成动作):从纯噪声 $\mathbf A^K\sim\mathcal N(0,I)$ 出发,按 DDPM 反向递推(Eq. 4)
+**反向去噪**（推理时生成动作）：从纯噪声 $\mathbf A^K\sim\mathcal N(0,I)$ 出发，按 DDPM 反向递推（Eq. 4）
 $$\mathbf A^{k-1}=\alpha\big(\mathbf A^k-\gamma\,\boldsymbol\epsilon_\theta(\mathbf O_t,\mathbf A^k,k)+\mathcal N(0,\sigma^2 I)\big)$$
-$K$ 步后得到一段连贯的动作序列。论文还给了一个**漂亮的概率解释**(Eq. 8):$\boldsymbol\epsilon_\theta$ 近似**负 score function**,$\nabla_a\log p(a\mid o)\approx-\boldsymbol\epsilon_\theta(a,o)$——这绕开了基于能量模型(EBM/IBC)里那个不可解的归一化常数 $Z(o,\theta)$,训练比 EBM 稳得多。
+$K$ 步后得到一段连贯的动作序列。论文还给了一个**漂亮的概率解释**（Eq. 8）：$\boldsymbol\epsilon_\theta$ 近似**负 score function**,$\nabla_a\log p(a\mid o)\approx-\boldsymbol\epsilon_\theta(a,o)$——这绕开了基于能量模型（EBM/IBC）里那个不可解的归一化常数 $Z(o,\theta)$，训练比 EBM 稳得多。
 
-### 两种架构:CNN+FiLM 稳 vs Transformer+cross-attn 强
+### 两种架构：CNN+FiLM 稳 vs Transformer+cross-attn 强
 
-$\boldsymbol\epsilon_\theta$ 有两种实现,差别在**怎么把观测 $\mathbf O_t$ 注入去噪网络**:
+$\boldsymbol\epsilon_\theta$ 有两种实现，差别在**怎么把观测 $\mathbf O_t$ 注入去噪网络**：
 
-- **CNN 版**(1D 时序卷积 U-Net,承自 Janner et al. 的 Diffuser):用 **FiLM**(Feature-wise Linear Modulation)把观测特征通道级地注入**每一层卷积**,同时条件于去噪步 $k$。稳、好调参,在大多数任务上开箱即用;但时序卷积有**偏好低频信号**的归纳偏置,遇到动作急剧变化的任务(如速度指令空间)表现差。
-- **Transformer 版**(minGPT 式解码器):把含噪动作 $\mathbf A^k$ 作为输入 token、去噪步 $k$ 的正弦嵌入作首 token,用 **cross-attention** 把观测 embedding 注入解码器栈,动作 token 间用因果掩码。能捕捉高频动作变化、任务复杂时更强,但对超参敏感。论文建议**先用 CNN,任务复杂或动作变化快才换 Transformer**。
+- **CNN 版**（1D 时序卷积 U-Net，承自 Janner et al. 的 Diffuser）：用 **FiLM**（Feature-wise Linear Modulation）把观测特征通道级地注入**每一层卷积**，同时条件于去噪步 $k$。稳、好调参，在大多数任务上开箱即用；但时序卷积有**偏好低频信号**的归纳偏置，遇到动作急剧变化的任务（如速度指令空间）表现差。
+- **Transformer 版**（minGPT 式解码器）：把含噪动作 $\mathbf A^k$ 作为输入 token、去噪步 $k$ 的正弦嵌入作首 token，用 **cross-attention** 把观测 embedding 注入解码器栈，动作 token 间用因果掩码。能捕捉高频动作变化、任务复杂时更强，但对超参敏感。论文建议**先用 CNN，任务复杂或动作变化快才换 Transformer**.
 
-### Receding horizon:生成序列,只执行前几步再重规划
+### Receding horizon：生成序列，只执行前几步再重规划
 
-扩散策略一次生成未来 $T_p$ 步动作,但**只执行前 $T_a$ 步**就重新规划(receding horizon / MPC 式)。三个 horizon(典型值 $T_o=2, T_p=16, T_a=8$):
-- $T_o$(观测 horizon):输入的过去观测步数;
-- $T_p$(预测 horizon):扩散模型生成的未来动作步数;
-- $T_a$(执行 horizon):实际执行多少步再重规划。
+扩散策略一次生成未来 $T_p$ 步动作，但**只执行前 $T_a$ 步**就重新规划（receding horizon / MPC 式）。三个 horizon（典型值 $T_o=2, T_p=16, T_a=8$）:
+- $T_o$（观测 horizon）：输入的过去观测步数；
+- $T_p$（预测 horizon）：扩散模型生成的未来动作步数；
+- $T_a$（执行 horizon）：实际执行多少步再重规划。
 
-这设计**鼓励动作时序连贯**(同一次去噪出来的相邻步动作不抖动——单步独立策略容易在两个模式间来回乱跳),**又保持响应性**($T_a$ 步后用新观测重规划)。消融显示 $T_a>1$ 提升连贯性但太长会反应迟钝,$T_a=8$ 是多数任务的最优。
+这设计**鼓励动作时序连贯**（同一次去噪出来的相邻步动作不抖动——单步独立策略容易在两个模式间来回乱跳），**又保持响应性**（$T_a$ 步后用新观测重规划）。消融显示 $T_a>1$ 提升连贯性但太长会反应迟钝，$T_a=8$ 是多数任务的最优。
 
-### 代价与定位:推理慢,但多模态任务上值得
+### 代价与定位：推理慢，但多模态任务上值得
 
-扩散策略的主要代价是**推理慢**——迭代去噪要多次前向。训练用 100 步去噪,推理用 **DDIM** 把步数解耦压到 10-16 步,Nvidia 3080 上 0.1s 延迟、10Hz 实时控制(执行时插值到 125Hz/1kHz)。相比单次前向的高斯策略贵很多,但换来多模态表达力:Chi et al. 在 12 个任务上平均比 BC 提升 46.9%,在 PushT(强多模态的方块推孔任务)上把成功率从 BC 的 ~60% 提到 >95%。
+扩散策略的主要代价是**推理慢**——迭代去噪要多次前向。训练用 100 步去噪，推理用 **DDIM** 把步数解耦压到 10-16 步，Nvidia 3080 上 0.1s 延迟、10Hz 实时控制（执行时插值到 125Hz/1kHz）。相比单次前向的高斯策略贵很多，但换来多模态表达力：Chi et al. 在 12 个任务上平均比 BC 提升 46.9%，在 PushT（强多模态的方块推孔任务）上把成功率从 BC 的 ~60% 提到 >95%。
 
-| 策略类 | 表达力 | 训练 | 推理 | 多模态? | 代表算法 |
+| 策略类 | 表达力 | 训练 | 推理 | 多模态？ | 代表算法 |
 |---|---|---|---|---|---|
-| 确定性 $\mu_\theta(s)$ | 单峰(delta) | actor-critic | 一次前向 | ❌ | DDPG/TD3 |
-| squashed Gaussian | 单峰 | actor-critic(熵正则) | 一次前向 + 采样 | ❌ | SAC |
-| 扩散 $\epsilon_\theta$ | **多峰** | 去噪 MSE(非对抗) | $K$ 步去噪 | ✅ | Diffusion Policy |
+| 确定性 $\mu_\theta(s)$ | 单峰（delta） | actor-critic | 一次前向 | ❌ | DDPG/TD3 |
+| squashed Gaussian | 单峰 | actor-critic（熵正则） | 一次前向 + 采样 | ❌ | SAC |
+| 扩散 $\epsilon_\theta$ | **多峰** | 去噪 MSE（非对抗） | $K$ 步去噪 | ✅ | Diffusion Policy |
 
-> 💡 **一句话**:连续控制前四十年 actor 都被「单峰」框住(确定性 or 高斯),扩散策略把 actor 换成条件去噪扩散模型,第一次让连续控制的策略能**显式表达多模态动作分布**——代价是推理慢,但在避障/抓取/导航这些「同一状态多种合理动作」的任务上,单峰策略从根上就错了,慢一点值得。**与 [imitation-learning 篇](/tutorials/imitation-learning#diffusion-policy用扩散模型建模多模态动作分布)的视角区别**:那篇把扩散策略当**模仿学习**方法(替代 BC/GAIL,从专家数据学),本篇把它当**连续控制策略类**(替代高斯,解决 actor 单峰限制)——同一技术,两个视角。
+> 💡 **一句话**：连续控制前四十年 actor 都被「单峰」框住（确定性 or 高斯），扩散策略把 actor 换成条件去噪扩散模型，第一次让连续控制的策略能**显式表达多模态动作分布**——代价是推理慢，但在避障/抓取/导航这些「同一状态多种合理动作」的任务上，单峰策略从根上就错了，慢一点值得。**与 [imitation-learning 篇](/tutorials/imitation-learning#diffusion-policy用扩散模型建模多模态动作分布)的视角区别**：那篇把扩散策略当**模仿学习**方法（替代 BC/GAIL，从专家数据学），本篇把它当**连续控制策略类**（替代高斯，解决 actor 单峰限制）——同一技术，两个视角。
 
-下面这个玩具对比**高斯策略(模式平均)**与**扩散反向去噪(保住双峰)**在双模态专家数据上的表现。
+下面这个玩具对比**高斯策略（模式平均）**与**扩散反向去噪（保住双峰）**在双模态专家数据上的表现。
 
 <CodeRunner defaultCode={`import numpy as np
 
@@ -1148,33 +1149,33 @@ print("  -> 这是 Diffusion Policy 相对单次前向的高斯策略的主要�
 print("     但换来多模态表达力, 在多模态任务上值得 (PushT 60%->95%)")
 `} title="多模态连续控制: 高斯策略模式平均 vs 扩散策略保住双峰" />
 
-## 安全强化学习:约束 MDP 与 CPO
+## 安全强化学习：约束 MDP 与 CPO
 
-前面所有算法都在**最大化期望回报** $J_R(\pi)=\mathbb E_\pi[\sum_t\gamma^t r_t]$——但真实世界里,机器人撞了人、自动驾驶出了事故,损失远比「少拿点奖励」严重。这类场景需要**安全强化学习(safe RL)**:不仅要回报高,还要满足**安全约束**。连续控制是 safe RL 的主战场(机械臂、自动驾驶、四足机器人——动作连续、且「碰一下就贵」),所以本节放在这里讲最自然。
+前面所有算法都在**最大化期望回报** $J_R(\pi)=\mathbb E_\pi[\sum_t\gamma^t r_t]$——但真实世界里，机器人撞了人、自动驾驶出了事故，损失远比「少拿点奖励」严重。这类场景需要**安全强化学习（safe RL）**：不仅要回报高，还要满足**安全约束**。连续控制是 safe RL 的主战场（机械臂、自动驾驶、四足机器人——动作连续、且「碰一下就贵」），所以本节放在这里讲最自然。
 
-### CMDP:在 MDP 上加一个「代价」与「预算」
+### CMDP：在 MDP 上加一个「代价」与「预算」
 
-工具是**约束马尔可夫决策过程(Constrained MDP, CMDP)**(Altman, 1999 [5])——在普通 MDP 的 $(\mathcal S,\mathcal A,P,R,\gamma)$ 之外,再加一个**代价函数** $C(s,a)$ 和**代价预算** $d$。策略的目标从「最大化回报」变成:
+工具是**约束马尔可夫决策过程（Constrained MDP, CMDP）**（Altman, 1999 [5]）——在普通 MDP 的 $(\mathcal S,\mathcal A,P,R,\gamma)$ 之外，再加一个**代价函数** $C(s,a)$ 和**代价预算** $d$。策略的目标从「最大化回报」变成：<Cite n={5} />
 
 $$
 \max_\pi\; J_R(\pi)=\mathbb E_\pi\!\Big[\sum_t\gamma^t r_t\Big]\qquad\text{s.t.}\qquad J_C(\pi)=\mathbb E_\pi\!\Big[\sum_t\gamma^t c_t\Big]\le d
 $$
 
-直觉:代价 $c_t$ 量化「这步有多危险」(离障碍物多近、加速度多大、是否越界),预算 $d$ 是整个轨迹允许的代价上限。约束可以是多个($J_{C_i}\le d_i$),每条约束独立。注意 CMDP 的两个性质 [5]:① 它**不能用普通动态规划求解**(价值迭代不成立,因为最优策略依赖起始状态与剩余预算);② 最优策略一般**随机**而非确定性(确定性策略在约束边界上「非左即右」,随机化才能精确踩在预算上)。
+直觉：代价 $c_t$ 量化「这步有多危险」（离障碍物多近、加速度多大、是否越界），预算 $d$ 是整个轨迹允许的代价上限。约束可以是多个（$J_{C_i}\le d_i$），每条约束独立。注意 CMDP 的两个性质 [5]：① 它**不能用普通动态规划求解**（价值迭代不成立，因为最优策略依赖起始状态与剩余预算）；② 最优策略一般**随机**而非确定性（确定性策略在约束边界上「非左即右」，随机化才能精确踩在预算上）。
 
-### Lagrangian 松弛:把约束变成「罚项」,λ 当价格
+### Lagrangian 松弛：把约束变成「罚项」，λ 当价格
 
-解约束优化最经典的招是**拉格朗日松弛(Lagrangian relaxation)**:把约束 $J_C\le d$ 乘上对偶变量 $\lambda\ge0$ 移到目标里,变成无约束的**极大极小**问题:
+解约束优化最经典的招是**拉格朗日松弛（Lagrangian relaxation）**：把约束 $J_C\le d$ 乘上对偶变量 $\lambda\ge0$ 移到目标里，变成无约束的**极大极小**问题：
 
 $$
 \mathcal L(\pi,\lambda)=J_R(\pi)-\lambda\big(J_C(\pi)-d\big),\qquad \max_\pi\,\min_{\lambda\ge0}\,\mathcal L(\pi,\lambda)
 $$
 
-$\lambda$ 的角色很形象——它是**违反约束的「价格」**:$\lambda$ 越大,每多花一份代价越痛,策略就越保守;$\lambda\to0$ 等于约束不生效,策略退化成无约束最优。$\lambda$ 与策略**交替更新**:策略固定时按违反量调 $\lambda$(超预算就涨价、满足就降价),$\lambda$ 固定时按 $\mathcal L$ 的梯度调策略。这就是 **primal-dual** 算法的骨架。强对偶性(在 CMDP 的凸性假设下)保证 $\max_\pi\min_\lambda\mathcal L=\min_\lambda\max_\pi\mathcal L=J_R^*$——最优对偶值 $\lambda^*$ 恰好把约束顶到取等 $J_C(\pi^*)=d$,这时的 $\lambda^*$ 叫约束的**影子价格**。
+$\lambda$ 的角色很形象——它是**违反约束的「价格」**：$\lambda$ 越大，每多花一份代价越痛，策略就越保守；$\lambda\to0$ 等于约束不生效，策略退化成无约束最优。$\lambda$ 与策略**交替更新**：策略固定时按违反量调 $\lambda$（超预算就涨价、满足就降价），$\lambda$ 固定时按 $\mathcal L$ 的梯度调策略。这就是 **primal-dual** 算法的骨架。强对偶性（在 CMDP 的凸性假设下）保证 $\max_\pi\min_\lambda\mathcal L=\min_\lambda\max_\pi\mathcal L=J_R^*$——最优对偶值 $\lambda^*$ 恰好把约束顶到取等 $J_C(\pi^*)=d$，这时的 $\lambda^*$ 叫约束的**影子价格**。<Cite n={[5,6]} />
 
-> ⚠️ primal-dual 的实践坑:策略与 $\lambda$ 两个梯度互相博弈,常陷入**极限环**($\lambda$ 涨过头压策略太狠→代价暴跌→$\lambda$ 又降→策略又激进→代价又超……)而非收敛到不动点。工程上常用 $\lambda$ 的指数衰减/调度、或把 $\lambda$ 也当网络参数与策略一起优化(Tessler et al. 2019 *Reward Constrained Policy Optimization* [6] 把 $\lambda$ 学成一个标量参数),缓解振荡。
+> ⚠️ primal-dual 的实践坑：策略与 $\lambda$ 两个梯度互相博弈，常陷入**极限环**（$\lambda$ 涨过头压策略太狠→代价暴跌→$\lambda$ 又降→策略又激进→代价又超……）而非收敛到不动点。工程上常用 $\lambda$ 的指数衰减/调度、或把 $\lambda$ 也当网络参数与策略一起优化（Tessler et al. 2019 *Reward Constrained Policy Optimization* [6] 把 $\lambda$ 学成一个标量参数），缓解振荡。
 
-下面这个可运行演示用 numpy 把 Lagrangian 对偶讲透:2 动作 CMDP(a0 保守 r=1/c=0.1、a1 激进 r=2/c=1.5、预算 d=0.5),扫 $\lambda$ 看对偶函数 $g(\lambda)=\max_p\mathcal L$ 的形状——
+下面这个可运行演示用 numpy 把 Lagrangian 对偶讲透：2 动作 CMDP（a0 保守 r=1/c=0.1、a1 激进 r=2/c=1.5、预算 d=0.5），扫 $\lambda$ 看对偶函数 $g(\lambda)=\max_p\mathcal L$ 的形状——
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -1219,36 +1220,36 @@ print(f'  g(lam*) = {2-lam_star:.4f} == J_R* = {1+p_star:.4f}  (强对偶: 对�
 print(f'  机制: lam 是约束价格; 价格太低策略犯规, 太高策略过保守; lam* 恰把约束顶到取等')
 `} />
 
-### CPO:把 TRPO 的信赖域扩到带代价约束
+### CPO：把 TRPO 的信赖域扩到带代价约束
 
-Lagrangian 是「软」约束(违反罚钱、不违反不管),要想「**每一步迭代都近似满足约束**」的硬保证,就上 **CPO(Constrained Policy Optimization,Achiam et al. 2017 [4])**。它直接把 [TRPO](/tutorials/policy-gradient#trpo信赖域与单调提升) 的信赖域框架扩到受限设定:在 TRPO「目标一阶 + KL 二阶信赖域」的基础上,**再加一条代价约束的线性近似**——
+Lagrangian 是「软」约束（违反罚钱、不违反不管），要想「**每一步迭代都近似满足约束**」的硬保证，就上 **CPO(Constrained Policy Optimization,Achiam et al. 2017 [4])**。它直接把 [TRPO](/tutorials/policy-gradient#trpo信赖域与单调提升) 的信赖域框架扩到受限设定：在 TRPO「目标一阶 + KL 二阶信赖域」的基础上，**再加一条代价约束的线性近似**——<Cite n={4} />
 
 $$
 \max_\theta\; g^\top(\theta-\theta_k)\quad\text{s.t.}\quad \tfrac12(\theta-\theta_k)^\top H(\theta-\theta_k)\le\delta,\;\;\; b^\top(\theta-\theta_k)\le d-J_C(\pi_{\theta_k})
 $$
 
-这里 $g=\nabla J_R$ 是奖励梯度、$b=\nabla J_C$ 是代价梯度、$H$ 是 KL 的 Fisher 矩阵、$\delta$ 是 KL 信赖域半径;第二条约束的意思是「这一步代价增量 $\le$ 剩余预算 $d-J_C(\pi_{\theta_k})$」。这是一个带两条约束的二次规划(QP),CPO 给出近似闭式解:根据「可行(预算还够)」还是「不可行(已超预算)」分两种情形各推一步 [4]。论文证明:**每步迭代在信赖域内同时保证奖励提升与代价约束近似满足**——这是首个有逐迭代近约束保证的通用策略搜索算法 [4]。代价和 TRPO 一样:二阶方法工程重(共轭梯度 + Fisher-向量积 + 回溯线搜索),所以实践中常被更简单的 **PPO-Lagrangian**(把 CPO 的硬约束换回 Lagrangian 软罚 + PPO 的 clip 一阶优化)取代。
+这里 $g=\nabla J_R$ 是奖励梯度、$b=\nabla J_C$ 是代价梯度、$H$ 是 KL 的 Fisher 矩阵、$\delta$ 是 KL 信赖域半径；第二条约束的意思是「这一步代价增量 $\le$ 剩余预算 $d-J_C(\pi_{\theta_k})$」。这是一个带两条约束的二次规划（QP），CPO 给出近似闭式解：根据「可行（预算还够）」还是「不可行（已超预算）」分两种情形各推一步 [4]。论文证明：**每步迭代在信赖域内同时保证奖励提升与代价约束近似满足**——这是首个有逐迭代近约束保证的通用策略搜索算法 [4]。代价和 TRPO 一样：二阶方法工程重（共轭梯度 + Fisher-向量积 + 回溯线搜索），所以实践中常被更简单的 **PPO-Lagrangian**（把 CPO 的硬约束换回 Lagrangian 软罚 + PPO 的 clip 一阶优化）取代。
 
-#### CPO 的 QP 怎么解:闭式解、线搜索与「对偶变量怎么处理」这条设计轴
+#### CPO 的 QP 怎么解：闭式解、线搜索与「对偶变量怎么处理」这条设计轴
 
-上一段给了 CPO 的 QP 形式,但「近似闭式解分两种情形」一句话带过,漏掉了 CPO 真正的工程巧思。把它拆开看。
+上一段给了 CPO 的 QP 形式，但「近似闭式解分两种情形」一句话带过，漏掉了 CPO 真正的工程巧思。把它拆开看。
 
-**Eq.11 那个 QP 的对偶**只有 $m+1$ 个变量(一个 KL 乘子 $\lambda$ + $m$ 个代价乘子 $\nu_i$),远小于参数维度,所以 CPO 不直接解高维 primal,而是先解低维对偶再回代得 primal 闭式解 [4]:
+**Eq.11 那个 QP 的对偶**只有 $m+1$ 个变量（一个 KL 乘子 $\lambda$ + $m$ 个代价乘子 $\nu_i$），远小于参数维度，所以 CPO 不直接解高维 primal，而是先解低维对偶再回代得 primal 闭式解 [4]:
 
 $$
 \theta^*=\theta_k+\frac{1}{\lambda^*}H^{-1}\bigl(g-B\,\nu^*\bigr)
 $$
 
-其中 $B=[b_1,\dots,b_m]$ 是把所有代价梯度拼成的矩阵、$\lambda^*\ge0$ 是 KL 信赖域的乘子、$\nu^*\ge0$ 是各代价约束的乘子。推导来自 KKT 条件:primal QP 的驻点要求 $g-B\nu-\lambda H(\theta-\theta_k)=0$,移项解出 $\theta-\theta_k$ 即得上式;对偶变量 $(\lambda^*,\nu^*)$ 由一个 $m+1$ 维的对偶问题求出(带非负约束的拟牛顿步)。这步的几何意义是:**先在「奖励上坡方向 $g$」与「代价下坡方向 $-B\nu$」之间按代价乘子加权,再用 $H^{-1}$ 把它从梯度空间映回参数空间(把 KL 信赖域当度量),最后用 $\lambda^*$ 控步长让 KL 不超 $\delta$**。$\nu^*$ 大意味着代价约束紧、要把步子往代价下降方向偏;$\nu^*=0$ 意味着代价约束松弛、退化成普通 TRPO 的纯奖励上坡。
+其中 $B=[b_1,\dots,b_m]$ 是把所有代价梯度拼成的矩阵、$\lambda^*\ge0$ 是 KL 信赖域的乘子、$\nu^*\ge0$ 是各代价约束的乘子。推导来自 KKT 条件：primal QP 的驻点要求 $g-B\nu-\lambda H(\theta-\theta_k)=0$，移项解出 $\theta-\theta_k$ 即得上式；对偶变量 $(\lambda^*,\nu^*)$ 由一个 $m+1$ 维的对偶问题求出（带非负约束的拟牛顿步）。这步的几何意义是：**先在「奖励上坡方向 $g$」与「代价下坡方向 $-B\nu$」之间按代价乘子加权，再用 $H^{-1}$ 把它从梯度空间映回参数空间（把 KL 信赖域当度量），最后用 $\lambda^*$ 控步长让 KL 不超 $\delta$**.$\nu^*$ 大意味着代价约束紧、要把步子往代价下降方向偏；$\nu^*=0$ 意味着代价约束松弛、退化成普通 TRPO 的纯奖励上坡。
 
-**backtracking 线搜索**是闭式解之后必加的一步 [4]:上面的 $\theta^*$ 是在线性化近似(目标与代价都一阶展开)下最优,但线性化只在信赖域内有效,步子真迈出去后真实的 KL 与代价可能已超线。CPO 的做法是先按 $\theta^*$ 提议一步,若真实 surrogate 约束(KL 与代价都用原式而非线性近似重算)被违反,就**沿提议方向折半回退**($\theta_k\leftarrow\theta_k+\beta(\theta^*-\theta_k)$,$\beta=1,0.5,0.25,\dots$)直到满足。这与 TRPO 的线搜索同构,只是多检查一条代价约束。
+**backtracking 线搜索**是闭式解之后必加的一步 [4]：上面的 $\theta^*$ 是在线性化近似（目标与代价都一阶展开）下最优，但线性化只在信赖域内有效，步子真迈出去后真实的 KL 与代价可能已超线。CPO 的做法是先按 $\theta^*$ 提议一步，若真实 surrogate 约束（KL 与代价都用原式而非线性近似重算）被违反，就**沿提议方向折半回退**（$\theta_k\leftarrow\theta_k+\beta(\theta^*-\theta_k)$,$\beta=1,0.5,0.25,\dots$）直到满足。这与 TRPO 的线搜索同构，只是多检查一条代价约束。
 
-**真正的设计轴:对偶变量「有状态」还是「每步从头算」**。这是 CPO 与 RCPO/PPO-Lagrangian 的关键区分 [4][6],也是初学者最容易混的地方。三种算法其实都在解同一个「带代价约束的策略提升」,差别只在 $\lambda/\nu$ 怎么来:
+**真正的设计轴：对偶变量「有状态」还是「每步从头算」**。这是 CPO 与 RCPO/PPO-Lagrangian 的关键区分 [4][6]，也是初学者最容易混的地方。三种算法其实都在解同一个「带代价约束的策略提升」，差别只在 $\lambda/\nu$ 怎么来：
 
-- **CPO**:**每步从头算** $\nu^*$——把当前策略的代价违反量 $c_i=J_{C_i}(\pi_k)-d_i$ 喂进 $m+1$ 维对偶问题,解出新的 $(\lambda^*,\nu^*)$,一步到位精确(在信赖域近似内)满足约束。代价是要做二阶运算(Fisher-向量积 + 解小 QP),工程重。
-- **RCPO / PPO-Lagrangian**:把 $\lambda$ 当成**有状态的可学参数**与策略一起训练 [6],用一阶 primal-dual 更新 $\nu_{k+1}=(\nu_k+\alpha_k(J_C(\pi_k)-d))_+$——对偶变量记住历史、随策略同步演化。好处是一阶轻(配 Adam / PPO clip 即可),坏处是 $\lambda$ 有惯性:**涨过头了压策略太狠→代价暴跌→$\lambda$ 又降→策略又激进→代价又超**,陷入 primal-dual 极限环。
+- **CPO**：**每步从头算** $\nu^*$——把当前策略的代价违反量 $c_i=J_{C_i}(\pi_k)-d_i$ 喂进 $m+1$ 维对偶问题,解出新的 $(\lambda^*,\nu^*)$,一步到位精确（在信赖域近似内）满足约束.代价是要做二阶运算（Fisher-向量积 + 解小 QP）,工程重.
+- **RCPO / PPO-Lagrangian**：把 $\lambda$ 当成**有状态的可学参数**与策略一起训练 [6],用一阶 primal-dual 更新 $\nu_{k+1}=(\nu_k+\alpha_k(J_C(\pi_k)-d))_+$——对偶变量记住历史、随策略同步演化.好处是一阶轻（配 Adam / PPO clip 即可）,坏处是 $\lambda$ 有惯性:**涨过头了压策略太狠→代价暴跌→$\lambda$ 又降→策略又激进→代价又超**,陷入 primal-dual 极限环.
 
-下面这个可运行演示把这条轴讲透:同一个 2 动作 CMDP(a0 保守 r=1/c=0.1、a1 激进 r=2/c=1.5、预算 d=0.5,约束最优 $p^*=0.2857$),分别跑 naive primal-dual($\lambda$ 有状态、一阶)与 CPO 式(每步重解约束、带信赖域),看前者如何振荡、后者如何直奔 $p^*$——
+下面这个可运行演示把这条轴讲透：同一个 2 动作 CMDP（a0 保守 r=1/c=0.1、a1 激进 r=2/c=1.5、预算 d=0.5，约束最优 $p^*=0.2857$），分别跑 naive primal-dual（$\lambda$ 有状态、一阶）与 CPO 式（每步重解约束、带信赖域），看前者如何振荡、后者如何直奔 $p^*$——
 
 <CodeRunner defaultCode={`# primal-dual 极限环 vs CPO 式每步重解:同一个 2 动作 CMDP
 import numpy as np
@@ -1287,89 +1288,89 @@ print()
 print("-> naive: lam 有惯性, 涨过头压策略太狠 -> 代价暴跌 -> lam 又降 -> 又激进, 极限环")
 print("-> CPO:   每步按当前违反量重解 nu*, 精确(在信赖域近似内)满足约束, 直奔 p*")`} title="primal-dual 极限环 vs CPO 每步重解" />
 
-> 💡 **看图要点**:naive primal-dual 的 $\lambda$ 是有记忆的——它不知道当前策略离约束多远,只知道「历史上违反过、得加价」,于是加完价后即使策略已经保守、$\lambda$ 仍高高在上,把策略压到 $p=0$,然后 $\lambda$ 慢慢回落、策略又激进起来、又超预算……这就是正文反复提的 **primal-dual 极限环**。CPO 的解法是「**每步把 $\nu^*$ 当未知数重新解出来**」,不背历史包袱——约束违反多少、乘子就刚好多大,一步到位(在信赖域线性近似内)满足,自然不振荡。代价是二阶运算的工程开销,所以工程上常用 RCPO/PPO-Lagrangian 的「有状态 $\lambda$ + 一阶」换轻量,再靠调度/衰减缓解振荡。
+> 💡 **看图要点**：naive primal-dual 的 $\lambda$ 是有记忆的——它不知道当前策略离约束多远，只知道「历史上违反过、得加价」，于是加完价后即使策略已经保守、$\lambda$ 仍高高在上，把策略压到 $p=0$，然后 $\lambda$ 慢慢回落、策略又激进起来、又超预算……这就是正文反复提的 **primal-dual 极限环**。CPO 的解法是「**每步把 $\nu^*$ 当未知数重新解出来**」，不背历史包袱——约束违反多少、乘子就刚好多大，一步到位（在信赖域线性近似内）满足，自然不振荡。代价是二阶运算的工程开销，所以工程上常用 RCPO/PPO-Lagrangian 的「有状态 $\lambda$ + 一阶」换轻量，再靠调度/衰减缓解振荡。
 
-**三种对偶处理的取舍**对照如下(把上面这张表补上「对偶变量怎么来」这条轴):
+**三种对偶处理的取舍**对照如下（把上面这张表补上「对偶变量怎么来」这条轴）：
 
 | | TRPO | CPO | RCPO / PPO-Lagrangian |
 |---|---|---|---|
-| 约束 | KL 信赖域 | KL 信赖域 + **代价预算**(硬) | KL 信赖域 + **代价罚项**(软) |
-| 优化阶 | 二阶(共轭梯度) | 二阶(共轭梯度 + QP) | 一阶(Adam + clip) |
+| 约束 | KL 信赖域 | KL 信赖域 + **代价预算**（硬） | KL 信赖域 + **代价罚项**（软） |
+| 优化阶 | 二阶（共轭梯度） | 二阶（共轭梯度 + QP） | 一阶（Adam + clip） |
 | **对偶变量** | 无代价乘子 | **每步从头算** $\nu^*$ | **有状态、与策略同步学** $\lambda$ [6] |
-| 约束满足 | 仅 KL | **逐迭代近约束保证** [4] | 训练后渐近满足($\lambda$ 调好,易极限环) |
-| 工程复杂度 | 重 | 最重 | 轻(主流实用选择) |
+| 约束满足 | 仅 KL | **逐迭代近约束保证** [4] | 训练后渐近满足（$\lambda$ 调好，易极限环） |
+| 工程复杂度 | 重 | 最重 | 轻（主流实用选择） |
 
-### 风险敏感 RL:用 CVaR 防「尾部灾难」
+### 风险敏感 RL：用 CVaR 防「尾部灾难」
 
-约束 RL 之外,另一条路是**风险敏感 RL(risk-sensitive RL)**——不优化期望回报,改优化回报分布的**风险度量**,最常用的是 **CVaR(Conditional Value at Risk,条件风险价值)**:
+约束 RL 之外，另一条路是**风险敏感 RL(risk-sensitive RL)**——不优化期望回报，改优化回报分布的**风险度量**，最常用的是 **CVaR（Conditional Value at Risk，条件风险价值）**：
 
 $$
 \mathrm{CVaR}_\alpha(X)=\mathbb E\!\big[X\mid X\le \mathrm{VaR}_\alpha(X)\big]\qquad(\mathrm{VaR}_\alpha=\text{分布的 }\alpha\text{ 分位数})
 $$
 
-直觉:$\mathrm{VaR}_\alpha$ 标出「最差 $\alpha$ 概率的回报阈值」,$\mathrm{CVaR}_\alpha$ 则是「**这最差 $\alpha$ 尾部里的平均回报**」[7]。优化 CVaR 等于专门盯住「倒霉的那 5%」,避免一个期望值漂亮但偶尔会摔下悬崖的策略——与 [reward hacking](/tutorials/rlhf#reward-hacking当代理奖励被钻空子) 里讲的 Goodhart 尾部风险同源。CVaR 比 VaR 更稳的关键:VaR 只标阈值不管尾部多厚,CVaR 把整个尾部平均掉,是「相干风险度量」(diversification 不增风险)[7]。
+直觉：$\mathrm{VaR}_\alpha$ 标出「最差 $\alpha$ 概率的回报阈值」，$\mathrm{CVaR}_\alpha$ 则是「**这最差 $\alpha$ 尾部里的平均回报**」[7]。优化 CVaR 等于专门盯住「倒霉的那 5%」，避免一个期望值漂亮但偶尔会摔下悬崖的策略——与 [reward hacking](/tutorials/rlhf#reward-hacking当代理奖励被钻空子) 里讲的 Goodhart 尾部风险同源。CVaR 比 VaR 更稳的关键：VaR 只标阈值不管尾部多厚，CVaR 把整个尾部平均掉，是「相干风险度量」（diversification 不增风险）[7]。<Cite n={7} />
 
-> 💡 一句话:**Safe RL = 在「最大化回报」之外再加一条「别超预算/别摔尾巴」的约束**。CMDP(Altman 1999)给框架、Lagrangian primal-dual 给通用解法($\lambda$ 当约束价格)、CPO 给 TRPO 式硬保证、PPO-Lagrangian 给轻量实用替代、CVaR 给尾部风险视角。连续控制(机器人/自驾)是它最贴切的应用场——这也是把本节放在 continuous-control 篇的原因。与 RLHF 的 reward hacking 互补:reward hacking 防「代理被钻空子」(奖励侧),safe RL 防「策略行为本身危险」(行为侧),二者共同构成「RL 部署到真实世界」的安全护栏。
+> 💡 一句话：**Safe RL = 在「最大化回报」之外再加一条「别超预算/别摔尾巴」的约束**。CMDP（Altman 1999）给框架、Lagrangian primal-dual 给通用解法（$\lambda$ 当约束价格）、CPO 给 TRPO 式硬保证、PPO-Lagrangian 给轻量实用替代、CVaR 给尾部风险视角。连续控制（机器人/自驾）是它最贴切的应用场——这也是把本节放在 continuous-control 篇的原因。与 RLHF 的 reward hacking 互补：reward hacking 防「代理被钻空子」（奖励侧），safe RL 防「策略行为本身危险」（行为侧），二者共同构成「RL 部署到真实世界」的安全护栏。
 
-## 解析对照:线性二次调节器(LQR),DP 的连续态闭式解
+## 解析对照：线性二次调节器（LQR），DP 的连续态闭式解
 
-DDPG/TD3/SAC 都是**model-free** 的神经网络方法——不假设动力学已知,靠采样学。但连续控制还有一条更古老的支线:**如果动力学已知、且是线性的、代价是二次的,最优控制有闭式解,根本不用学**。这就是**线性二次调节器(Linear-Quadratic Regulator,LQR)**,控制论的基石,也是 tabular DP(离散贝尔曼)与深度 RL(无模型)之间的解析桥梁。理解 LQR 才能看清 DDPG/TD3/SAC 在「学」什么——它们本质上是在**用网络逼近 LQR 已知怎么算的那个二次价值函数**。
+DDPG/TD3/SAC 都是**model-free** 的神经网络方法——不假设动力学已知，靠采样学。但连续控制还有一条更古老的支线：**如果动力学已知、且是线性的、代价是二次的，最优控制有闭式解，根本不用学**。这就是**线性二次调节器（Linear-Quadratic Regulator,LQR）**，控制论的基石，也是 tabular DP（离散贝尔曼）与深度 RL（无模型）之间的解析桥梁。理解 LQR 才能看清 DDPG/TD3/SAC 在「学」什么——它们本质上是在**用网络逼近 LQR 已知怎么算的那个二次价值函数**。
 
-### 设定:线性动力学 + 二次代价
+### 设定：线性动力学 + 二次代价
 
-LQR 假设两件事:
+LQR 假设两件事：
 
-**线性动力学**(离散时间):
+**线性动力学**（离散时间）：
 
 $$
 x_{k+1}=A\,x_k+B\,u_k
 $$
 
-其中 $x\in\mathbb R^n$ 是状态(如位置、速度、关节角),$u\in\mathbb R^m$ 是控制输入(力矩、推力),$A$/$B$ 是已知常数矩阵。机器人小车简化后 $x=[\text{位置},\text{速度}]^\top$,$u=$ 推力,这就是个双积分器。
+其中 $x\in\mathbb R^n$ 是状态（如位置、速度、关节角），$u\in\mathbb R^m$ 是控制输入（力矩、推力），$A$/$B$ 是已知常数矩阵。机器人小车简化后 $x=[\text{位置},\text{速度}]^\top$，$u=$ 推力，这就是个双积分器。
 
-**二次代价**(无限 horizon 累积):
+**二次代价**（无限 horizon 累积）：
 
 $$
 J=\sum_{k=0}^{\infty}\bigl(x_k^\top Q\,x_k+u_k^\top R\,u_k\bigr)
 $$
 
-$Q\succeq 0$ 半正定(惩罚状态偏离原点)、$R\succ 0$ 正定(惩罚控制能耗,保证最优控制有界)。两个矩阵就是工程师调参的旋钮:$Q$ 大=「快回原点,费油也认」,$R$ 大=「省油优先,慢慢回」。
+$Q\succeq 0$ 半正定（惩罚状态偏离原点）、$R\succ 0$ 正定（惩罚控制能耗，保证最优控制有界）。两个矩阵就是工程师调参的旋钮：$Q$ 大=「快回原点，费油也认」，$R$ 大=「省油优先，慢慢回」。
 
-### 结构结果:价值函数是二次型 $V(x)=x^\top P\,x$
+### 结构结果：价值函数是二次型 $V(x)=x^\top P\,x$
 
-LQR 最深刻的事实是一条**结构结果**——贝尔曼方程的解是二次型。把代价写成 $r(x,u)=-(x^\top Qx+u^\top Ru)$(RL 习惯取负代价为奖励),贝尔曼最优方程:
+LQR 最深刻的事实是一条**结构结果**——贝尔曼方程的解是二次型。把代价写成 $r(x,u)=-(x^\top Qx+u^\top Ru)$（RL 习惯取负代价为奖励），贝尔曼最优方程：
 
 $$
 V^*(x)=\max_u\Bigl[-(x^\top Qx+u^\top Ru)+V^*(Ax+Bu)\Bigr]
 $$
 
-**关键观察**:若 $V^*$ 是二次型 $V^*(x)=x^\top Px$($P\succeq 0$),那么右端 $V^*(Ax+Bu)=(Ax+Bu)^\top P(Ax+Bu)$ 仍是二次型,对 $u$ 求导得一阶条件 $2(R+B^\top PB)u=-2B^\top PAx$,最优 $u^*=-\underbrace{(R+B^\top PB)^{-1}B^\top PA}_{K}\,x$ 是**状态线性反馈**,代回贝尔曼右端仍得二次型。这是个**自洽的不动点**:假设 $V^*$ 二次→求出线性 $u^*$→代回仍得二次→不动点存在。故:
+**关键观察**：若 $V^*$ 是二次型 $V^*(x)=x^\top Px$（$P\succeq 0$），那么右端 $V^*(Ax+Bu)=(Ax+Bu)^\top P(Ax+Bu)$ 仍是二次型，对 $u$ 求导得一阶条件 $2(R+B^\top PB)u=-2B^\top PAx$，最优 $u^*=-\underbrace{(R+B^\top PB)^{-1}B^\top PA}_{K}\,x$ 是**状态线性反馈**，代回贝尔曼右端仍得二次型。这是个**自洽的不动点**：假设 $V^*$ 二次→求出线性 $u^*$→代回仍得二次→不动点存在。故：
 
-- **最优价值函数**:$V^*(x)=x^\top P\,x$,二次型
-- **最优控制**:$u^*=-K\,x$,线性状态反馈,$K=(R+B^\top PB)^{-1}B^\top PA$
+- **最优价值函数**：$V^*(x)=x^\top P\,x$,二次型
+- **最优控制**：$u^*=-K\,x$,线性状态反馈,$K=(R+B^\top PB)^{-1}B^\top PA$
 
-这就是为什么 LQR 不用网络——价值函数的结构(二次型)被动力学(线性)+代价(二次)锁死,网络能拟合的任意函数里只有这一个二次型是最优的,直接解矩阵方程即可。
+这就是为什么 LQR 不用网络——价值函数的结构（二次型）被动力学（线性）+代价（二次）锁死，网络能拟合的任意函数里只有这一个二次型是最优的，直接解矩阵方程即可。
 
-### DARE:Riccati 方程 = 贝尔曼的不动点
+### DARE：Riccati 方程 = 贝尔曼的不动点
 
-把上面的不动点写开,$P$ 满足**离散代数 Riccati 方程(Discrete Algebraic Riccati Equation,DARE)**:
+把上面的不动点写开，$P$ 满足**离散代数 Riccati 方程（Discrete Algebraic Riccati Equation,DARE）**：
 
 $$
 P=A^\top PA-A^\top PB\,(R+B^\top PB)^{-1}\,B^\top PA+Q
 $$
 
-这是关于 $P$ 的非线性矩阵方程(因含 $P$ 的逆)。两个等价视角:
+这是关于 $P$ 的非线性矩阵方程（因含 $P$ 的逆）。两个等价视角：
 
-- **贝尔曼不动点**:$P$ 是贝尔曼备份算子的不动点 $\mathcal T(P)=P$——和值迭代 $\mathcal T V=V$ 同构,只是作用在矩阵上;
-- **动态 Riccati 迭代**:从 $P_0=Q$ 起,反复 $P_{k+1}=\mathcal T(P_k)$ 向后迭代直到收敛(有限 horizon 的最优 $P$ 从末值 $P_N=Q$ 向前倒推,无限 horizon 是它的不动点)。**这就是值迭代,只不过值迭代收敛的是 $V$ 函数,Riccati 迭代收敛的是矩阵 $P$**——因为二次型空间由 $P$ 唯一确定,降维了。
+- **贝尔曼不动点**：$P$ 是贝尔曼备份算子的不动点 $\mathcal T(P)=P$——和值迭代 $\mathcal T V=V$ 同构,只是作用在矩阵上;
+- **动态 Riccati 迭代**：从 $P_0=Q$ 起,反复 $P_{k+1}=\mathcal T(P_k)$ 向后迭代直到收敛（有限 horizon 的最优 $P$ 从末值 $P_N=Q$ 向前倒推,无限 horizon 是它的不动点）.**这就是值迭代,只不过值迭代收敛的是 $V$ 函数,Riccati 迭代收敛的是矩阵 $P$**——因为二次型空间由 $P$ 唯一确定,降维了.
 
-稳定条件:$(A,B)$ **可稳**(stabilizable)且 $(A,\sqrt Q)$ **可检测**(detectable)时,DARE 有唯一半正定解 $P\succ 0$,且闭环系统 $A-BK$ 稳定(特征值在单位圆内)。LQR 还自带**鲁棒性保证**:有保证的增益裕度和相角裕度(Lehtomaki et al., 1981),这也是它长期统治工业控制的原因之一。
+稳定条件：$(A,B)$ **可稳**（stabilizable）且 $(A,\sqrt Q)$ **可检测**（detectable）时，DARE 有唯一半正定解 $P\succ 0$，且闭环系统 $A-BK$ 稳定（特征值在单位圆内）。LQR 还自带**鲁棒性保证**：有保证的增益裕度和相角裕度（Lehtomaki et al., 1981），这也是它长期统治工业控制的原因之一。<Cite n={[8,9]} />
 
-### 可运行演示:Riccati 迭代 + 闭式 V vs model-free
+### 可运行演示：Riccati 迭代 + 闭式 V vs model-free
 
-下面演示 1-D 不稳定系统($A=1.1$,不控会指数发散)+ 2-D 双积分器(机器人小车的最简模型),用 Riccati 迭代解 DARE,验证 $V(x)=x^\top Px$ 与闭环累积代价**逐位匹配**(证明确是价值函数),并和 model-free 表格 Q-learning 对照——后者 20000 episode 仍次优:
+下面演示 1-D 不稳定系统（$A=1.1$，不控会指数发散）+ 2-D 双积分器（机器人小车的最简模型），用 Riccati 迭代解 DARE，验证 $V(x)=x^\top Px$ 与闭环累积代价**逐位匹配**（证明确是价值函数），并和 model-free 表格 Q-learning 对照——后者 20000 episode 仍次优：
 
-<CodeRunner language="python" title="LQR:Riccati 迭代解 DARE,闭式价值函数 vs model-free Q-learning" defaultCode={`import numpy as np
+<CodeRunner language="python" title="LQR：Riccati 迭代解 DARE，闭式价值函数 vs model-free Q-learning" defaultCode={`import numpy as np
 
 # === 1-D 不稳定系统: x_{k+1} = 1.1 x + u, 代价 x^2 + 0.1 u^2 ===
 # 不控时 x 指数发散(1.1^k),LQR 该把它镇定到 0
@@ -1467,115 +1468,117 @@ print("结论: LQR 解一个矩阵方程就拿全最优; Q-learning 20000 episod
 
 ### 为何 LQR 是 DDPG/TD3/SAC 的「解析基线」
 
-LQR 与本篇的神经方法形成鲜明对照:
+LQR 与本篇的神经方法形成鲜明对照：
 
-| 维度 | LQR(解析) | DDPG/TD3/SAC(无模型神经) |
+| 维度 | LQR（解析） | DDPG/TD3/SAC（无模型神经） |
 |---|---|---|
-| 动力学 | 已知线性 $A,B$ | 未知,靠交互采样 |
+| 动力学 | 已知线性 $A,B$ | 未知，靠交互采样 |
 | 代价 | 二次 $Q,R$ | 任意奖励信号 |
-| 价值函数 | 闭式 $V=x^\top Px$(二次型) | 神经网络 $V_\psi(s)$ 逼近 |
-| 控制器 | 闭式 $u=-Kx$(线性反馈) | 神经网络 $\mu_\theta(s)$ 逼近 |
-| 求解 | 解一个矩阵方程(DARE) | 百万步梯度下降 |
-| 最优性 | 全局最优(数学保证) | 渐近、局部最优 |
+| 价值函数 | 闭式 $V=x^\top Px$（二次型） | 神经网络 $V_\psi(s)$ 逼近 |
+| 控制器 | 闭式 $u=-Kx$（线性反馈） | 神经网络 $\mu_\theta(s)$ 逼近 |
+| 求解 | 解一个矩阵方程（DARE） | 百万步梯度下降 |
+| 最优性 | 全局最优（数学保证） | 渐近、局部最优 |
 | 适用规模 | 小状态 + 线性动力学 | 高维状态 + 非线性动力学 |
 
-DDPG/TD3/SAC 的 actor 网络 $\mu_\theta(s)$ 学的,在 LQR 能解的情形里,就是逼近线性反馈 $u=-Kx$;critic 网络 $Q_\phi(s,a)$ 学的,就是逼近二次型 $V=x^\top Px$ 的梯度。**当动力学线性、代价二次时,网络是在用百万参数重学一个四则运算能算的东西**——这正是 LQR 的价值:它划清了「必须用学习」和「闭式可解」的边界。
+DDPG/TD3/SAC 的 actor 网络 $\mu_\theta(s)$ 学的，在 LQR 能解的情形里，就是逼近线性反馈 $u=-Kx$；critic 网络 $Q_\phi(s,a)$ 学的，就是逼近二次型 $V=x^\top Px$ 的梯度。**当动力学线性、代价二次时，网络是在用百万参数重学一个四则运算能算的东西**——这正是 LQR 的价值：它划清了「必须用学习」和「闭式可解」的边界。
 
-### 何时该用 LQR,何时该上神经方法
+### 何时该用 LQR，何时该上神经方法
 
-> 💡 **LQR 的真正威力在「贴近线性的局部」**:真实机器人动力学是非线性的,但**在工作点附近泰勒展开**得到的线性化模型 + 二次代价,就能用 LQR 给出局部最优控制。直升机悬停、机械臂抓取、平衡车直立,工业控制里大量场景就是「在线性化点附近跑 LQR」。当状态远离工作点(大范围机动、强非线性)时,LQR 失准,才需要非线性控制或神经方法。MPC(模型预测控制)就是**滚动 horizon 的 LQR**——每步重新线性化、解有限 horizon LQR、执行第一步、下一步再来,把 LQR 的闭式解推广到约束和非线性的工程化框架。所以 LQR 不是「被深度 RL 淘汰的旧方法」,而是深度 RL 在连续控制落地时**对标和奠基的解析基线**——RL 控制器的表现,常常先和 LQR 比一比再说。
+> 💡 **LQR 的真正威力在「贴近线性的局部」**：真实机器人动力学是非线性的，但**在工作点附近泰勒展开**得到的线性化模型 + 二次代价，就能用 LQR 给出局部最优控制。直升机悬停、机械臂抓取、平衡车直立，工业控制里大量场景就是「在线性化点附近跑 LQR」。当状态远离工作点（大范围机动、强非线性）时，LQR 失准，才需要非线性控制或神经方法。MPC（模型预测控制）就是**滚动 horizon 的 LQR**——每步重新线性化、解有限 horizon LQR、执行第一步、下一步再来，把 LQR 的闭式解推广到约束和非线性的工程化框架。<Cite n={10} />所以 LQR 不是「被深度 RL 淘汰的旧方法」，而是深度 RL 在连续控制落地时**对标和奠基的解析基线**——RL 控制器的表现，常常先和 LQR 比一比再说。
 
-## 典型案例:连续控制用在哪
+## 典型案例：连续控制用在哪
 
 | 场景 | 常用算法 | 为什么 |
 |---|---|---|
-| **机械臂抓取、灵巧手** | SAC | 连续力矩 + 探索关键,样本效率高 |
-| **四足/双足机器人行走** | SAC / TD3 | 高维连续控制,sim-to-real |
-| **自动驾驶(油门/转向)** | TD3 / SAC | 动作连续,需稳定确定性或带探索的随机策略 |
-| **MuJoCo 连续控制基准** | TD3、SAC | 学界标准评测,DDPG 已少用(太不稳) |
-| **离散动作(Atari、棋类)** | [DQN](/tutorials/dqn) 家族 | 动作可枚举,不必上连续控制 |
+| **机械臂抓取、灵巧手** | SAC | 连续力矩 + 探索关键，样本效率高 |
+| **四足/双足机器人行走** | SAC / TD3 | 高维连续控制，sim-to-real |
+| **自动驾驶（油门/转向）** | TD3 / SAC | 动作连续，需稳定确定性或带探索的随机策略 |
+| **MuJoCo 连续控制基准** | TD3、SAC | 学界标准评测，DDPG 已少用（太不稳） |
+| **离散动作（Atari、棋类）** | [DQN](/tutorials/dqn) 家族 | 动作可枚举，不必上连续控制 |
 
-> 📌 选型经验:**离散动作 → DQN 家族;连续 + 要确定性策略 → TD3;连续 + 探索至关重要 → SAC。**
+> 📌 选型经验：**离散动作 → DQN 家族；连续 + 要确定性策略 → TD3；连续 + 探索至关重要 → SAC。**
 
 ## 常见问题 FAQ
 
-**Q:连续动作为什么不能像 DQN 那样离散化了事?**
-低维、精度要求不高时确实可以离散化。但动作维度一高(如 7 关节机械臂),网格点数随维度**指数爆炸**(维度灾难),且精度受分辨率限制。连续控制方法直接在实数空间里优化,绕开了这个爆炸。
+**Q：连续动作为什么不能像 DQN 那样离散化了事？**
+低维、精度要求不高时确实可以离散化。但动作维度一高（如 7 关节机械臂），网格点数随维度**指数爆炸**（维度灾难），且精度受分辨率限制。连续控制方法直接在实数空间里优化，绕开了这个爆炸。
 
-**Q:DDPG 的 actor 是确定性的,那它怎么探索?**
-训练时给 $\mu_\theta(s)$ 的输出**加噪声**(高斯或 OU 噪声)来探索,测试时去掉噪声用纯确定性动作。这与 SAC 不同——SAC 的随机性内建在策略里、且被熵项主动鼓励。
+**Q：DDPG 的 actor 是确定性的，那它怎么探索？**
+训练时给 $\mu_\theta(s)$ 的输出**加噪声**（高斯或 OU 噪声）来探索，测试时去掉噪声用纯确定性动作。这与 SAC 不同——SAC 的随机性内建在策略里、且被熵项主动鼓励。
 
-**Q:TD3 和 SAC 该选哪个?**
-都很强。要一个**确定性**策略、任务对随机性不敏感 → TD3;探索是瓶颈、想要更稳更省样本 → SAC(当前多数连续控制的默认)。二者都用孪生 critic 治高估。
+**Q：TD3 和 SAC 该选哪个？**
+都很强。要一个**确定性**策略、任务对随机性不敏感 → TD3；探索是瓶颈、想要更稳更省样本 → SAC（当前多数连续控制的默认）。二者都用孪生 critic 治高估。
 
-**Q:TD3 三副药,哪副最重要?能不能只用一副?**
-论文消融显示**孪生 critic 取小(clipped double-Q)贡献最大**——它直击 $\max$ 上偏这个病根,是治本的;后两副(延迟更新、目标平滑)是治标,锦上添花。工程上**不建议只用一副**:三副药针对三个不同症状(高估偏置 / actor 跟未收敛 critic 乱跑 / 钻虚假窄尖峰),合起来才稳。若只取其一,取 clipped double-Q;但延迟更新和目标平滑几乎零成本(不增网络、不改架构),没理由省。
+**Q：TD3 三副药，哪副最重要？能不能只用一副？**
+论文消融显示**孪生 critic 取小（clipped double-Q）贡献最大**——它直击 $\max$ 上偏这个病根，是治本的；后两副（延迟更新、目标平滑）是治标，锦上添花。工程上**不建议只用一副**：三副药针对三个不同症状（高估偏置 / actor 跟未收敛 critic 乱跑 / 钻虚假窄尖峰），合起来才稳。若只取其一，取 clipped double-Q；但延迟更新和目标平滑几乎零成本（不增网络、不改架构），没理由省。
 
-**Q:SAC 策略是「被 tanh 压扁的高斯」,那 $\log\pi$ 怎么算?直接用高斯的 log 密度行不行?**
-**不行,必须减 Jacobian 修正项**。高斯给的是 pre-tanh 动作 $u$ 的密度 $\mu(u\mid s)$,但策略损失里要的是压扁后动作 $\tilde a=\tanh(u)$ 的密度 $\pi(\tilde a\mid s)$。$\tanh$ 把支撑从 $\mathbb R$ 压到 $(-1,1)$、扭曲了体积,按换元公式 $\pi(\tilde a\mid s)=\mu(u\mid s)\cdot\frac{1}{1-\tanh(u)^2}$,故 $\log\pi=\log\mu-\log(1-\tanh(u)^2)$(多维求和)。漏掉修正项会让 $\log\pi$ 偏大(尤其在动作接近边界 $|u|$ 大时,偏几甚至几十),熵项 $\alpha\log\pi$ 全跟着错,最大熵目标走形。实现里还要用稳定恒等式 $\log(1-\tanh(u)^2)=2(\log2-u-\text{softplus}(-2u))$ 算,否则 $|u|$ 大时 $1-\tanh^2$ 下溢为 0、$\log(0)=-\infty$ 直接崩。
+**Q：SAC 策略是「被 tanh 压扁的高斯」，那 $\log\pi$ 怎么算？直接用高斯的 log 密度行不行？**
+**不行，必须减 Jacobian 修正项**。高斯给的是 pre-tanh 动作 $u$ 的密度 $\mu(u\mid s)$，但策略损失里要的是压扁后动作 $\tilde a=\tanh(u)$ 的密度 $\pi(\tilde a\mid s)$。$\tanh$ 把支撑从 $\mathbb R$ 压到 $(-1,1)$、扭曲了体积，按换元公式 $\pi(\tilde a\mid s)=\mu(u\mid s)\cdot\frac{1}{1-\tanh(u)^2}$，故 $\log\pi=\log\mu-\log(1-\tanh(u)^2)$（多维求和）。漏掉修正项会让 $\log\pi$ 偏大（尤其在动作接近边界 $|u|$ 大时，偏几甚至几十），熵项 $\alpha\log\pi$ 全跟着错，最大熵目标走形。实现里还要用稳定恒等式 $\log(1-\tanh(u)^2)=2(\log2-u-\text{softplus}(-2u))$ 算，否则 $|u|$ 大时 $1-\tanh^2$ 下溢为 0、$\log(0)=-\infty$ 直接崩。
 
-**Q:这些和 PPO 什么关系?**
-[PPO](/tutorials/policy-gradient) 也能做连续控制(输出高斯策略的均值方差),但它是 **on-policy**、样本效率较低,胜在稳定简单,是 [RLHF](/tutorials/rlhf) 的主力。DDPG/TD3/SAC 是 **off-policy**,样本效率高、更适合与真实机器人交互代价昂贵的场景。
+**Q：这些和 PPO 什么关系？**
+[PPO](/tutorials/policy-gradient) 也能做连续控制（输出高斯策略的均值方差），但它是 **on-policy**、样本效率较低，胜在稳定简单，是 [RLHF](/tutorials/rlhf) 的主力。DDPG/TD3/SAC 是 **off-policy**，样本效率高、更适合与真实机器人交互代价昂贵的场景。
 
-**Q:既然有 LQR 这种闭式解,为什么还要 DDPG/TD3/SAC?**
-LQR 只在**动力学已知且线性、代价二次**时才有闭式解——这三个假设极强。真实机器人动力学是非线性的(关节耦合、摩擦、气动力)、代价也未必是二次的(撞墙是硬约束不是二次罚)。LQR 的真正用法是在**工作点附近线性化**得到局部 $A,B$ + 二次代价,跑局部最优控制(直升机悬停、机械臂抓取的工业标配);大范围机动或强非线性时 LQR 失准,才需要 DDPG/TD3/SAC 这类无模型神经方法。二者并非二选一:工程上常常 LQR 做基座、神经方法做改进,或用 MPC(滚动 horizon LQR)在两者之间折中。DDPG/TD3/SAC 的 actor/critic 网络,在 LQR 能解的情形里就是在逼近 $u=-Kx$ 和 $V=x^\top Px$——LQR 划清了「闭式可解」与「必须学习」的边界。
+**Q：既然有 LQR 这种闭式解，为什么还要 DDPG/TD3/SAC?**
+LQR 只在**动力学已知且线性、代价二次**时才有闭式解——这三个假设极强。真实机器人动力学是非线性的（关节耦合、摩擦、气动力）、代价也未必是二次的（撞墙是硬约束不是二次罚）。LQR 的真正用法是在**工作点附近线性化**得到局部 $A,B$ + 二次代价，跑局部最优控制（直升机悬停、机械臂抓取的工业标配）；大范围机动或强非线性时 LQR 失准，才需要 DDPG/TD3/SAC 这类无模型神经方法。二者并非二选一：工程上常常 LQR 做基座、神经方法做改进，或用 MPC（滚动 horizon LQR）在两者之间折中。DDPG/TD3/SAC 的 actor/critic 网络，在 LQR 能解的情形里就是在逼近 $u=-Kx$ 和 $V=x^\top Px$——LQR 划清了「闭式可解」与「必须学习」的边界。
 
 ## 动手作业
 
-1. **移动最优动作**:把两个代码框里的 `0.6` 改成 `-0.3`,看离散网格与连续 actor 分别怎么适应。
-2. **调探索噪声**:把第二个代码框的 `rng.normal(0, 0.2)` 的 `0.2` 调到 `0.02` 和 `0.6`,观察收敛速度与稳定性——探索太小可能卡住,太大则抖。
-3. **加动作维度(思考)**:如果动作是 3 维向量,想想 DQN 离散化需要多少格子(每维 11 格就是 $11^3$),体会维度灾难。
-4. **玩最大熵策略定理**:在 SAC 小节的代码框里改 `Q = np.array([...])` 的值(比如让两个动作 Q 接近),再扫 `alpha`,观察 softmax 策略如何从「塌缩到最优」过渡到「均匀探索」——直观体会 $\alpha$ 为何是「探索-利用恒温器」。
-5. **复现目标平滑的尖峰实验**:在「三副药可视化」CodeRunner 里,把尖峰宽度 `spike_w` 从 `0.04` 调到 `0.2`(宽峰)和 `0.01`(极窄峰),再扫 `sigma`——观察宽峰下平滑几乎不影响 argmax(本就平缓)、极窄峰下小 sigma 就够摊平,体会「目标平滑专治窄尖峰」的几何含义。再把 `spike_a` 改到 `0.0`(尖峰恰在真实最优处),看平滑是否反而把 actor 推离最优(平滑也有代价:真尖峰被误削)。
-6. **tanh Jacobian 修正项数值实验**:在「tanh 的代价」CodeRunner 里,把 `u_ex` 从 `2.0` 扫到 `0.1` 和 `4.0`——观察 $u$ 小时修正项几乎为 0(tanh 近似线性、不扭曲体积)、$u$ 大时修正项变得很大负数(密度被挤到边界、要扣回)。再把「漏修正」的 `log_mu` 和「正确」的 `log_mu - corr` 同时打印出来,直观体会漏掉修正项会让 $\log\pi$ 偏大多少、为何熵项会失准。
-7. **LQR 调参直觉**:在 LQR CodeRunner 里把 $R$ 从 `0.1` 扫到 `0.01`(省油→费油)和 `1.0`,观察增益 $K$ 和收敛轨迹的变化——$R$ 越小 $K$ 越大(控制越激进,快回原点但费油)、$R$ 越大 $K$ 越小(控制越保守,慢回但省油)。再把 $A$ 从 `1.1` 改成 `1.5`(更不稳定)和 `0.9`(本就稳定),体会 LQR 对不稳定系统的镇定能力。
-8. **LQR vs Q-learning 的样本效率**:把 LQR CodeRunner 末尾的 Q-learning `range(20000)` 改成 `range(2000)` 和 `range(50000)`,观察 model-free 代价从「很差」到「接近 LQR 但仍次优」的收敛过程——直观体会「闭式解一个矩阵方程 vs 百万步采样」的样本效率差距,这是 model-based 与 model-free 的根本取舍。
+1. **移动最优动作**：把两个代码框里的 `0.6` 改成 `-0.3`，看离散网格与连续 actor 分别怎么适应。
+2. **调探索噪声**：把第二个代码框的 `rng.normal(0, 0.2)` 的 `0.2` 调到 `0.02` 和 `0.6`，观察收敛速度与稳定性——探索太小可能卡住，太大则抖。
+3. **加动作维度（思考）**：如果动作是 3 维向量，想想 DQN 离散化需要多少格子（每维 11 格就是 $11^3$），体会维度灾难。
+4. **玩最大熵策略定理**：在 SAC 小节的代码框里改 `Q = np.array([...])` 的值（比如让两个动作 Q 接近），再扫 `alpha`，观察 softmax 策略如何从「塌缩到最优」过渡到「均匀探索」——直观体会 $\alpha$ 为何是「探索-利用恒温器」。
+5. **复现目标平滑的尖峰实验**：在「三副药可视化」CodeRunner 里，把尖峰宽度 `spike_w` 从 `0.04` 调到 `0.2`（宽峰）和 `0.01`（极窄峰），再扫 `sigma`——观察宽峰下平滑几乎不影响 argmax（本就平缓）、极窄峰下小 sigma 就够摊平，体会「目标平滑专治窄尖峰」的几何含义。再把 `spike_a` 改到 `0.0`（尖峰恰在真实最优处），看平滑是否反而把 actor 推离最优（平滑也有代价：真尖峰被误削）。
+6. **tanh Jacobian 修正项数值实验**：在「tanh 的代价」CodeRunner 里，把 `u_ex` 从 `2.0` 扫到 `0.1` 和 `4.0`——观察 $u$ 小时修正项几乎为 0（tanh 近似线性、不扭曲体积）、$u$ 大时修正项变得很大负数（密度被挤到边界、要扣回）。再把「漏修正」的 `log_mu` 和「正确」的 `log_mu - corr` 同时打印出来，直观体会漏掉修正项会让 $\log\pi$ 偏大多少、为何熵项会失准。
+7. **LQR 调参直觉**：在 LQR CodeRunner 里把 $R$ 从 `0.1` 扫到 `0.01`（省油→费油）和 `1.0`，观察增益 $K$ 和收敛轨迹的变化——$R$ 越小 $K$ 越大（控制越激进，快回原点但费油）、$R$ 越大 $K$ 越小（控制越保守，慢回但省油）。再把 $A$ 从 `1.1` 改成 `1.5`（更不稳定）和 `0.9`（本就稳定），体会 LQR 对不稳定系统的镇定能力。
+8. **LQR vs Q-learning 的样本效率**：把 LQR CodeRunner 末尾的 Q-learning `range(20000)` 改成 `range(2000)` 和 `range(50000)`，观察 model-free 代价从「很差」到「接近 LQR 但仍次优」的收敛过程——直观体会「闭式解一个矩阵方程 vs 百万步采样」的样本效率差距，这是 model-based 与 model-free 的根本取舍。
 
 ## 小结
 
 | 概念 | 含义 |
 |---|---|
 | 连续动作难点 | $\arg\max_a Q$ 不可枚举、离散化会维度爆炸 |
-| DDPG | 确定性 actor $\mu(s)$ 替代 max,critic 评估,off-policy + 回放/目标网络 |
-| 确定性策略梯度 | $\nabla_\theta J\approx\mathbb E[\nabla_a Q\cdot\nabla_\theta\mu]$,actor 沿 critic 动作梯度爬坡 |
-| Polyak 软更新 | $\phi^-\leftarrow\rho\phi^-+(1-\rho)\phi$,目标网络平滑移动、降发散 |
-| 过估计偏置 | $\max$ 对带噪 $Q$ 系统性上偏,argmax 选中的是「噪声最大」的动作 |
-| TD3 | 给 DDPG 打三副药:① 孪生 critic 取小(治 $\max$ 上偏,治本)② 延迟更新 actor($d=2$,减少跟未收敛 critic 乱跑的漂移)③ 目标策略平滑($\sigma=0.2,c=0.5$,防钻 critic 虚假窄尖峰);Polyak 软更新撑稳定 |
-| 最大熵 RL | $J=\sum\mathbb E[r+\alpha\mathcal H]$,把「保持随机」写进目标 |
-| 软 Bellman | $Q=E[r+\gamma(Q'-\alpha\log\pi')]$,目标多一项熵修正 |
+| DDPG | 确定性 actor $\mu(s)$ 替代 max,critic 评估，off-policy + 回放/目标网络 |
+| 确定性策略梯度 | $\nabla_\theta J\approx\mathbb E[\nabla_a Q\cdot\nabla_\theta\mu]$，actor 沿 critic 动作梯度爬坡 |
+| Polyak 软更新 | $\phi^-\leftarrow\rho\phi^-+(1-\rho)\phi$，目标网络平滑移动、降发散 |
+| 过估计偏置 | $\max$ 对带噪 $Q$ 系统性上偏，argmax 选中的是「噪声最大」的动作 |
+| TD3 | 给 DDPG 打三副药：① 孪生 critic 取小（治 $\max$ 上偏，治本）② 延迟更新 actor（$d=2$，减少跟未收敛 critic 乱跑的漂移）③ 目标策略平滑（$\sigma=0.2,c=0.5$，防钻 critic 虚假窄尖峰）；Polyak 软更新撑稳定 |
+| 最大熵 RL | $J=\sum\mathbb E[r+\alpha\mathcal H]$，把「保持随机」写进目标 |
+| 软 Bellman | $Q=E[r+\gamma(Q'-\alpha\log\pi')]$，目标多一项熵修正 |
 | 策略定理 | $\pi^*\propto\exp(Q/\alpha)$,reparameterization + squashed Gaussian 实现 |
-| tanh Jacobian 修正 | $\log\pi(\tilde a\mid s)=\log\mu(u\mid s)-\sum_i\log(1-\tanh(u_i)^2)$;tanh 压扁动作要按换元公式修密度,稳定式 $\log(1-\tanh^2)=2(\log2-u-\text{softplus}(-2u))$ 避免大 $\|u\|$ 下溢 |
-| α 自动调温 | 约束式熵 $\bar{\mathcal H}=-\lvert\mathcal A\rvert$,α 像恒温器自动锁定熵 |
-| 安全 RL / CMDP | $(\mathcal S,\mathcal A,P,R,C,d,\gamma)$:在回报外加代价 $C$ 与预算 $d$,$\max J_R$ s.t. $J_C\le d$ |
-| Lagrangian 对偶 | $\mathcal L=J_R-\lambda(J_C-d)$,$\lambda$ 是约束影子价格,primal-dual 交替更新 |
-| CPO | TRPO 信赖域 + 代价约束线性近似 → 二阶 QP,逐迭代近约束保证(硬约束);闭式解 $\theta^*=\theta_k+\frac1{\lambda^*}H^{-1}(g-B\nu^*)$ + backtracking 线搜索;每步从头算 $\nu^*$ 精确满足约束(与 RCPO 的「有状态 $\lambda$」区分) |
-| PPO-Lagrangian | CPO 的轻量替代:Lagrangian 软罚 + PPO clip(一阶,主流实用) |
-| CVaR 风险敏感 | $\mathrm{CVaR}_\alpha=\mathbb E[X\mid X\le\mathrm{VaR}_\alpha]$,优化最差 $\alpha$ 尾部防「尾部灾难」 |
-| LQR 解析基线 | 线性动力学 $x_{k+1}=Ax+Bu$ + 二次代价 → 价值函数闭式二次型 $V(x)=x^\top Px$ + 线性反馈 $u=-Kx$;DARE 是贝尔曼不动点,Riccati 迭代=值迭代;DDPG/TD3/SAC 在 LQR 能解的情形里就是用网络逼近 $V=x^\top Px$ 与 $u=-Kx$ |
+| tanh Jacobian 修正 | $\log\pi(\tilde a\mid s)=\log\mu(u\mid s)-\sum_i\log(1-\tanh(u_i)^2)$；tanh 压扁动作要按换元公式修密度，稳定式 $\log(1-\tanh^2)=2(\log2-u-\text{softplus}(-2u))$ 避免大 $\|u\|$ 下溢 |
+| α 自动调温 | 约束式熵 $\bar{\mathcal H}=-\lvert\mathcal A\rvert$，α 像恒温器自动锁定熵 |
+| 安全 RL / CMDP | $(\mathcal S,\mathcal A,P,R,C,d,\gamma)$：在回报外加代价 $C$ 与预算 $d$，$\max J_R$ s.t. $J_C\le d$ |
+| Lagrangian 对偶 | $\mathcal L=J_R-\lambda(J_C-d)$，$\lambda$ 是约束影子价格，primal-dual 交替更新 |
+| CPO | TRPO 信赖域 + 代价约束线性近似 → 二阶 QP，逐迭代近约束保证（硬约束）；闭式解 $\theta^*=\theta_k+\frac1{\lambda^*}H^{-1}(g-B\nu^*)$ + backtracking 线搜索；每步从头算 $\nu^*$ 精确满足约束（与 RCPO 的「有状态 $\lambda$」区分） |
+| PPO-Lagrangian | CPO 的轻量替代：Lagrangian 软罚 + PPO clip（一阶，主流实用） |
+| CVaR 风险敏感 | $\mathrm{CVaR}_\alpha=\mathbb E[X\mid X\le\mathrm{VaR}_\alpha]$，优化最差 $\alpha$ 尾部防「尾部灾难」 |
+| LQR 解析基线 | 线性动力学 $x_{k+1}=Ax+Bu$ + 二次代价 → 价值函数闭式二次型 $V(x)=x^\top Px$ + 线性反馈 $u=-Kx$；DARE 是贝尔曼不动点，Riccati 迭代=值迭代；DDPG/TD3/SAC 在 LQR 能解的情形里就是用网络逼近 $V=x^\top Px$ 与 $u=-Kx$ |
 
-> 🎯 一句话记住:**连续控制 = 用一个 actor 网络直接吐出动作、绕开 argmax;DDPG 起步、TD3 治不稳、SAC 靠最大熵把探索做足——这是机器人和自动驾驶等连续系统的 RL 主力,与离散动作的 [DQN](/tutorials/dqn) 家族分工互补。**
+> 🎯 一句话记住：**连续控制 = 用一个 actor 网络直接吐出动作、绕开 argmax;DDPG 起步、TD3 治不稳、SAC 靠最大熵把探索做足——这是机器人和自动驾驶等连续系统的 RL 主力，与离散动作的 [DQN](/tutorials/dqn) 家族分工互补。**
 
 ## 延伸阅读
 
-- **站内论文笔记**:[PPO](/papers/ppo-schulman) —— 同为 actor-critic 家族:它用概率比裁剪解决「策略更新过大就崩」的问题,是连续控制思想在 RLHF 与大模型 RL 里的延续
-- **站内论文笔记**:[UI-TARS-2](/papers/ui-tars-2) —— 连续控制 RL 的 agentic 放大版:GUI Agent 在浏览器/安卓沙箱里做多轮 RL,Length-Adaptive GAE 处理变长轨迹
-- **经典论文**:Lillicrap et al. (2016). *Continuous control with deep reinforcement learning*. [arXiv:1509.02971](https://arxiv.org/abs/1509.02971) —— DDPG 原始论文:确定性策略梯度 + 深度网络的首次组合
+- **站内论文笔记**：[PPO](/papers/ppo-schulman) —— 同为 actor-critic 家族：它用概率比裁剪解决「策略更新过大就崩」的问题，是连续控制思想在 RLHF 与大模型 RL 里的延续
+- **站内论文笔记**：[UI-TARS-2](/papers/ui-tars-2) —— 连续控制 RL 的 agentic 放大版：GUI Agent 在浏览器/安卓沙箱里做多轮 RL,Length-Adaptive GAE 处理变长轨迹
+- **经典论文**：Lillicrap et al. (2016). *Continuous control with deep reinforcement learning*. [arXiv:1509.02971](https://arxiv.org/abs/1509.02971) —— DDPG 原始论文：确定性策略梯度 + 深度网络的首次组合
 
-## 参考文献
+## 参考资料
 
-1. Haarnoja, Zhou, Abbeel, Levine (2018). *Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor*. [arXiv:1801.01290](https://arxiv.org/abs/1801.01290). —— SAC 原始论文:最大熵 RL 目标 $\sum\gamma^t(r+\alpha\mathcal H)$;soft Bellman 方程与软 Q/软 V;策略定理 $\pi^*\propto\exp(Q/\alpha)$ 与 reparameterization + squashed Gaussian 实现;twin Q + clipped double-Q(借自 TD3);温度 $\alpha$ 的自动调温(约束式熵,目标熵 $\bar{\mathcal H}=-\lvert\mathcal A\rvert$);连续控制样本效率与稳定性的 SOTA。最大熵 RL 的理论根基可上溯 to Ziebart 2010 的 maximum entropy IRL。**论文附录 C 给出 squashed Gaussian 的 tanh Jacobian 修正项** $\log\pi(\tilde a\mid s)=\log\mu(u\mid s)-\sum_i\log(1-\tanh(u_i)^2)$(换元公式 + 元素级 tanh 的对角 Jacobian 行列式 $=\prod_i\text{sech}^2(u_i)$);数值稳定恒等式 $\log(1-\tanh(u)^2)=2(\log2-u-\text{softplus}(-2u))$ 是社区实现的通用写法(避免大 $\lvert u\rvert$ 下 $1-\tanh^2$ 下溢为 0 致 $\log(0)=-\infty$)。算法实现的权威讲法见 [OpenAI Spinning Up — SAC](https://spinningup.openai.com/en/latest/algorithms/sac.html)(正文给出 reparameterization 公式与策略损失,把 Jacobian 修正推迟到本论文附录)。
-1b. Haarnoja, Zhou, Hartikainen, Tucker, Ha, Tan, Kumar, Zhu, Gupta, Abbeel, Levine (2018). *Soft Actor-Critic Algorithms and Applications*. [arXiv:1812.05905](https://arxiv.org/abs/1812.05905). —— SAC 的算法与应用扩展篇:给出**自动温度调温**的规范形式(constrained formulation that automatically tunes the temperature)——把最大熵目标显式表述为「回报最大化 s.t. 熵 $\ge$ 目标熵」的约束优化、α 作 Lagrange 乘子、对 $\log\alpha$ 做梯度下降、目标熵启发式 $\bar{\mathcal H}=-\lvert\mathcal A\rvert$;本篇「温度 α 的自动调温:约束式熵」小节的对偶起源、log 空间优化、梯度方向推导的直接来源。
-2. Lillicrap, Hunt, Pritzel, Heess, Erez, Tassa, Silver, Wierstra (2016). *Continuous control with deep reinforcement learning (DDPG)*. [arXiv:1509.02971](https://arxiv.org/abs/1509.02971). —— DDPG 原始论文:确定性策略梯度在深度网络下的连续控制应用;actor 输出确定性动作 $\mu_\theta(s)$ 替代 $\arg\max_a Q$、critic 用 TD 回归、off-policy + 经验回放 + Polyak 软目标网络;训练时给动作加噪声探索。
-2a. Silver, Lever, Heess, Degris, Wierstra, Riedmiller (2014). *Deterministic Policy Gradient Algorithms*. [ICML 2014 / PMLR 32:387-395](https://proceedings.mlr.press/v32/silver14.html). —— DPG 定理的奠基论文:证明确定性策略 $\mu_\theta(s)$ 下,策略梯度 $\nabla_\theta J=\mathbb E_s[\nabla_a Q(s,a)|_{a=\mu_\theta(s)}\cdot\nabla_\theta\mu_\theta(s)]$(动作梯度与参数梯度的链式乘积,期望只在状态上求);与随机策略梯度相比方差显著降低(无动作空间积分、无回报采样噪声);给出 off-policy actor-critic 算法用随机行为策略探索、确定性目标策略学习;证明 DPG 是随机策略梯度在策略方差→0 时的极限。本篇「确定性策略梯度定理」小节定理陈述、链式法则推导、方差对比、off-policy 版本与极限关系的直接来源。
-3. Fujimoto, Hoof, Meger (2018). *Addressing Function Approximation Error in Actor-Critic Methods (TD3)*. [arXiv:1802.09477](https://arxiv.org/abs/1802.09477). —— TD3:指出 DDPG 的高估偏置来自 $\max$ 算子对带噪 Q 估计的系统性上偏($\mathbb E[\max_a \hat Q]\ge\max_a Q$,与 Double DQN 同源的 maximization bias);三招补丁——clipped double-Q(孪生 critic 取小,治本)、延迟更新 actor($d=2$)、目标策略平滑($\sigma=0.2,c=0.5$);论文消融实验显示三招中 clipped double-Q 贡献最大,后两招为辅;在 MuJoCo 连续控制基准上显著稳于 DDPG。算法实现的权威讲法见 [OpenAI Spinning Up — TD3](https://spinningup.openai.com/en/latest/algorithms/td3.html)。
-4. Achiam, Held, Tamar, Abbeel (2017). *Constrained Policy Optimization*. [arXiv:1705.10528](https://arxiv.org/abs/1705.10528). —— CPO:首个用于约束强化学习的通用策略搜索算法;证明两策略间期望回报与平均散度相关的界;把 TRPO 信赖域扩到受限设定——目标一阶 + KL 二阶信赖域 + 代价约束线性近似,解一个带两条约束的二次规划;每步迭代在信赖域内同时保证奖励提升与代价约束近似满足(逐迭代近约束保证);在模拟机器人移动任务上验证。**QP 求解细节**(ar5iv 全文核验):Eq.11 高维近似 QP 的对偶只有 $m+1$ 维(一个 KL 乘子 $\lambda$ + $m$ 个代价乘子 $\nu_i$),primal 闭式解 $\theta^*=\theta_k+\frac1{\lambda^*}H^{-1}(g-B\nu^*)$(KKT 条件移项,代价梯度拼成 $B$,$H^{-1}$ 把梯度映回参数空间);**backtracking 线搜索**沿提议方向折半回退到真实 surrogate 约束满足(线性化近似只在信赖域内有效);**关键设计轴**——CPO「每步从头算 $\nu^*$ 精确满足约束」(二阶重)vs §7 primal-dual optimization 的「$\nu_{k+1}=(\nu_k+\alpha_k(J_C(\pi_k)-d))_+$ 对偶变量有状态与策略同步学」(一阶轻但易极限环),后者是 RCPO/PPO-Lagrangian 的范式。
-5. Altman, Eitan (1999). *Constrained Markov Decision Processes*. Chapman & Hall/CRC. —— CMDP 的奠基专著:在 MDP 上加代价函数与预算约束的形式化;CMDP 不能用普通动态规划求解、最优策略依赖起始状态与剩余预算、最优策略一般随机等基本性质;Lagrangian 松弛与线性规划求解路径。
-6. Tessler, Mankowitz, Mannor (2019). *Reward Constrained Policy Optimization (RCPO)*. [arXiv:1805.11074](https://arxiv.org/abs/1805.11074). —— 把 Lagrangian 对偶变量 $\lambda$ 当作可学习标量参数与策略一起优化,缓解 primal-dual 极限环振荡;在连续控制与 Atari 上以一阶方法近似满足代价约束,是 CPO 的轻量实用替代之一。
-7. Rockafellar, Uryasev (2000). *Optimization of Conditional Value-at-Risk*. [Journal of Risk DOI:10.21314/JOR.2000.038](https://doi.org/10.21314/JOR.2000.038). —— 把 CVaR(期望短缺,ES)优化转化为线性规划的开创性工作;给出 $\mathrm{CVaR}_\alpha=\mathbb E[X\mid X\le\mathrm{VaR}_\alpha]$ 的积分定义与离散化 LP;证明 CVaR 是相干风险度量(diversification 不增风险),比 VaR 更适合做风险敏感优化的目标。
-8. Kwakernaak, Sivan (1972). *Linear Optimal Control Systems*. Wiley-Interscience. —— LQR/LQG 的标准教材:线性二次型调节器的完整理论——线性动力学 $x_{k+1}=Ax_k+Bu_k$ + 二次代价 $J=\sum(x^\top Qx+u^\top Ru)$ 的最优控制是线性状态反馈 $u=-Kx$;价值函数 $V(x)=x^\top Px$ 是二次型(贝尔曼方程在线性+二次结构下的不动点);离散代数 Riccati 方程 DARE $P=A^\top PA-A^\top PB(R+B^\top PB)^{-1}B^\top PA+Q$ 与增益 $K=(R+B^\top PB)^{-1}B^\top PA$;稳定条件 $(A,B)$ 可稳 + $(A,\sqrt Q)$ 可检测保证唯一半正定解;Riccati 迭代(贝尔曼备份的矩阵形式)收敛到 DARE。本篇「解析对照:LQR」小节设定、结构结果、DARE 的直接来源。
-9. Sontag (1998). *Mathematical Control Theory: Deterministic Finite Dimensional Systems*. Springer. —— 控制论基础教材:可达性、可控性、可观测性、可稳性/可检测性的系统讲述;LQR 作为最优控制的典范解;闭环稳定性与鲁棒性(增益/相角裕度)的数学基础。本篇「稳定条件 + 鲁棒性保证」段(Lehtomaki et al., 1981 的增益/相角裕度结论)的理论支撑。
-10. Tedrake (2024). *Underactuated Robotics*, Chapter 8. [online.mit.edu/underactuated](https://underactuated.mit.edu/). —— MIT 课程讲义:LQR 在欠驱动机器人(双足、机械臂、扑翼)中的工程化用法;工作点附近线性化 + LQR 的局部最优控制范式;receding-horizon LQR = MPC 的衔接;LQR 作为「非线性控制器/学习型控制器的解析基线」的定位。本篇「何时该用 LQR」callout(线性化局部 + 滚动 horizon → MPC)的直接来源。
-11. Chen, Wang, Zhou, Ross (2021). *Randomized Ensemble Double Q-Learning: Learning Fast Without a Model (REDQ)*. [arXiv:2101.05982](https://arxiv.org/abs/2101.05982), ICLR 2021。 —— REDQ 原始论文:在 SAC 基础上叠三件套——高 UTD 比 $G=20$(每步 20 次梯度更新,此前 model-based 专利)、$N=10$ 个 Q critic 集成(独立初始化)、in-target minimization over random $M=2$ subset(每次算 target 随机抽 2 个 Q 取 min);不用 TD3 的 target policy smoothing(SAC 用 stochastic target action)。**核心理论**:**Theorem 1**(偏差由 $M$ 控制)——(a) 对任意固定 $M$,$\mathbb E[Z_{M,N}]$ 不依赖 $N$;(b) $\mathbb E[Z_{1,N}]\ge0$;(c) $\mathbb E[Z_{M+1,N}]\le\mathbb E[Z_{M,N}]$;(d) 存在 $M$ 使 $\mathbb E[Z_{M,N}]<0$。**Theorem 2**(方差由 $N$ 控制,仅限 Weighted 变体)——Weighted target $Y_{M,N}$ 对全部 $\binom{N}{M}$ 个子集的 min 取平均,$\lim_{N\to\infty}\mathrm{Var}(Y_{M,N})=0$;标准 REDQ(每步抽 1 个子集)单步 target 方差 $v_M$ 不随 $N$ 变,大 $N$ 靠「策略梯度用 $N$ 个 Q 平均」+ 训练多样性间接获益。**关键洞见**:$M$ 与 $N$ 可独立调(M 管偏差、N 管方差),Maxmin Q-learning($M=N$ 绑死)做不到。MuJoCo(Hopper/Walker2d/Ant/Humanoid,未含 HalfCheetah)上性能媲美/超越 MBPO 但参数更少、wall-clock 更快;首个连续动作空间成功用 UTD>>1 的 model-free 算法;REDQ-OFE 变体在 Ant/Humanoid 上达 SAC 约 7x 样本效率(到 5000 分)。本篇「REDQ:集成 critic 降过估计」整节的直接来源。
-12. Chi, Xu, Feng, Cousineau, Du, Burchfiel, Tedrake, Song (2023). *Diffusion Policy: Visuomotor Policy Learning via Action Diffusion*. [arXiv:2303.04137](https://arxiv.org/abs/2303.04137), RSS 2023(扩展期刊版见 IJRR 2024 v5)。 —— Diffusion Policy 原始论文:把机器人视觉运动策略写成**条件去噪扩散过程**——不预测单步动作,而是学动作序列的条件分布 $p(\mathbf A_{t:t+T_p}\mid\mathbf O_t)$,从纯噪声出发迭代去噪生成一段未来动作序列。**核心动机**:SAC 等连续控制算法的 squashed Gaussian 是单峰,在多模态最优动作分布(避障向左/向右、多抓取角)上「模式平均」失败,扩散学分布而非点估计、天然保多峰。**关键技术**(ar5iv 全文 Eq.4/5/8):训练损失 $\mathcal L=\mathbb E\|\boldsymbol\epsilon-\boldsymbol\epsilon_\theta(\mathbf O_t,\mathbf A^0+\boldsymbol\epsilon,k)\|^2$(去噪 MSE,非对抗);反向递推 $\mathbf A^{k-1}=\alpha(\mathbf A^k-\gamma\boldsymbol\epsilon_\theta+\mathcal N(0,\sigma^2))$;$\boldsymbol\epsilon_\theta$ 近似负 score function $\nabla_a\log p(a\mid o)\approx-\boldsymbol\epsilon_\theta(a,o)$ 绕开 EBM/IBC 不可解归一化常数 $Z(o,\theta)$;只近似条件分布 $p(\mathbf A_t\mid\mathbf O_t)$ 让视觉特征算一次复用所有去噪步。**两种架构**:CNN+FiLM(1D 时序卷积 U-Net,承自 Janner Diffuser,稳但偏好低频)vs Transformer+cross-attention(minGPT 解码器,捕捉高频强但对超参敏感)。**Receding horizon**:生成 $T_p=16$ 步只执行 $T_a=8$ 步再重规划(连贯不抖 + 响应新观测),消融 $T_a=8$ 最优。**推理**:DDIM 把 100 训练步压到 10-16 推理步,3080 上 0.1s/10Hz 实时控制。**实测**:12 任务平均比 BC 提升 46.9%,PushT(强多模态)~60%→>95%。本篇「多模态策略:高斯之外,扩散登场」整节 + CodeRunner 的直接来源(arXiv ID 经项目主页 + arXiv abs + ar5iv 三重 WebFetch 确认非 R39 猜测;首猜 2304.10573 实为 IDQL 论文,经官方项目页 realdiffusion-policy.cs.columbia.edu 反查到正确 ID 2303.04137)。
-13. Schulman, Heess, Weber, Abbeel (2015). *Gradient Estimation Using Stochastic Computation Graphs*. [arXiv:1506.05254](https://arxiv.org/abs/1506.05254), NeurIPS 2015。 —— 把「得分函数(likelihood-ratio / REINFORCE)估计器」与「重参数化(pathwise derivative)估计器」统一到随机计算图框架下的经典论文:给出何时哪条路可用、如何在同一张图里混用的自动化规则。本篇「两种随机梯度估计器的方差鸿沟」小节与 `ReparamGradientViz` 的理论依据——两估计器都无偏,重参数化因利用了 $\nabla_a f$ 的信息通常方差更低。
-14. Kingma, Welling (2013). *Auto-Encoding Variational Bayes*. [arXiv:1312.6114](https://arxiv.org/abs/1312.6114), ICLR 2014。 —— VAE 原始论文,重参数化技巧的出处之一:把 $z\sim\mathcal N(\mu,\sigma^2)$ 写成 $z=\mu+\sigma\odot\xi,\ \xi\sim\mathcal N(0,I)$,使梯度能穿过采样反传,得到低方差的随机梯度估计(SGVB estimator)。SAC 的 squashed Gaussian 采样 $\tilde a=\tanh(\mu+\sigma\odot\xi)$ 是同一技巧在连续控制里的应用(另见 Rezende et al. 2014, [arXiv:1401.4082](https://arxiv.org/abs/1401.4082) 的 stochastic backpropagation)。
+<References>
+1. Haarnoja, Zhou, Abbeel, Levine (2018). *Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor*. [arXiv:1801.01290](https://arxiv.org/abs/1801.01290). —— SAC 原始论文：最大熵 RL 目标 $\sum\gamma^t(r+\alpha\mathcal H)$；soft Bellman 方程与软 Q/软 V；策略定理 $\pi^*\propto\exp(Q/\alpha)$ 与 reparameterization + squashed Gaussian 实现；twin Q + clipped double-Q（借自 TD3）；温度 $\alpha$ 的自动调温（约束式熵，目标熵 $\bar{\mathcal H}=-\lvert\mathcal A\rvert$）；连续控制样本效率与稳定性的 SOTA。最大熵 RL 的理论根基可上溯 to Ziebart 2010 的 maximum entropy IRL。**论文附录 C 给出 squashed Gaussian 的 tanh Jacobian 修正项** $\log\pi(\tilde a\mid s)=\log\mu(u\mid s)-\sum_i\log(1-\tanh(u_i)^2)$（换元公式 + 元素级 tanh 的对角 Jacobian 行列式 $=\prod_i\text{sech}^2(u_i)$）；数值稳定恒等式 $\log(1-\tanh(u)^2)=2(\log2-u-\text{softplus}(-2u))$ 是社区实现的通用写法（避免大 $\lvert u\rvert$ 下 $1-\tanh^2$ 下溢为 0 致 $\log(0)=-\infty$）。算法实现的权威讲法见 [OpenAI Spinning Up — SAC](https://spinningup.openai.com/en/latest/algorithms/sac.html)（正文给出 reparameterization 公式与策略损失，把 Jacobian 修正推迟到本论文附录）。
+1b. Haarnoja, Zhou, Hartikainen, Tucker, Ha, Tan, Kumar, Zhu, Gupta, Abbeel, Levine (2018). *Soft Actor-Critic Algorithms and Applications*. [arXiv:1812.05905](https://arxiv.org/abs/1812.05905). —— SAC 的算法与应用扩展篇：给出**自动温度调温**的规范形式（constrained formulation that automatically tunes the temperature）——把最大熵目标显式表述为「回报最大化 s.t. 熵 $\ge$ 目标熵」的约束优化、α 作 Lagrange 乘子、对 $\log\alpha$ 做梯度下降、目标熵启发式 $\bar{\mathcal H}=-\lvert\mathcal A\rvert$；本篇「温度 α 的自动调温：约束式熵」小节的对偶起源、log 空间优化、梯度方向推导的直接来源。
+2. Lillicrap, Hunt, Pritzel, Heess, Erez, Tassa, Silver, Wierstra (2016). *Continuous control with deep reinforcement learning (DDPG)*. [arXiv:1509.02971](https://arxiv.org/abs/1509.02971). —— DDPG 原始论文：确定性策略梯度在深度网络下的连续控制应用；actor 输出确定性动作 $\mu_\theta(s)$ 替代 $\arg\max_a Q$、critic 用 TD 回归、off-policy + 经验回放 + Polyak 软目标网络；训练时给动作加噪声探索。
+2a. Silver, Lever, Heess, Degris, Wierstra, Riedmiller (2014). *Deterministic Policy Gradient Algorithms*. [ICML 2014 / PMLR 32:387-395](https://proceedings.mlr.press/v32/silver14.html). —— DPG 定理的奠基论文：证明确定性策略 $\mu_\theta(s)$ 下，策略梯度 $\nabla_\theta J=\mathbb E_s[\nabla_a Q(s,a)|_{a=\mu_\theta(s)}\cdot\nabla_\theta\mu_\theta(s)]$（动作梯度与参数梯度的链式乘积，期望只在状态上求）；与随机策略梯度相比方差显著降低（无动作空间积分、无回报采样噪声）；给出 off-policy actor-critic 算法用随机行为策略探索、确定性目标策略学习；证明 DPG 是随机策略梯度在策略方差→0 时的极限。本篇「确定性策略梯度定理」小节定理陈述、链式法则推导、方差对比、off-policy 版本与极限关系的直接来源。
+3. Fujimoto, Hoof, Meger (2018). *Addressing Function Approximation Error in Actor-Critic Methods (TD3)*. [arXiv:1802.09477](https://arxiv.org/abs/1802.09477). —— TD3：指出 DDPG 的高估偏置来自 $\max$ 算子对带噪 Q 估计的系统性上偏（$\mathbb E[\max_a \hat Q]\ge\max_a Q$，与 Double DQN 同源的 maximization bias）；三招补丁——clipped double-Q（孪生 critic 取小，治本）、延迟更新 actor($d=2$)、目标策略平滑（$\sigma=0.2,c=0.5$）；论文消融实验显示三招中 clipped double-Q 贡献最大，后两招为辅；在 MuJoCo 连续控制基准上显著稳于 DDPG。算法实现的权威讲法见 [OpenAI Spinning Up — TD3](https://spinningup.openai.com/en/latest/algorithms/td3.html)。
+4. Achiam, Held, Tamar, Abbeel (2017). *Constrained Policy Optimization*. [arXiv:1705.10528](https://arxiv.org/abs/1705.10528). —— CPO：首个用于约束强化学习的通用策略搜索算法；证明两策略间期望回报与平均散度相关的界；把 TRPO 信赖域扩到受限设定——目标一阶 + KL 二阶信赖域 + 代价约束线性近似，解一个带两条约束的二次规划；每步迭代在信赖域内同时保证奖励提升与代价约束近似满足（逐迭代近约束保证）；在模拟机器人移动任务上验证。**QP 求解细节**（ar5iv 全文核验）：Eq.11 高维近似 QP 的对偶只有 $m+1$ 维（一个 KL 乘子 $\lambda$ + $m$ 个代价乘子 $\nu_i$），primal 闭式解 $\theta^*=\theta_k+\frac1{\lambda^*}H^{-1}(g-B\nu^*)$（KKT 条件移项，代价梯度拼成 $B$，$H^{-1}$ 把梯度映回参数空间）；**backtracking 线搜索**沿提议方向折半回退到真实 surrogate 约束满足（线性化近似只在信赖域内有效）；**关键设计轴**——CPO「每步从头算 $\nu^*$ 精确满足约束」（二阶重）vs §7 primal-dual optimization 的「$\nu_{k+1}=(\nu_k+\alpha_k(J_C(\pi_k)-d))_+$ 对偶变量有状态与策略同步学」（一阶轻但易极限环），后者是 RCPO/PPO-Lagrangian 的范式。
+5. Altman, Eitan (1999). *Constrained Markov Decision Processes*. Chapman & Hall/CRC. —— CMDP 的奠基专著：在 MDP 上加代价函数与预算约束的形式化；CMDP 不能用普通动态规划求解、最优策略依赖起始状态与剩余预算、最优策略一般随机等基本性质；Lagrangian 松弛与线性规划求解路径。
+6. Tessler, Mankowitz, Mannor (2019). *Reward Constrained Policy Optimization (RCPO)*. [arXiv:1805.11074](https://arxiv.org/abs/1805.11074). —— 把 Lagrangian 对偶变量 $\lambda$ 当作可学习标量参数与策略一起优化，缓解 primal-dual 极限环振荡；在连续控制与 Atari 上以一阶方法近似满足代价约束，是 CPO 的轻量实用替代之一。
+7. Rockafellar, Uryasev (2000). *Optimization of Conditional Value-at-Risk*. [Journal of Risk DOI:10.21314/JOR.2000.038](https://doi.org/10.21314/JOR.2000.038). —— 把 CVaR（期望短缺，ES）优化转化为线性规划的开创性工作；给出 $\mathrm{CVaR}_\alpha=\mathbb E[X\mid X\le\mathrm{VaR}_\alpha]$ 的积分定义与离散化 LP；证明 CVaR 是相干风险度量（diversification 不增风险），比 VaR 更适合做风险敏感优化的目标。
+8. Kwakernaak, Sivan (1972). *Linear Optimal Control Systems*. Wiley-Interscience. —— LQR/LQG 的标准教材：线性二次型调节器的完整理论——线性动力学 $x_{k+1}=Ax_k+Bu_k$ + 二次代价 $J=\sum(x^\top Qx+u^\top Ru)$ 的最优控制是线性状态反馈 $u=-Kx$；价值函数 $V(x)=x^\top Px$ 是二次型（贝尔曼方程在线性+二次结构下的不动点）；离散代数 Riccati 方程 DARE $P=A^\top PA-A^\top PB(R+B^\top PB)^{-1}B^\top PA+Q$ 与增益 $K=(R+B^\top PB)^{-1}B^\top PA$；稳定条件 $(A,B)$ 可稳 + $(A,\sqrt Q)$ 可检测保证唯一半正定解；Riccati 迭代（贝尔曼备份的矩阵形式）收敛到 DARE。本篇「解析对照：LQR」小节设定、结构结果、DARE 的直接来源。
+9. Sontag (1998). *Mathematical Control Theory: Deterministic Finite Dimensional Systems*. Springer. —— 控制论基础教材：可达性、可控性、可观测性、可稳性/可检测性的系统讲述；LQR 作为最优控制的典范解；闭环稳定性与鲁棒性（增益/相角裕度）的数学基础。本篇「稳定条件 + 鲁棒性保证」段（Lehtomaki et al.， 1981 的增益/相角裕度结论）的理论支撑。
+10. Tedrake (2024). *Underactuated Robotics*, Chapter 8. [online.mit.edu/underactuated](https://underactuated.mit.edu/). —— MIT 课程讲义：LQR 在欠驱动机器人（双足、机械臂、扑翼）中的工程化用法；工作点附近线性化 + LQR 的局部最优控制范式；receding-horizon LQR = MPC 的衔接；LQR 作为「非线性控制器/学习型控制器的解析基线」的定位。本篇「何时该用 LQR」callout（线性化局部 + 滚动 horizon → MPC）的直接来源。
+11. Chen, Wang, Zhou, Ross (2021). *Randomized Ensemble Double Q-Learning: Learning Fast Without a Model (REDQ)*. [arXiv:2101.05982](https://arxiv.org/abs/2101.05982), ICLR 2021. —— REDQ 原始论文：在 SAC 基础上叠三件套——高 UTD 比 $G=20$（每步 20 次梯度更新，此前 model-based 专利）、$N=10$ 个 Q critic 集成（独立初始化）、in-target minimization over random $M=2$ subset（每次算 target 随机抽 2 个 Q 取 min）；不用 TD3 的 target policy smoothing（SAC 用 stochastic target action）。**核心理论**:**Theorem 1**（偏差由 $M$ 控制）——（a） 对任意固定 $M$，$\mathbb E[Z_{M,N}]$ 不依赖 $N$；（b） $\mathbb E[Z_{1,N}]\ge0$;(c) $\mathbb E[Z_{M+1,N}]\le\mathbb E[Z_{M,N}]$；（d） 存在 $M$ 使 $\mathbb E[Z_{M,N}]<0$。**Theorem 2**（方差由 $N$ 控制，仅限 Weighted 变体）——Weighted target $Y_{M,N}$ 对全部 $\binom{N}{M}$ 个子集的 min 取平均，$\lim_{N\to\infty}\mathrm{Var}(Y_{M,N})=0$；标准 REDQ（每步抽 1 个子集）单步 target 方差 $v_M$ 不随 $N$ 变，大 $N$ 靠「策略梯度用 $N$ 个 Q 平均」+ 训练多样性间接获益。**关键洞见**：$M$ 与 $N$ 可独立调（M 管偏差、N 管方差），Maxmin Q-learning（$M=N$ 绑死）做不到。MuJoCo（Hopper/Walker2d/Ant/Humanoid，未含 HalfCheetah）上性能媲美/超越 MBPO 但参数更少、wall-clock 更快；首个连续动作空间成功用 UTD>>1 的 model-free 算法；REDQ-OFE 变体在 Ant/Humanoid 上达 SAC 约 7x 样本效率（到 5000 分）。本篇「REDQ：集成 critic 降过估计」整节的直接来源。
+12. Chi, Xu, Feng, Cousineau, Du, Burchfiel, Tedrake, Song (2023). *Diffusion Policy: Visuomotor Policy Learning via Action Diffusion*. [arXiv:2303.04137](https://arxiv.org/abs/2303.04137), RSS 2023（扩展期刊版见 IJRR 2024 v5）. —— Diffusion Policy 原始论文：把机器人视觉运动策略写成**条件去噪扩散过程**——不预测单步动作，而是学动作序列的条件分布 $p(\mathbf A_{t:t+T_p}\mid\mathbf O_t)$，从纯噪声出发迭代去噪生成一段未来动作序列。**核心动机**：SAC 等连续控制算法的 squashed Gaussian 是单峰，在多模态最优动作分布（避障向左/向右、多抓取角）上「模式平均」失败，扩散学分布而非点估计、天然保多峰。**关键技术**（ar5iv 全文 Eq.4/5/8）：训练损失 $\mathcal L=\mathbb E\|\boldsymbol\epsilon-\boldsymbol\epsilon_\theta(\mathbf O_t,\mathbf A^0+\boldsymbol\epsilon,k)\|^2$（去噪 MSE，非对抗）；反向递推 $\mathbf A^{k-1}=\alpha(\mathbf A^k-\gamma\boldsymbol\epsilon_\theta+\mathcal N(0,\sigma^2))$；$\boldsymbol\epsilon_\theta$ 近似负 score function $\nabla_a\log p(a\mid o)\approx-\boldsymbol\epsilon_\theta(a,o)$ 绕开 EBM/IBC 不可解归一化常数 $Z(o,\theta)$；只近似条件分布 $p(\mathbf A_t\mid\mathbf O_t)$ 让视觉特征算一次复用所有去噪步。**两种架构**：CNN+FiLM（1D 时序卷积 U-Net，承自 Janner Diffuser，稳但偏好低频）vs Transformer+cross-attention（minGPT 解码器，捕捉高频强但对超参敏感）。**Receding horizon**：生成 $T_p=16$ 步只执行 $T_a=8$ 步再重规划（连贯不抖 + 响应新观测），消融 $T_a=8$ 最优。**推理**：DDIM 把 100 训练步压到 10-16 推理步，3080 上 0.1s/10Hz 实时控制。**实测**：12 任务平均比 BC 提升 46.9%，PushT（强多模态）~60%→>95%。本篇「多模态策略：高斯之外，扩散登场」整节 + CodeRunner 的直接来源（arXiv ID 经项目主页 + arXiv abs + ar5iv 三重 WebFetch 确认非 R39 猜测；首猜 2304.10573 实为 IDQL 论文，经官方项目页 realdiffusion-policy.cs.columbia.edu 反查到正确 ID 2303.04137）。
+13. Schulman, Heess, Weber, Abbeel (2015). *Gradient Estimation Using Stochastic Computation Graphs*. [arXiv:1506.05254](https://arxiv.org/abs/1506.05254), NeurIPS 2015. —— 把「得分函数（likelihood-ratio / REINFORCE）估计器」与「重参数化（pathwise derivative）估计器」统一到随机计算图框架下的经典论文：给出何时哪条路可用、如何在同一张图里混用的自动化规则。本篇「两种随机梯度估计器的方差鸿沟」小节与 `ReparamGradientViz` 的理论依据——两估计器都无偏，重参数化因利用了 $\nabla_a f$ 的信息通常方差更低。
+14. Kingma, Welling (2013). *Auto-Encoding Variational Bayes*. [arXiv:1312.6114](https://arxiv.org/abs/1312.6114), ICLR 2014. —— VAE 原始论文，重参数化技巧的出处之一：把 $z\sim\mathcal N(\mu,\sigma^2)$ 写成 $z=\mu+\sigma\odot\xi,\ \xi\sim\mathcal N(0,I)$，使梯度能穿过采样反传，得到低方差的随机梯度估计（SGVB estimator）。SAC 的 squashed Gaussian 采样 $\tilde a=\tanh(\mu+\sigma\odot\xi)$ 是同一技巧在连续控制里的应用（另见 Rezende et al. 2014， [arXiv:1401.4082](https://arxiv.org/abs/1401.4082) 的 stochastic backpropagation）。
+</References>

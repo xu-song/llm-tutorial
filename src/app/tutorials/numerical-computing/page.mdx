@@ -4,16 +4,16 @@ export const metadata = tutorialMetadata("numerical-computing");
 
 # 🔢 数值计算与稳定性
 
-你照着公式写了 softmax,测试时一切正常,上线后却突然算出一片 `NaN`;交叉熵损失训练到一半变成 `inf`——这些不是逻辑 bug,而是**数值计算**的坑。计算机的浮点数精度有限,天真地照搬数学公式,常常会**上溢、下溢、或丢失精度**。这一篇把机器学习里最常见的数值陷阱和对应的修复技巧一次讲清。
+你照着公式写了 softmax，测试时一切正常，上线后却突然算出一片 `NaN`；交叉熵损失训练到一半变成 `inf`——这些不是逻辑 bug，而是**数值计算**的坑。计算机的浮点数精度有限，天真地照搬数学公式，常常会**上溢、下溢、或丢失精度**。这一篇把机器学习里最常见的数值陷阱和对应的修复技巧一次讲清。
 
-## 万恶之源:浮点数的表示范围有限
+## 万恶之源：浮点数的表示范围有限
 
-计算机用有限的位数(常见 32 位 `float32` 或 64 位 `float64`)存储实数。这带来两个后果:
+计算机用有限的位数（常见 32 位 `float32` 或 64 位 `float64`）存储实数。这带来两个后果：
 
-- **上溢(overflow)**:数值太大,超出上限 → 变成 `inf`
-- **下溢(underflow)**:数值太小(接近 0),超出精度 → 直接变成 `0`
+- **上溢（overflow）**：数值太大,超出上限 → 变成 `inf`
+- **下溢（underflow）**：数值太小（接近 0）,超出精度 → 直接变成 `0`
 
-指数函数 $e^x$ 是重灾区——它增长极快,一不小心就爆表:
+指数函数 $e^x$ 是重灾区——它增长极快，一不小心就爆表：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -26,13 +26,13 @@ print("exp(88)    =", np.float32(np.exp(88.0)))  # ≈1.65e38,还在范围内
 print("exp(89)    =", np.float32(np.exp(89.0)))  # float32 下 → inf
 `} />
 
-> 💡 关键认知:**数学上成立的公式,在浮点运算里未必成立。** 剩下的技巧,本质都是「在数学等价的前提下,换一种不会爆的算法」。
+> 💡 关键认知：**数学上成立的公式，在浮点运算里未必成立。** 剩下的技巧，本质都是「在数学等价的前提下，换一种不会爆的算法」。
 
-## 陷阱一:softmax 的上溢 —— 减去最大值
+## 陷阱一：softmax 的上溢 —— 减去最大值
 
-Softmax 把一组分数变成概率:$\text{softmax}(x)_i = \dfrac{e^{x_i}}{\sum_j e^{x_j}}$。当分数很大时,$e^{x_i}$ 直接上溢成 `inf`,`inf/inf` = `NaN`。
+Softmax 把一组分数变成概率：$\text{softmax}(x)_i = \dfrac{e^{x_i}}{\sum_j e^{x_j}}$。当分数很大时，$e^{x_i}$ 直接上溢成 `inf`，`inf/inf` = `NaN`。
 
-**修复技巧**:给所有输入减去最大值 $c=\max_j x_j$。因为分子分母同乘 $e^{-c}$,结果**完全不变**,但现在所有指数的输入都 $\le 0$,$e^{x_i-c}\in(0,1]$,绝不会上溢:
+**修复技巧**：给所有输入减去最大值 $c=\max_j x_j$。因为分子分母同乘 $e^{-c}$，结果**完全不变**，但现在所有指数的输入都 $\le 0$，$e^{x_i-c}\in(0,1]$，绝不会上溢：
 
 $$
 \text{softmax}(x)_i = \frac{e^{x_i - c}}{\sum_j e^{x_j - c}}, \qquad c = \max_j x_j
@@ -59,23 +59,23 @@ z = np.array([1.0, 2.0, 3.0])
 print("普通值下两者相等:", np.allclose(softmax_naive(z), softmax_stable(z)))
 `} />
 
-下面拖动 logits 的整体幅度 $c$,亲眼看这个「悬崖」:两条 softmax 一开始给出**完全相同**的概率(减 max 不改变结果),但当最大 logit 越过约 709(float64 的 $e^x$ 溢出点),朴素法瞬间变成一片 `NaN`,而稳定法纹丝不动:
+下面拖动 logits 的整体幅度 $c$，亲眼看这个「悬崖」：两条 softmax 一开始给出**完全相同**的概率（减 max 不改变结果），但当最大 logit 越过约 709（float64 的 $e^x$ 溢出点），朴素法瞬间变成一片 `NaN`，而稳定法纹丝不动：
 
 <FloatOverflowViz />
 
-> 💡 **看点**:减最大值是**零代价**的——它数学上恒等(分子分母同乘 $e^{-c}$),数值上却把 $e^x$ 的参数从「可能上千」压到「必然 $\le 0$」,于是 $e^{x-c}\in(0,1]$ 永不溢出。这个「平移到安全区间再算」的思路,正是下面 log-sum-exp、log 空间连乘等所有技巧的共同内核。
+> 💡 **看点**：减最大值是**零代价**的——它数学上恒等（分子分母同乘 $e^{-c}$），数值上却把 $e^x$ 的参数从「可能上千」压到「必然 $\le 0$」，于是 $e^{x-c}\in(0,1]$ 永不溢出。这个「平移到安全区间再算」的思路，正是下面 log-sum-exp、log 空间连乘等所有技巧的共同内核。
 
-## 陷阱二:log-sum-exp —— 把 max 提到 log 外面
+## 陷阱二：log-sum-exp —— 把 max 提到 log 外面
 
-统计建模里经常要算 $\log\sum_i e^{x_i}$(比如求 softmax 的归一化常数、隐马尔可夫模型、CRF)。直接算,内部的 $e^{x_i}$ 又会上溢。
+统计建模里经常要算 $\log\sum_i e^{x_i}$（比如求 softmax 的归一化常数、隐马尔可夫模型、CRF）。直接算，内部的 $e^{x_i}$ 又会上溢。
 
-**log-sum-exp 技巧**:同样先提取最大值 $c$,利用 $\log$ 的性质把它提到外面:
+**log-sum-exp 技巧**：同样先提取最大值 $c$，利用 $\log$ 的性质把它提到外面：
 
 $$
 \log\sum_i e^{x_i} = c + \log\sum_i e^{x_i - c}, \qquad c = \max_i x_i
 $$
 
-这样指数项 $e^{x_i-c}\le 1$ 不会上溢;即使有些项下溢成 0 也无妨,因为最大的那项 $e^{c-c}=1$ 一定保留,结果依然可靠。
+这样指数项 $e^{x_i-c}\le 1$ 不会上溢；即使有些项下溢成 0 也无妨，因为最大的那项 $e^{c-c}=1$ 一定保留，结果依然可靠。
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -97,13 +97,13 @@ print("小数值上两者相等:", np.isclose(lse_naive(y), lse_stable(y)))
 # 实际项目直接用现成的:scipy.special.logsumexp / torch.logsumexp
 `} />
 
-> 🔗 这正是 PyTorch 里**为什么用 `LogSoftmax` + `NLLLoss`(或直接 `CrossEntropyLoss`)而不是 `Softmax` 再取 log** 的原因:框架把 log-sum-exp 融进了一个数值稳定的算子里,避免你先算出 softmax 概率再取对数(那样既慢又容易下溢)。
+> 🔗 这正是 PyTorch 里**为什么用 `LogSoftmax` + `NLLLoss`（或直接 `CrossEntropyLoss`）而不是 `Softmax` 再取 log** 的原因：框架把 log-sum-exp 融进了一个数值稳定的算子里，避免你先算出 softmax 概率再取对数（那样既慢又容易下溢）。
 
-## 陷阱三:概率连乘下溢 —— 搬到 log 空间
+## 陷阱三：概率连乘下溢 —— 搬到 log 空间
 
-朴素贝叶斯、语言模型、HMM 都要把很多概率**连乘**。每个概率 $<1$,乘几百上千个,结果迅速下溢成 0,后续全错。
+朴素贝叶斯、语言模型、HMM 都要把很多概率**连乘**。每个概率 $<1$，乘几百上千个，结果迅速下溢成 0，后续全错。
 
-**修复技巧**:把连乘变成 **log 空间的连加**——$\log\prod_i p_i = \sum_i \log p_i$。加法不会下溢,需要时再 `exp` 回去(或干脆全程留在 log 空间):
+**修复技巧**：把连乘变成 **log 空间的连加**——$\log\prod_i p_i = \sum_i \log p_i$。加法不会下溢，需要时再 `exp` 回去（或干脆全程留在 log 空间）：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -116,13 +116,13 @@ print("log 空间求和:", logp)                    # -4605.17
 print("需要时再 exp:", np.exp(logp))            # 仍是 0,但过程中比较大小完全没问题
 `} />
 
-这也是为什么朴素贝叶斯的实现里,总是累加 `log(P(词|类))` 而不是连乘 `P(词|类)`——比较不同类别的对数概率大小,和比较原始概率大小是等价的。
+这也是为什么朴素贝叶斯的实现里，总是累加 `log(P(词|类))` 而不是连乘 `P(词|类)`——比较不同类别的对数概率大小，和比较原始概率大小是等价的。
 
-## 陷阱四:log(0) 与交叉熵的 inf —— 裁剪或加 epsilon
+## 陷阱四：log（0） 与交叉熵的 inf —— 裁剪或加 epsilon
 
-交叉熵损失 $-\log(p)$ 在 $p\to 0$ 时趋于 $+\infty$。如果模型「自信地预测错」,输出概率恰好是 0,损失就变成 `inf`,梯度也跟着崩。
+交叉熵损失 $-\log(p)$ 在 $p\to 0$ 时趋于 $+\infty$。如果模型「自信地预测错」，输出概率恰好是 0，损失就变成 `inf`，梯度也跟着崩。
 
-**修复技巧**:把概率**裁剪(clip)**到 $[\varepsilon,\,1-\varepsilon]$,或在 log 里加一个极小的 $\varepsilon$:
+**修复技巧**：把概率**裁剪（clip）**到 $[\varepsilon,\,1-\varepsilon]$，或在 log 里加一个极小的 $\varepsilon$：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -138,11 +138,11 @@ print("真实=1, 预测 p=0.0 朴素:", ce_naive(1, 0.0))  # inf
 print("真实=1, 预测 p=0.0 裁剪:", ce_safe(1, 0.0))    # 约 27.6,一个大但有限的损失
 `} />
 
-> ⚠️ 加 epsilon 是权宜之计,更根本的做法是**不要先算概率再取 log**。用 `LogSoftmax`/`log_softmax` 直接得到对数概率,或用框架的 `BCEWithLogitsLoss`——它们在内部用 log-sum-exp 保证了稳定性,从源头避免 $\log 0$。
+> ⚠️ 加 epsilon 是权宜之计，更根本的做法是**不要先算概率再取 log**。用 `LogSoftmax`/`log_softmax` 直接得到对数概率，或用框架的 `BCEWithLogitsLoss`——它们在内部用 log-sum-exp 保证了稳定性，从源头避免 $\log 0$。
 
-## 陷阱五:灾难性抵消 —— 两个相近的大数相减
+## 陷阱五：灾难性抵消 —— 两个相近的大数相减
 
-当两个非常接近的大数相减时,有效数字会大量丢失,这叫**灾难性抵消(catastrophic cancellation)**。经典案例是「方差的一遍公式」$\text{Var}(x)=E[x^2]-E[x]^2$:当数据均值很大时,$E[x^2]$ 和 $E[x]^2$ 都是巨大且相近的数,相减后精度几乎全丢。
+当两个非常接近的大数相减时，有效数字会大量丢失，这叫**灾难性抵消（catastrophic cancellation）**。经典案例是「方差的一遍公式」$\text{Var}(x)=E[x^2]-E[x]^2$：当数据均值很大时，$E[x^2]$ 和 $E[x]^2$ 都是巨大且相近的数，相减后精度几乎全丢。
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -163,20 +163,21 @@ print("不稳定 E[x^2]-E[x]^2:", var_naive, "  <- 大数相减,精度全丢!")
 print("稳定  先减均值:      ", var_stable)
 `} />
 
-**修复技巧**:先减去均值(平移到 0 附近)再运算;数值分析里还有 Welford 在线算法能一遍求方差且稳定。这也是很多算法**先中心化数据**(如 PCA)的数值动机之一。
+**修复技巧**：先减去均值（平移到 0 附近）再运算；数值分析里还有 Welford 在线算法能一遍求方差且稳定。这也是很多算法**先中心化数据**（如 PCA）的数值动机之一。
 
-这不是理论洁癖——一篇专门研究数据库系统方差实现的论文用下图量化了这个现象:横轴是给数据加的平移量 $10^{\text{shift}}$(相当于把均值抬到越来越大),纵轴是结果**正确的十进制位数**。教科书一遍公式(Textbook1Pass,即 $E[x^2]-E[x]^2$)随平移增大急剧崩溃,而两遍法(Two Pass)几乎不受影响:
+这不是理论洁癖——一篇专门研究数据库系统方差实现的论文用下图量化了这个现象：横轴是给数据加的平移量 $10^{\text{shift}}$（相当于把均值抬到越来越大），纵轴是结果**正确的十进制位数**。教科书一遍公式（Textbook1Pass，即 $E[x^2]-E[x]^2$）随平移增大急剧崩溃，而两遍法（Two Pass）几乎不受影响：
 
 <figure className="my-6">
-  <img src="./float-precision-shift.png" alt="方差计算正确位数随平移指数的变化:横轴为平移指数 1-15,纵轴为正确十进制位数,六条曲线中两遍法 Two Pass 始终保持约 16 位正确数字,教科书一遍公式 Textbook1Pass 随平移增大从 15 位以上急剧跌向 0" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./float-precision-shift.png" alt="方差计算正确位数随平移指数的变化：横轴为平移指数 1-15，纵轴为正确十进制位数，六条曲线中两遍法 Two Pass 始终保持约 16 位正确数字，教科书一遍公式 Textbook1Pass 随平移增大从 15 位以上急剧跌向 0" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="mt-2 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Kamat & Nandi, <em>A Closer Look at Variance Implementations in Modern Database Systems</em>(arXiv:1509.04349)Figure 3
+    <span className="figure-caption-main">方差计算正确位数随平移指数的变化：横轴为平移指数 1-15，纵轴为正确十进制位数，六条曲线中两遍法 Two Pass 始终保持约 16 位正确数字，教科书一遍公式 Textbook1Pass 随平移增大从 15 位以上急剧跌向 0</span>
+    <span className="figure-caption-source">图源：Kamat & Nandi, <em>A Closer Look at Variance Implementations in Modern Database Systems</em>(arXiv:1509.04349)Figure 3</span>
   </figcaption>
 </figure>
 
-## 陷阱六:log1p / expm1 —— 专为「接近 1」和「接近 0」设计
+## 陷阱六：log1p / expm1 —— 专为「接近 1」和「接近 0」设计
 
-当 $x$ 极小时,$\log(1+x)$ 和 $e^x-1$ 会因为「先算出接近 1 的数、再和 1 做加减」而丢精度。标准库提供了 `log1p(x)=log(1+x)` 和 `expm1(x)=exp(x)-1` 两个专用函数,内部用泰勒展开保住精度:
+当 $x$ 极小时，$\log(1+x)$ 和 $e^x-1$ 会因为「先算出接近 1 的数、再和 1 做加减」而丢精度。标准库提供了 `log1p(x)=log(1+x)` 和 `expm1(x)=exp(x)-1` 两个专用函数，内部用泰勒展开保住精度：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -189,11 +190,11 @@ print("exp(x)-1 朴素:", np.exp(x) - 1)
 print("expm1(x):     ", np.expm1(x))
 `} />
 
-> 💡 记忆法:凡是式子里出现 `log(1 + 很小的数)` 或 `exp(很小的数) - 1`,就换成 `log1p` / `expm1`。这在计算复利、KL 散度、某些损失函数时都会用到。
+> 💡 记忆法：凡是式子里出现 `log(1 + 很小的数)` 或 `exp(很小的数) - 1`，就换成 `log1p` / `expm1`。这在计算复利、KL 散度、某些损失函数时都会用到。
 
-## 陷阱七:sigmoid 的上溢 —— 按符号分支
+## 陷阱七：sigmoid 的上溢 —— 按符号分支
 
-$\sigma(x)=\dfrac{1}{1+e^{-x}}$ 在 $x$ 是很大的负数时,$e^{-x}$ 上溢。稳定实现按 $x$ 的符号选择等价公式,保证指数的输入永远 $\le 0$:
+$\sigma(x)=\dfrac{1}{1+e^{-x}}$ 在 $x$ 是很大的负数时，$e^{-x}$ 上溢。稳定实现按 $x$ 的符号选择等价公式，保证指数的输入永远 $\le 0$：
 
 $$
 \sigma(x)=\begin{cases}\dfrac{1}{1+e^{-x}} & x\ge 0\\[2mm]\dfrac{e^{x}}{1+e^{x}} & x<0\end{cases}
@@ -214,11 +215,11 @@ print("稳定 sigmoid:", sigmoid_stable(xs))
 
 实际项目里你几乎不用自己写——`scipy.special.expit`、`torch.sigmoid`、`BCEWithLogitsLoss` 都已内置稳定实现。理解原理是为了会**排查**问题。
 
-## 典型案例:梯度爆炸与梯度裁剪
+## 典型案例：梯度爆炸与梯度裁剪
 
-数值问题不只出现在前向计算。深层网络(尤其 RNN)反向传播时,梯度可能逐层放大,最终变成 `inf`/`NaN`,一步更新就把权重毁掉——这就是**梯度爆炸**。
+数值问题不只出现在前向计算。深层网络（尤其 RNN）反向传播时，梯度可能逐层放大，最终变成 `inf`/`NaN`，一步更新就把权重毁掉——这就是**梯度爆炸**。
 
-最常用的对策是**梯度裁剪(gradient clipping)**:当梯度向量的范数超过阈值时,按比例缩放回去,保留方向、限制步长。
+最常用的对策是**梯度裁剪（gradient clipping）**：当梯度向量的范数超过阈值时，按比例缩放回去，保留方向、限制步长。
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -237,39 +238,39 @@ print("方向不变:", np.allclose(clipped / np.linalg.norm(clipped),
                               grad / np.linalg.norm(grad)))
 `} />
 
-> 对应 PyTorch 的 `torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)`。此外,**合理的权重初始化**(Xavier/He)、**Batch/Layer Normalization**、**残差连接**也都从不同角度缓解梯度问题。
+> 对应 PyTorch 的 `torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)`。此外，**合理的权重初始化**（Xavier/He）、**Batch/Layer Normalization**、**残差连接**也都从不同角度缓解梯度问题。
 
 ## 常见问题 FAQ
 
-**Q:为什么 softmax 减去最大值不改变结果?**
-因为分子分母同时乘以 $e^{-c}$:$\frac{e^{x_i}}{\sum_j e^{x_j}}=\frac{e^{x_i}e^{-c}}{\sum_j e^{x_j}e^{-c}}=\frac{e^{x_i-c}}{\sum_j e^{x_j-c}}$。这是恒等变形,数学上完全相等,只是让指数输入变小、避免上溢。
+**Q：为什么 softmax 减去最大值不改变结果？**
+因为分子分母同时乘以 $e^{-c}$：$\frac{e^{x_i}}{\sum_j e^{x_j}}=\frac{e^{x_i}e^{-c}}{\sum_j e^{x_j}e^{-c}}=\frac{e^{x_i-c}}{\sum_j e^{x_j-c}}$。这是恒等变形，数学上完全相等，只是让指数输入变小、避免上溢。
 
-**Q:float32 和 float64 该用哪个?**
-深度学习训练默认 `float32`(甚至用 `float16`/`bfloat16` 混合精度以省显存、提速),因为模型对噪声有鲁棒性、且速度/显存优先。但**科学计算、需要高精度的中间量(如协方差矩阵、数值积分)**常需 `float64`。知道自己在什么精度下运算,是排查数值 bug 的前提。
+**Q：float32 和 float64 该用哪个？**
+深度学习训练默认 `float32`（甚至用 `float16`/`bfloat16` 混合精度以省显存、提速），因为模型对噪声有鲁棒性、且速度/显存优先。但**科学计算、需要高精度的中间量（如协方差矩阵、数值积分）**常需 `float64`。知道自己在什么精度下运算，是排查数值 bug 的前提。
 
-**Q:为什么框架推荐 `CrossEntropyLoss` 直接吃 logits,而不是先 softmax?**
-因为 `CrossEntropyLoss = LogSoftmax + NLLLoss`,内部用 log-sum-exp 一次性稳定地算出对数概率。如果你先 `softmax` 得到概率、再手动 `log`,不仅多一步,还可能在概率接近 0 时下溢、取 log 得到 `-inf`。同理二分类用 `BCEWithLogitsLoss` 而非 `Sigmoid`+`BCELoss`。
+**Q：为什么框架推荐 `CrossEntropyLoss` 直接吃 logits，而不是先 softmax?**
+因为 `CrossEntropyLoss = LogSoftmax + NLLLoss`，内部用 log-sum-exp 一次性稳定地算出对数概率。如果你先 `softmax` 得到概率、再手动 `log`，不仅多一步，还可能在概率接近 0 时下溢、取 log 得到 `-inf`。同理二分类用 `BCEWithLogitsLoss` 而非 `Sigmoid`+`BCELoss`。
 
-**Q:加 epsilon 和裁剪 clip,哪个更好?**
-都是止血手段。`clip` 更直观(把概率夹进开区间),加 `eps` 更平滑。但两者都治标不治本——**最佳实践是从源头用 logits + 稳定算子**,让框架处理数值细节,而不是在概率上打补丁。
+**Q：加 epsilon 和裁剪 clip，哪个更好？**
+都是止血手段。`clip` 更直观（把概率夹进开区间），加 `eps` 更平滑。但两者都治标不治本——**最佳实践是从源头用 logits + 稳定算子**，让框架处理数值细节，而不是在概率上打补丁。
 
-**Q:出现 NaN 了怎么排查?**
-常见顺序:① 检查有没有 `log(0)`、`0/0`、`sqrt(负数)`;② 学习率是否过大导致梯度爆炸(试试梯度裁剪或调小 lr);③ 输入数据里有没有 `NaN`/`inf`(脏数据);④ 是否该用稳定算子(logsumexp、log_softmax)而手写了朴素版本。PyTorch 可用 `torch.autograd.set_detect_anomaly(True)` 定位。
+**Q：出现 NaN 了怎么排查？**
+常见顺序：① 检查有没有 `log(0)`、`0/0`、`sqrt(负数)`；② 学习率是否过大导致梯度爆炸（试试梯度裁剪或调小 lr）；③ 输入数据里有没有 `NaN`/`inf`（脏数据）；④ 是否该用稳定算子（logsumexp、log_softmax）而手写了朴素版本。PyTorch 可用 `torch.autograd.set_detect_anomaly(True)` 定位。
 
 ## 动手作业
 
-1. **复现 softmax 崩溃**:构造一个包含大数的向量,分别用朴素和稳定 softmax 计算,观察 `NaN` 的出现;再验证两者在普通数值上完全相等。
-2. **log 空间比较**:用朴素贝叶斯的思路,给两个类别各一串 `P(词|类)`,分别用「直接连乘」和「log 求和」比较哪个类别概率更大,看直接连乘在词数多时如何失效。
-3. **手写 logsumexp**:实现稳定版 `logsumexp`,和 `scipy.special.logsumexp` 对拍,输入用 `[1000, 1001, 1002]`。
-4. **方差精度**:生成均值为 $10^8$、标准差为 1 的 `float32` 数据,对比一遍公式 $E[x^2]-E[x]^2$ 与两遍法(先减均值)的结果差异。
-5. **梯度裁剪**:实现按范数裁剪的函数,构造一个范数为 100 的梯度,裁剪到 `max_norm=1`,验证裁剪后范数为 1 且方向不变。
-6. **思考题**:为什么 `log1p(x)` 比 `log(1+x)` 在 $x$ 很小时更准?提示:想想 `1 + 1e-16` 在 `float64` 里会发生什么。
+1. **复现 softmax 崩溃**：构造一个包含大数的向量，分别用朴素和稳定 softmax 计算，观察 `NaN` 的出现；再验证两者在普通数值上完全相等。
+2. **log 空间比较**：用朴素贝叶斯的思路，给两个类别各一串 `P(词|类)`，分别用「直接连乘」和「log 求和」比较哪个类别概率更大，看直接连乘在词数多时如何失效。
+3. **手写 logsumexp**：实现稳定版 `logsumexp`，和 `scipy.special.logsumexp` 对拍，输入用 `[1000, 1001, 1002]`。
+4. **方差精度**：生成均值为 $10^8$、标准差为 1 的 `float32` 数据，对比一遍公式 $E[x^2]-E[x]^2$ 与两遍法（先减均值）的结果差异。
+5. **梯度裁剪**：实现按范数裁剪的函数，构造一个范数为 100 的梯度，裁剪到 `max_norm=1`，验证裁剪后范数为 1 且方向不变。
+6. **思考题**：为什么 `log1p(x)` 比 `log(1+x)` 在 $x$ 很小时更准？提示：想想 `1 + 1e-16` 在 `float64` 里会发生什么。
 
 ## 延伸阅读
 
-- **站内教程**:[实战损失](/tutorials/ml-losses)—— 交叉熵在真实模型里如何触发本文的各个陷阱
-- **经典文献**:Goldberg (1991). *What Every Computer Scientist Should Know about Floating-Point Arithmetic*. [ACM Computing Surveys, 原文 HTML](https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html) —— 浮点数表示、舍入误差、灾难性抵消的权威综述,本篇所有陷阱背后的原理都在此文有严格论述
-- **数值算法**:Chan, Golub & LeVeqe (1983). *Algorithms for Computing the Sample Variance: Analysis and Recommendations*. The American Statistician 37(3):242-247. —— 方差计算各算法精度对比的经典论文,两遍法/一遍法/Welford 的取舍分析源于此文(上文 Kamat & Nandi 的实验即按它设计)
+- **站内教程**：[实战损失](/tutorials/ml-losses)—— 交叉熵在真实模型里如何触发本文的各个陷阱
+- **经典文献**：Goldberg (1991). *What Every Computer Scientist Should Know about Floating-Point Arithmetic*. [ACM Computing Surveys, 原文 HTML](https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html) —— 浮点数表示、舍入误差、灾难性抵消的权威综述，本篇所有陷阱背后的原理都在此文有严格论述
+- **数值算法**：Chan, Golub & LeVeqe (1983). *Algorithms for Computing the Sample Variance: Analysis and Recommendations*. The American Statistician 37(3):242-247. —— 方差计算各算法精度对比的经典论文，两遍法/一遍法/Welford 的取舍分析源于此文（上文 Kamat & Nandi 的实验即按它设计）
 
 ## 小结
 
@@ -285,4 +286,4 @@ print("方向不变:", np.allclose(clipped / np.linalg.norm(clipped),
 | sigmoid 上溢 | 大负输入报错 | 按符号分支 |
 | 梯度爆炸 | 权重变 `NaN` | 梯度裁剪、初始化、归一化 |
 
-> 🎯 一句话记住:**数学等价 ≠ 数值等价。** 遇到 `NaN`/`inf` 先别怀疑逻辑,先想想是不是踩了浮点的坑——而绝大多数坑,前人都已封装成 `logsumexp`、`log_softmax`、`CrossEntropyLoss` 这样的稳定算子,**优先用它们**。
+> 🎯 一句话记住：**数学等价 ≠ 数值等价。** 遇到 `NaN`/`inf` 先别怀疑逻辑，先想想是不是踩了浮点的坑——而绝大多数坑，前人都已封装成 `logsumexp`、`log_softmax`、`CrossEntropyLoss` 这样的稳定算子，**优先用它们**。

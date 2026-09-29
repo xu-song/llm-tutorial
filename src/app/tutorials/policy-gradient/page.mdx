@@ -2,29 +2,29 @@ import { tutorialMetadata } from "@/lib/tutorials";
 
 export const metadata = tutorialMetadata("policy-gradient");
 
-# 🎢 策略梯度:直接学策略
+# 🎢 策略梯度：直接学策略
 
-[强化学习入门](/tutorials/reinforcement-learning)的 Q-learning 和上一篇 [DQN](/tutorials/dqn) 都是**价值法**:先学准 $Q(s,a)$,再「每步选 Q 最大的动作」间接得到策略。但这条路有软肋:动作一多(甚至连续,如方向盘转角)就没法对所有动作取 $\max$;而且它学出的是**确定性**策略,天生不擅长「需要随机」的场合。
+[强化学习入门](/tutorials/reinforcement-learning)的 Q-learning 和上一篇 [DQN](/tutorials/dqn) 都是**价值法**：先学准 $Q(s,a)$，再「每步选 Q 最大的动作」间接得到策略。但这条路有软肋：动作一多（甚至连续，如方向盘转角）就没法对所有动作取 $\max$；而且它学出的是**确定性**策略，天生不擅长「需要随机」的场合。
 
-**策略梯度(Policy Gradient)** 换个思路:**跳过价值表,直接把策略 $\pi_\theta(a\mid s)$ 参数化**,再用梯度上升调 $\theta$,让「拿到高回报的动作」概率变大。这条路通往 REINFORCE、actor-critic,以及 [RLHF](/tutorials/rlhf) 里对齐大模型用的 **PPO**。
+**策略梯度（Policy Gradient）** 换个思路：**跳过价值表，直接把策略 $\pi_\theta(a\mid s)$ 参数化**，再用梯度上升调 $\theta$，让「拿到高回报的动作」概率变大。这条路通往 REINFORCE、actor-critic，以及 [RLHF](/tutorials/rlhf) 里对齐大模型用的 **PPO**。
 
-## 核心思想:让好动作更可能
+## 核心思想：让好动作更可能
 
-我们要最大化期望回报 $J(\theta)=\mathbb{E}_{\tau\sim\pi_\theta}[R(\tau)]$。**策略梯度定理**给出了它的梯度(用「对数导数技巧」把梯度挪进期望里):
+我们要最大化期望回报 $J(\theta)=\mathbb{E}_{\tau\sim\pi_\theta}[R(\tau)]$。**策略梯度定理**给出了它的梯度（用「对数导数技巧」把梯度挪进期望里）：<Cite n={[2,7]} />
 
 $$
 \nabla_\theta J(\theta) = \mathbb{E}_{\tau\sim\pi_\theta}\Big[\sum_t \nabla_\theta \log \pi_\theta(a_t\mid s_t)\; G_t\Big]
 $$
 
-一句话读懂它:**沿着 $\nabla\log\pi$ 的方向推,能提高动作概率;再乘上回报 $G_t$ 当权重**——回报越高,这一推越用力。于是「带来高回报的动作被推高,带来低回报的被压低」,正是试错学习的数学化。
+一句话读懂它：**沿着 $\nabla\log\pi$ 的方向推，能提高动作概率；再乘上回报 $G_t$ 当权重**——回报越高，这一推越用力。于是「带来高回报的动作被推高，带来低回报的被压低」，正是试错学习的数学化。
 
-> 💡 妙处在于:公式里只出现 $\nabla\log\pi_\theta$,**不需要对环境求导**。环境哪怕是个黑箱(不可导的游戏引擎),照样能优化策略。上面这个定理怎么来的?为什么能把梯度挪进期望?为什么权重是 $G_t$ 而不是整条轨迹的回报?为什么减一个基线能降方差却不偏?下面把这条推导链一次走完。
+> 💡 妙处在于：公式里只出现 $\nabla\log\pi_\theta$，**不需要对环境求导**。环境哪怕是个黑箱（不可导的游戏引擎），照样能优化策略。上面这个定理怎么来的？为什么能把梯度挪进期望？为什么权重是 $G_t$ 而不是整条轨迹的回报？为什么减一个基线能降方差却不偏？下面把这条推导链一次走完。
 
-## 策略梯度定理:从期望到可采样梯度
+## 策略梯度定理：从期望到可采样梯度
 
-策略梯度定理(Sutton et al., 1999 [7];现代讲法见 Spinning Up [2])是整篇的基石。它要回答一个问题:**$\nabla_\theta J(\theta)$ 里有个对轨迹的期望,而轨迹分布 $\pi_\theta(\tau)$ 依赖 $\theta$,梯度该怎么估?** 直接对 $\pi_\theta(\tau)$ 求导看似要懂环境动力学,实则不然——下面四步把梯度挪成一个**可用采样估的期望**。
+策略梯度定理（Sutton et al.， 1999 [7]；现代讲法见 Spinning Up [2]）是整篇的基石。它要回答一个问题：**$\nabla_\theta J(\theta)$ 里有个对轨迹的期望，而轨迹分布 $\pi_\theta(\tau)$ 依赖 $\theta$，梯度该怎么估？** 直接对 $\pi_\theta(\tau)$ 求导看似要懂环境动力学，实则不然——下面四步把梯度挪成一个**可用采样估的期望**。<Cite n={[2,7]} />
 
-### 第一步:轨迹似然的三因子分解
+### 第一步：轨迹似然的三因子分解
 
 一条轨迹 $\tau=(s_0,a_0,s_1,a_1,\dots,s_T)$ 由初始状态、动作、环境转移交替组成。在策略 $\pi_\theta$ 下采到这条轨迹的概率是
 
@@ -32,29 +32,29 @@ $$
 \pi_\theta(\tau) \;=\; \rho_0(s_0)\,\prod_{t=0}^{T-1}\pi_\theta(a_t\mid s_t)\,P(s_{t+1}\mid s_t,a_t),
 $$
 
-三个因子各司其职:**初始分布 $\rho_0$**(环境给定)、**策略 $\pi_\theta$**(我们要优化的)、**转移 $P$**(环境动力学)。取对数后三者可加:
+三个因子各司其职：**初始分布 $\rho_0$**（环境给定）、**策略 $\pi_\theta$**（我们要优化的）、**转移 $P$**（环境动力学）。取对数后三者可加：
 
 $$
 \log\pi_\theta(\tau) \;=\; \log\rho_0(s_0) \;+\; \sum_t\Big(\log\pi_\theta(a_t\mid s_t) + \log P(s_{t+1}\mid s_t,a_t)\Big).
 $$
 
-关键观察:$\rho_0$ 和 $P$ **都不依赖 $\theta$**(环境不会因为智能体换了策略就改变物理)。所以对 $\theta$ 求导时,这两项直接消失:
+关键观察：$\rho_0$ 和 $P$ **都不依赖 $\theta$**（环境不会因为智能体换了策略就改变物理）。所以对 $\theta$ 求导时，这两项直接消失：
 
 $$
 \nabla_\theta\log\pi_\theta(\tau) \;=\; \sum_{t=0}^{T-1}\nabla_\theta\log\pi_\theta(a_t\mid s_t).
 $$
 
-**环境动力学在梯度里完全缺席**——这正是策略梯度能用在「不可导黑箱环境」(游戏引擎、物理模拟器、真实机器人)上的根本原因。
+**环境动力学在梯度里完全缺席**——这正是策略梯度能用在「不可导黑箱环境」（游戏引擎、物理模拟器、真实机器人）上的根本原因。
 
-### 第二步:对数导数技巧——把梯度挪进期望
+### 第二步：对数导数技巧——把梯度挪进期望
 
-目标 $J(\theta)=\mathbb{E}_{\tau\sim\pi_\theta}[R(\tau)]$。对它求导,梯度卡在「期望下标的分布也含 $\theta$」这一步。**对数导数技巧**(score-function trick)用一行微积分解开:
+目标 $J(\theta)=\mathbb{E}_{\tau\sim\pi_\theta}[R(\tau)]$。对它求导，梯度卡在「期望下标的分布也含 $\theta$」这一步。**对数导数技巧**（score-function trick）用一行微积分解开：
 
 $$
 \nabla_\theta \pi_\theta(\tau) \;=\; \pi_\theta(\tau)\,\nabla_\theta\log\pi_\theta(\tau) \qquad\Big(\text{由 }\tfrac{d}{dx}\log x=\tfrac1x\Big)
 $$
 
-五步链就把梯度挪进了期望:
+五步链就把梯度挪进了期望：
 
 $$
 \begin{aligned}
@@ -66,74 +66,74 @@ $$
 \end{aligned}
 $$
 
-最后一行就是「核心思想」里那个定理的**完整形式**:每步的 $\nabla\log\pi$ 乘上**整条轨迹的回报** $R(\tau)$。期望里的量全都可采样估——跑轨迹、记下每步的 $\nabla\log\pi$ 与回报、求平均,就是梯度的无偏估计。这就是 REINFORCE 的原型。
+最后一行就是「核心思想」里那个定理的**完整形式**：每步的 $\nabla\log\pi$ 乘上**整条轨迹的回报** $R(\tau)$。期望里的量全都可采样估——跑轨迹、记下每步的 $\nabla\log\pi$ 与回报、求平均，就是梯度的无偏估计。这就是 REINFORCE 的原型。
 
-### 第三步:EGLP 引理——减基线为何无偏
+### 第三步：EGLP 引理——减基线为何无偏
 
-$R(\tau)$ 方差极大(整条轨迹的运气都堆在里面)。一个降方差的办法是减一个**基线** $b$:
+$R(\tau)$ 方差极大（整条轨迹的运气都堆在里面）。一个降方差的办法是减一个**基线** $b$：
 
 $$
 \nabla_\theta J = \mathbb{E}\!\Big[\sum_t \nabla\log\pi_\theta(a_t\mid s_t)\,\big(R(\tau)-b\big)\Big].
 $$
 
-减去 $b$ 凭什么不偏?靠一条引理,Spinning Up 称之为 **EGLP(Expected Grad-Log-Prob)引理** [2]:对任何参数化分布 $P_\theta(x)$,
+减去 $b$ 凭什么不偏？靠一条引理，Spinning Up 称之为 **EGLP（Expected Grad-Log-Prob）引理** [2]：对任何参数化分布 $P_\theta(x)$，
 
 $$
 \mathbb{E}_{x\sim P_\theta}\!\big[\nabla_\theta\log P_\theta(x)\big] = 0.
 $$
 
-证明只有两行——对归一化条件 $\int_x P_\theta(x)=1$ 求导,梯度穿过积分再用对数导数技巧:
+证明只有两行——对归一化条件 $\int_x P_\theta(x)=1$ 求导，梯度穿过积分再用对数导数技巧：
 
 $$
 0 = \nabla_\theta\!\int_x P_\theta(x) = \int_x P_\theta(x)\,\nabla_\theta\log P_\theta(x) = \mathbb{E}_{x\sim P_\theta}\!\big[\nabla_\theta\log P_\theta(x)\big].
 $$
 
-把 $x$ 取成「给定 $s_t$ 时的动作 $a_t$」,分布是 $\pi_\theta(\cdot\mid s_t)$,就得到推论:**任何只依赖状态 $s_t$ 的函数 $b(s_t)$ 都满足**
+把 $x$ 取成「给定 $s_t$ 时的动作 $a_t$」，分布是 $\pi_\theta(\cdot\mid s_t)$，就得到推论：**任何只依赖状态 $s_t$ 的函数 $b(s_t)$ 都满足**
 
 $$
 \mathbb{E}_{a_t\sim\pi_\theta}\!\big[\nabla_\theta\log\pi_\theta(a_t\mid s_t)\,b(s_t)\big] = 0.
 $$
 
-所以减去 $b(s_t)$ 对期望**毫无贡献**(零均值),却把信号从「绝对回报」平移成「相对基准的好坏」,方差大幅下降。理论上最优的 $b(s_t)$ 正是 $V^{\pi}(s_t)$ [2][4]——这就是后面 Actor-Critic 让 Critic 学 $V_\psi$ 当基线的根据。
+所以减去 $b(s_t)$ 对期望**毫无贡献**（零均值），却把信号从「绝对回报」平移成「相对基准的好坏」，方差大幅下降。理论上最优的 $b(s_t)$ 正是 $V^{\pi}(s_t)$ [2][4]——这就是后面 Actor-Critic 让 Critic 学 $V_\psi$ 当基线的根据。<Cite n={[2,4]} />
 
-### 第四步:因果性——用 reward-to-go 削掉一整片噪声
+### 第四步：因果性——用 reward-to-go 削掉一整片噪声
 
-还有第二处可以降方差。第三步的权重是**整条轨迹** $R(\tau)=\sum_{t'}\gamma^{t'}r_{t'}$,但仔细想:第 $t$ 步的动作 $a_t$ **不可能影响**它之前的奖励 $r_{t'<t}$——用「过去的运气」去评价「现在的动作」,只会加噪声。EGLP 的一个推广(Wikipedia 给出的形式 [4])保证:只要 $\Psi_i$ 独立于 $a_t$ 及其之后的状态动作(即 $\Psi_i$ 只依赖 $t$ 之前的历史),则
+还有第二处可以降方差。第三步的权重是**整条轨迹** $R(\tau)=\sum_{t'}\gamma^{t'}r_{t'}$，但仔细想：第 $t$ 步的动作 $a_t$ **不可能影响**它之前的奖励 $r_{t'<t}$——用「过去的运气」去评价「现在的动作」，只会加噪声。EGLP 的一个推广（Wikipedia 给出的形式 [4]）保证：只要 $\Psi_i$ 独立于 $a_t$ 及其之后的状态动作（即 $\Psi_i$ 只依赖 $t$ 之前的历史），则
 
 $$
 \mathbb{E}\!\big[\nabla_\theta\log\pi_\theta(a_t\mid s_t)\,\Psi_i\big] = 0.
 $$
 
-把 $\Psi_i$ 取成「第 $t$ 步之前的奖励 $r_{t'<t}$」——它由 $t$ 之前的状态动作决定,与 $a_t$ 条件独立——于是这一整片交叉项期望为零、方差非零(纯噪声)。把它们删掉,权重从全回报 $R(\tau)$ 换成 **reward-to-go**(从当前步往后看的回报):
+把 $\Psi_i$ 取成「第 $t$ 步之前的奖励 $r_{t'<t}$」——它由 $t$ 之前的状态动作决定，与 $a_t$ 条件独立——于是这一整片交叉项期望为零、方差非零（纯噪声）。把它们删掉，权重从全回报 $R(\tau)$ 换成 **reward-to-go**（从当前步往后看的回报）：
 
 $$
 \hat R_t \;=\; \sum_{t'=t}^{T-1}\gamma^{t'}\,r_{t'}.
 $$
 
-> ⚠️ **折扣指数别写错**:reward-to-go 是「删掉过去项」,不是「重新归一化折扣」。权重仍是 $\gamma^{t'}$(原指数),**不是** $\gamma^{t'-t}$。后者会引入 $\gamma^{-t}$ 的缩放因子,把无偏估计变成有偏——这是手写实现时最容易踩的坑(本页可运行示例里专门留了对照)。
+> ⚠️ **折扣指数别写错**：reward-to-go 是「删掉过去项」，不是「重新归一化折扣」。权重仍是 $\gamma^{t'}$（原指数），**不是** $\gamma^{t'-t}$。后者会引入 $\gamma^{-t}$ 的缩放因子，把无偏估计变成有偏——这是手写实现时最容易踩的坑（本页可运行示例里专门留了对照）。
 
-代入定理,reward-to-go 形式的策略梯度是
+代入定理，reward-to-go 形式的策略梯度是
 
 $$
 \nabla_\theta J(\theta) = \mathbb{E}_{\tau\sim\pi_\theta}\!\Bigg[\sum_{t=0}^{T-1}\nabla_\theta\log\pi_\theta(a_t\mid s_t)\,\hat R_t\Bigg].
 $$
 
-「核心思想」里写的 $\nabla\log\pi\cdot G_t$ 正是这个 $G_t=\hat R_t$。删掉过去项**不改变期望**(无偏),只削掉一片零均值噪声,方差应声下降。
+「核心思想」里写的 $\nabla\log\pi\cdot G_t$ 正是这个 $G_t=\hat R_t$。删掉过去项**不改变期望**（无偏），只削掉一片零均值噪声，方差应声下降。
 
-### 三条等价形式,一张图看懂
+### 三条等价形式，一张图看懂
 
-把「全回报 / reward-to-go / 减基线」三步串起来,梯度定理有四种等价写法,后两种是工程上真正用的:
+把「全回报 / reward-to-go / 减基线」三步串起来，梯度定理有四种等价写法，后两种是工程上真正用的：
 
-| 形式 | 第 $t$ 步的权重 | 期望 | 方差 | 工程用? |
+| 形式 | 第 $t$ 步的权重 | 期望 | 方差 | 工程用？ |
 |---|---|---|---|---|
-| 全回报 | $R(\tau)=\sum_{t'}\gamma^{t'}r_{t'}$ | 无偏 | 最大(过去运气全堆里) | 否 |
-| reward-to-go | $\hat R_t=\sum_{t'\ge t}\gamma^{t'}r_{t'}$ | 无偏 | ↓(删过去噪声) | REINFORCE 用 |
-| 优势(减 $V$ 基线) | $\hat R_t - V^\pi(s_t)$ | 无偏 | ↓↓(相对基准) | Actor-Critic 用 |
+| 全回报 | $R(\tau)=\sum_{t'}\gamma^{t'}r_{t'}$ | 无偏 | 最大（过去运气全堆里） | 否 |
+| reward-to-go | $\hat R_t=\sum_{t'\ge t}\gamma^{t'}r_{t'}$ | 无偏 | ↓（删过去噪声） | REINFORCE 用 |
+| 优势（减 $V$ 基线） | $\hat R_t - V^\pi(s_t)$ | 无偏 | ↓↓（相对基准） | Actor-Critic 用 |
 | Q 形式 | $Q^\pi(s_t,a_t)$ | 无偏 | — | 理论分析用 |
 
-四种**期望全相等**(由 EGLP 与因果性保证),差别只在方差。从上到下是逐步降方差的过程:reward-to-go 削掉过去项的噪声,基线再把「这个状态本身值多少」的水位线抽掉,只留动作之间的相对差异。
+四种**期望全相等**（由 EGLP 与因果性保证），差别只在方差。从上到下是逐步降方差的过程：reward-to-go 削掉过去项的噪声，基线再把「这个状态本身值多少」的水位线抽掉，只留动作之间的相对差异。
 
-下面用同一批采样,把这三条无偏降方差技巧的**方差逐级下降、期望方向不变**亲眼看一遍:
+下面用同一批采样，把这三条无偏降方差技巧的**方差逐级下降、期望方向不变**亲眼看一遍：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -193,15 +193,15 @@ print()
 print("三个均值都在 0.535 附近(无偏),方差从 6.6 -> 3.1 -> 0.8 逐级下降。")
 `} />
 
-> 💡 **看图要点**:三个估计器的均值都收敛到真梯度 $\approx[0.535,-0.535]$(无偏,只是采样噪声不同),但方差从 $6.6\to3.1\to0.8$ 逐级下降——reward-to-go 削掉「过去运气」这片零均值噪声,基线再把「这个状态本身值多少」的水位线抽掉。同样的样本量,方差小意味着梯度估计更稳、收敛更快。这正是 REINFORCE→Actor-Critic 演进的全部动机。
+> 💡 **看图要点**：三个估计器的均值都收敛到真梯度 $\approx[0.535,-0.535]$（无偏，只是采样噪声不同），但方差从 $6.6\to3.1\to0.8$ 逐级下降——reward-to-go 削掉「过去运气」这片零均值噪声，基线再把「这个状态本身值多少」的水位线抽掉。同样的样本量，方差小意味着梯度估计更稳、收敛更快。这正是 REINFORCE→Actor-Critic 演进的全部动机。
 
-> 💡 **为何不需要对环境求导**:回顾第一步——$\nabla\log\pi_\theta(\tau)$ 里环境动力学 $\rho_0$、$P$ 的对数项求导后**直接消失**,梯度只含 $\nabla\log\pi_\theta(a_t\mid s_t)$。所以策略梯度能用在游戏引擎、物理模拟器、真实机器人这类「环境不可导」的场景——只要能**采样**轨迹,就能估梯度。这是它相对「可微仿真」路线的根本优势,也是 RL 能直接对接黑箱环境的数学根据。
+> 💡 **为何不需要对环境求导**：回顾第一步——$\nabla\log\pi_\theta(\tau)$ 里环境动力学 $\rho_0$、$P$ 的对数项求导后**直接消失**，梯度只含 $\nabla\log\pi_\theta(a_t\mid s_t)$。所以策略梯度能用在游戏引擎、物理模拟器、真实机器人这类「环境不可导」的场景——只要能**采样**轨迹，就能估梯度。这是它相对「可微仿真」路线的根本优势，也是 RL 能直接对接黑箱环境的数学根据。
 
-下一篇 [DDPG 到 SAC 的连续控制](/tutorials/continuous-control)会把这个定理搬到连续动作空间:那里 $\pi_\theta$ 是高斯/确定性策略,$\nabla\log\pi$ 换成 $\nabla\log\mathcal N$ 或确定性策略梯度定理的 $\nabla_a Q\cdot\nabla_\theta\mu$,但**对数导数技巧 + EGLP + 因果性**这三块基石完全不变。
+下一篇 [DDPG 到 SAC 的连续控制](/tutorials/continuous-control)会把这个定理搬到连续动作空间：那里 $\pi_\theta$ 是高斯/确定性策略，$\nabla\log\pi$ 换成 $\nabla\log\mathcal N$ 或确定性策略梯度定理的 $\nabla_a Q\cdot\nabla_\theta\mu$，但**对数导数技巧 + EGLP + 因果性**这三块基石完全不变。
 
-## REINFORCE:最朴素的策略梯度
+## REINFORCE：最朴素的策略梯度
 
-把上面的期望用采样近似,就得到最基础的算法 **REINFORCE**(Sutton & Barto《RL:An Introduction》Ch.13 [4]):跑完一整条轨迹,用实际回报 $G_t$ 当权重更新一次。下面在多臂老虎机上跑它,看策略概率如何从均匀集中到最优臂:
+把上面的期望用采样近似，就得到最基础的算法 **REINFORCE**(Sutton & Barto《RL:An Introduction》Ch.13 [4])：跑完一整条轨迹，用实际回报 $G_t$ 当权重更新一次。<Cite n={4} />下面在多臂老虎机上跑它，看策略概率如何从均匀集中到最优臂：
 
 <PolicyGradientViz />
 
@@ -227,15 +227,15 @@ print("最终策略概率:", np.round(softmax(theta), 3))
 print(f"策略押在了第 {int(softmax(theta).argmax())} 台(真实最好: {int(true_rates.argmax())})")
 `} />
 
-## 高方差:REINFORCE 的致命伤
+## 高方差：REINFORCE 的致命伤
 
-REINFORCE 能用,但**方差极大**:回报 $G_t$ 随运气剧烈波动,梯度估计噪声大、训练慢又不稳。一个关键观察是——**把回报整体减去一个基线 $b$ 不改变梯度的期望方向,却能大幅降低方差**:
+REINFORCE 能用，但**方差极大**：回报 $G_t$ 随运气剧烈波动，梯度估计噪声大、训练慢又不稳。一个关键观察是——**把回报整体减去一个基线 $b$ 不改变梯度的期望方向，却能大幅降低方差**：
 
 $$
 \nabla_\theta J = \mathbb{E}\Big[\nabla_\theta \log\pi_\theta(a\mid s)\,\big(G_t - b(s)\big)\Big]
 $$
 
-因为 $\mathbb{E}[\nabla\log\pi\cdot b]=b\,\nabla\!\sum_a\pi=b\,\nabla 1=0$,减去 $b$ **无偏**。直觉上,与其说「这个动作回报是 8」,不如说「它比平均水平**好 3**」——用相对好坏当信号,噪声小得多。下面用同一批采样,亲眼验证「减基线后梯度方向几乎不变、方差却降一半」:
+因为 $\mathbb{E}[\nabla\log\pi\cdot b]=b\,\nabla\!\sum_a\pi=b\,\nabla 1=0$，减去 $b$ **无偏**。直觉上，与其说「这个动作回报是 8」，不如说「它比平均水平**好 3**」——用相对好坏当信号，噪声小得多。下面用同一批采样，亲眼验证「减基线后梯度方向几乎不变、方差却降一半」：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -263,38 +263,38 @@ print("总方差   无基线:", round(g_nob.var(0).sum(), 4))
 print("总方差   有基线:", round(g_b.var(0).sum(), 4), " ← 明显更小")
 `} />
 
-## Actor-Critic:让价值网络当基线
+## Actor-Critic：让价值网络当基线
 
-最好的基线是什么?**状态价值 $V(s)$**——「这个状态平均能拿多少」。用它当基线,权重就变成了**优势函数**:
+最好的基线是什么？**状态价值 $V(s)$**——「这个状态平均能拿多少」。用它当基线，权重就变成了**优势函数**：
 
 $$
 A(s,a) = Q(s,a) - V(s)\quad\text{(这个动作比该状态的平均好多少)}
 $$
 
-减去 $V(s)$ 为什么无偏?有个漂亮的引理(Spinning Up 称之为 **EGLP lemma**):对任何**只依赖状态**的函数 $b(s)$,
+减去 $V(s)$ 为什么无偏？有个漂亮的引理（Spinning Up 称之为 **EGLP lemma**）：对任何**只依赖状态**的函数 $b(s)$，
 
 $$
 \mathbb{E}_{a\sim\pi_\theta}\big[\nabla_\theta \log \pi_\theta(a\mid s)\cdot b(s)\big] = b(s)\,\nabla_\theta \sum_a \pi_\theta(a\mid s) = b(s)\,\nabla_\theta 1 = 0
 $$
 
-所以减去 $b(s)$ 不改变梯度期望,却把信号从「绝对回报」平移成「相对基准的好坏」,方差大幅下降。$V(s)$ 正是理论上最优的减方差基线 [2]。
+所以减去 $b(s)$ 不改变梯度期望，却把信号从「绝对回报」平移成「相对基准的好坏」，方差大幅下降。$V(s)$ 正是理论上最优的减方差基线 [2]。
 
-但 $V(s)$ 我们也不知道,于是**再训练一个网络 $V_\psi$ 去估它**。这就是 **Actor-Critic** 架构:
+但 $V(s)$ 我们也不知道，于是**再训练一个网络 $V_\psi$ 去估它**。这就是 **Actor-Critic** 架构：
 
-- **Actor(演员)**:策略 $\pi_\theta$,负责选动作;
-- **Critic(评论家)**:价值网络 $V_\psi$,负责点评「这步比预期好还是差」。
+- **Actor（演员）**：策略 $\pi_\theta$,负责选动作;
+- **Critic（评论家）**：价值网络 $V_\psi$,负责点评「这步比预期好还是差」.
 
-### Critic 怎么训练:回归到回报
+### Critic 怎么训练：回归到回报
 
-Critic 的目标很简单——**让 $V_\psi(s)$ 拟合「从 $s$ 出发的期望回报」**。给定一批采样到的回报 $\hat R_t$(reward-to-go,$\hat R_t=\sum_{t'\ge t}\gamma^{t'-t}r_{t'}$),用均方误差做回归 [2]:
+Critic 的目标很简单——**让 $V_\psi(s)$ 拟合「从 $s$ 出发的期望回报」**。给定一批采样到的回报 $\hat R_t$（reward-to-go,$\hat R_t=\sum_{t'\ge t}\gamma^{t'-t}r_{t'}$），用均方误差做回归 [2]:<Cite n={2} />
 
 $$
 \psi_k = \arg\min_\psi\; \mathbb{E}_{s_t,\hat R_t\sim\pi_k}\Big[\big(V_\psi(s_t)-\hat R_t\big)^2\Big]
 $$
 
-每轮策略更新后,用新的轨迹重训 Critic(通常从上一版 $\psi_{k-1}$ 起做几步梯度下降)。**VPG、TRPO、PPO、A2C 都是这个套路**——Actor 沿 $\nabla\log\pi\cdot\hat A$ 走,Critic 沿 MSE 拟合 $V$,两者交替。
+每轮策略更新后，用新的轨迹重训 Critic（通常从上一版 $\psi_{k-1}$ 起做几步梯度下降）。**VPG、TRPO、PPO、A2C 都是这个套路**——Actor 沿 $\nabla\log\pi\cdot\hat A$ 走，Critic 沿 MSE 拟合 $V$，两者交替。
 
-<CodeRunner title="A2C 骨架:Actor 与 Critic 交替更新" language="python" defaultCode={`# A2C 骨架:Actor 与 Critic 交替更新;批量采集 → Critic 回归 return → Actor 用优势更新
+<CodeRunner title="A2C 骨架：Actor 与 Critic 交替更新" language="python" defaultCode={`# A2C 骨架:Actor 与 Critic 交替更新;批量采集 → Critic 回归 return → Actor 用优势更新
 import numpy as np
 from collections import defaultdict
 rng = np.random.default_rng(0)
@@ -339,104 +339,105 @@ print("策略 argmax:", softmax(theta).argmax(1).tolist(),
       " 真值最优动作:", true_Q.argmax(1).tolist())
 `} />
 
-跑一下,你会看到 $V_\psi$ 收敛到 `true_V` 附近,策略把每个状态的动作概率压向 `true_Q` 更大的那个动作——**一个网络学策略、一个网络学价值,用「回报减价值」当优势**,$\hat R_t$ 用蒙特卡洛 return 时这就是 A2C 的标准形态(Spinning Up [2]);若把 Critic 的 target 换成 $r+\gamma V(s')$、优势换成 TD(0) 的 $\delta_t$,就得到上节骨架里的在线 TD(0) 版本。
+跑一下，你会看到 $V_\psi$ 收敛到 `true_V` 附近，策略把每个状态的动作概率压向 `true_Q` 更大的那个动作——**一个网络学策略、一个网络学价值，用「回报减价值」当优势**，$\hat R_t$ 用蒙特卡洛 return 时这就是 A2C 的标准形态（Spinning Up [2]）；若把 Critic 的 target 换成 $r+\gamma V(s')$、优势换成 TD（0） 的 $\delta_t$，就得到上节骨架里的在线 TD（0） 版本。
 
-### 优势怎么估:TD(0) / n-step / 蒙特卡洛的三段谱系
+### 优势怎么估：TD(0) / n-step / 蒙特卡洛的三段谱系
 
-上面骨架里用的是**一步 TD(0) 优势** $\delta_t=r_t+\gamma V(s_{t+1})-V(s_t)$。它只是优势估计的**一个极端**。把「往后看几步真实奖励、再用 $V$ 收尾」一般化,得到 **n-step 优势**:
+上面骨架里用的是**一步 TD（0） 优势** $\delta_t=r_t+\gamma V(s_{t+1})-V(s_t)$。它只是优势估计的**一个极端**。把「往后看几步真实奖励、再用 $V$ 收尾」一般化，得到 **n-step 优势**：
 
 $$
 \hat A^{(n)}_t = \sum_{l=0}^{n-1}\gamma^l r_{t+l} + \gamma^n V(s_{t+n}) - V(s_t)
 $$
 
-- **n=1(纯 TD(0))**:$\hat A=\delta_t$。只信一步真实奖励 + Critic 的自举,**方差最小,但偏差完全取决于 Critic 准不准**——Critic 有系统误差 $b$,偏差就被自举放大成 $\gamma\cdot b$。
-- **n→∞(蒙特卡洛)**:$\hat A=\sum_{l\ge0}\gamma^l r_{t+l}-V(s_t)$。信一整条轨迹,**无偏(只要 $V$ 期望对),但方差随步数累积爆炸**。
-- **中间 n**:用 $n$ 步真实奖励 + 一步 $\gamma^n V$ 收尾,在两端之间权衡。
+- **n=1（纯 TD(0)）**：$\hat A=\delta_t$.只信一步真实奖励 + Critic 的自举,**方差最小,但偏差完全取决于 Critic 准不准**——Critic 有系统误差 $b$,偏差就被自举放大成 $\gamma\cdot b$.
+- **n→∞（蒙特卡洛）**：$\hat A=\sum_{l\ge0}\gamma^l r_{t+l}-V(s_t)$.信一整条轨迹,**无偏（只要 $V$ 期望对）,但方差随步数累积爆炸**.
+- **中间 n**：用 $n$ 步真实奖励 + 一步 $\gamma^n V$ 收尾,在两端之间权衡.
 
-偏差与方差的解析式很干净(设 $V$ 有系统偏差 $b$、噪声 $\sigma_v$,奖励噪声 $\sigma_r$):
+偏差与方差的解析式很干净（设 $V$ 有系统偏差 $b$、噪声 $\sigma_v$，奖励噪声 $\sigma_r$）:
 
 $$
 \text{偏差}(n)=\gamma^n\cdot b\quad\text{(自举权重随 n 指数衰减)}\qquad
 \text{方差}(n)=\sum_{l=0}^{n-1}\gamma^{2l}\sigma_r^2 + \gamma^{2n}\sigma_v^2
 $$
 
-**拖动 $n$ 看偏差↓与方差↑如何此消彼长**,以及 Critic 质量($\sigma_v$、$b$)如何整条曲线:
+**拖动 $n$ 看偏差↓与方差↑如何此消彼长**，以及 Critic 质量（$\sigma_v$、$b$）如何整条曲线：
 
 <AdvantageEstimatorViz />
 
-> 💡 这张图揭示了一个反直觉的事实:**「最优 $n$」并不存在**——偏差要 $n$ 大、方差要 $n$ 小,两者不可兼得。**GAE(广义优势估计)**[1] 的解法是不在离散 $n$ 上选边站,而是用一个 $\lambda\in[0,1]$ 把所有 $n$-step 优势做**几何加权平均**,在「单步 TD」与「蒙特卡洛」之间连续插值。下一小节展开它的定义、等价形式与为何成了现代 actor-critic 的事实标准。
+> 💡 这张图揭示了一个反直觉的事实：**「最优 $n$」并不存在**——偏差要 $n$ 大、方差要 $n$ 小，两者不可兼得。**GAE（广义优势估计）**[1] 的解法是不在离散 $n$ 上选边站，而是用一个 $\lambda\in[0,1]$ 把所有 $n$-step 优势做**几何加权平均**，在「单步 TD」与「蒙特卡洛」之间连续插值。下一小节展开它的定义、等价形式与为何成了现代 actor-critic 的事实标准。
 
-### GAE:在偏差与方差之间连续插值
+### GAE：在偏差与方差之间连续插值
 
-**广义优势估计(Generalized Advantage Estimation,GAE,Schulman et al., 2016 [1])** 的出发点是上一节的那个困境:小 $n$ 偏差大、大 $n$ 方差大,离散地选一个 $n$ 必然顾此失彼。GAE 的洞察是——**与其选一个 $n$,不如把所有 $n$-step 优势加权平均**,且权重随 $n$ 几何衰减,让短视野权重更大、长视野权重更小,用一个旋钮 $\lambda$ 连续控制衰减快慢。
+**广义优势估计（Generalized Advantage Estimation,GAE,Schulman et al., 2016 [1]）** 的出发点是上一节的那个困境：小 $n$ 偏差大、大 $n$ 方差大，离散地选一个 $n$ 必然顾此失彼。GAE 的洞察是——**与其选一个 $n$，不如把所有 $n$-step 优势加权平均**，且权重随 $n$ 几何衰减，让短视野权重更大、长视野权重更小，用一个旋钮 $\lambda$ 连续控制衰减快慢。<Cite n={1} />
 
-**定义**(以 TD 误差 $\delta_t=r_t+\gamma V(s_{t+1})-V(s_t)$ 为基本砖块):
+**定义**（以 TD 误差 $\delta_t=r_t+\gamma V(s_{t+1})-V(s_t)$ 为基本砖块）:
 
 $$
 \hat A_t^{\mathrm{GAE}(\gamma,\lambda)} \;=\; \sum_{l=0}^{\infty}(\gamma\lambda)^l\,\delta_{t+l}
 $$
 
-直觉:GAE 把未来每一步的 TD 误差 $\delta$ 按 $(\gamma\lambda)^l$ 折扣累加。$(\gamma\lambda)^l$ 随 $l$ 几何衰减,越远的 $\delta$ 贡献越小——这和 [TD(λ) 的资格迹](/tutorials/temporal-difference)是**同一个几何衰减结构**,只是 TD(λ) 用来估价值 $V$、GAE 用来估优势 $A$。可以说 **GAE 就是优势版的 TD(λ)**。
+直觉：GAE 把未来每一步的 TD 误差 $\delta$ 按 $(\gamma\lambda)^l$ 折扣累加。$(\gamma\lambda)^l$ 随 $l$ 几何衰减，越远的 $\delta$ 贡献越小——这和 [TD(λ) 的资格迹](/tutorials/temporal-difference)是**同一个几何衰减结构**，只是 TD（λ） 用来估价值 $V$、GAE 用来估优势 $A$。可以说 **GAE 就是优势版的 TD(λ)**。
 
-**等价形式:n-step 优势的凸组合**。把 GAE 重新分组,可以证明它等价于所有 $n$-step 优势 $\hat A^{(n)}_t=\sum_{l=0}^{n-1}\gamma^l\delta_{t+l}$ 的**几何加权凸组合**:
+**等价形式：n-step 优势的凸组合**。把 GAE 重新分组，可以证明它等价于所有 $n$-step 优势 $\hat A^{(n)}_t=\sum_{l=0}^{n-1}\gamma^l\delta_{t+l}$ 的**几何加权凸组合**：
 
 $$
 \hat A_t^{\mathrm{GAE}(\gamma,\lambda)} \;=\; \sum_{n=1}^{\infty}\underbrace{(1-\lambda)\lambda^{n-1}}_{\text{权重,和为 1}}\;\hat A^{(n)}_t
 $$
 
-权重 $(1-\lambda)\lambda^{n-1}$ 是一个几何分布($n=1,2,3,\ldots$),当 $\lambda<1$ 时**权重和 $=\sum_{n\ge1}(1-\lambda)\lambda^{n-1}=1$**(python3 复算:λ=0.5/0.9/0.95 权重和均 = 1.000000)。所以 GAE 是 $n$-step 优势的一个**凸组合**——它不是在选一个 $n$,而是按几何权重把所有 $n$ 混在一起,短视野权重大、长视野权重小。
+权重 $(1-\lambda)\lambda^{n-1}$ 是一个几何分布（$n=1,2,3,\ldots$），当 $\lambda<1$ 时**权重和 $=\sum_{n\ge1}(1-\lambda)\lambda^{n-1}=1$**（python3 复算：λ=0.5/0.9/0.95 权重和均 = 1.000000）。所以 GAE 是 $n$-step 优势的一个**凸组合**——它不是在选一个 $n$，而是按几何权重把所有 $n$ 混在一起，短视野权重大、长视野权重小。
 
-**两个参数的解耦**——这是 GAE 设计上最聪明的一点:
+**两个参数的解耦**——这是 GAE 设计上最聪明的一点：
 
 | 参数 | 控制什么 | 增大的效果 |
 |---|---|---|
-| $\gamma$(折扣因子) | 回报的**有效视野**——多远的奖励还算数 | 视野更长,但价值估计更难(要预测更远的未来) |
-| $\lambda$(GAE 参数) | 优势**估计器**的偏差-方差权衡——多依赖 Critic 自举 vs 多依赖真实奖励 | 偏差↓方差↑(往蒙特卡洛靠) |
+| $\gamma$（折扣因子） | 回报的**有效视野**——多远的奖励还算数 | 视野更长，但价值估计更难（要预测更远的未来） |
+| $\lambda$（GAE 参数） | 优势**估计器**的偏差-方差权衡——多依赖 Critic 自举 vs 多依赖真实奖励 | 偏差↓方差↑（往蒙特卡洛靠） |
 
-$\gamma$ 和 $\lambda$ 是**正交的两个旋钮**:$\gamma$ 决定「我们关心多远的回报」(问题定义层面),$\lambda$ 决定「我们用多准的估计器去估优势」(算法层面)。把它们解耦后,可以单独调 $\lambda$ 控方差,而不必动 $\gamma$ 改问题。
+$\gamma$ 和 $\lambda$ 是**正交的两个旋钮**：$\gamma$ 决定「我们关心多远的回报」（问题定义层面），$\lambda$ 决定「我们用多准的估计器去估优势」（算法层面）。把它们解耦后，可以单独调 $\lambda$ 控方差，而不必动 $\gamma$ 改问题。
 
-**两端插值**:
+**两端插值**：
 
-- **$\lambda=0$**:$\hat A^{\mathrm{GAE}}=\delta_t$,即 1-step TD 优势。只信一步真实奖励 + Critic 自举,**方差最小、偏差完全取决于 Critic 准不准**。
-- **$\lambda=1$**:$\hat A^{\mathrm{GAE}}=\sum_{l\ge0}\gamma^l\delta_{t+l}=\sum_{l\ge0}\gamma^l r_{t+l}-V(s_t)$,即蒙特卡洛优势(整条回报减基线)。**无偏(只要 $V$ 期望对)、方差最大**。
-- **中间 $\lambda$**:在两端之间连续插值,偏差随 $\lambda$ 下降、方差随 $\lambda$ 上升(python3 复算 6 步 toy,$\gamma=0.99$ 全 1 奖励:λ=0→A=[1,1,1,1,1,1];λ=0.5→[1.95,1.92,1.86,1.74,1.50,1.00];λ=0.95→[5.18,4.44,3.66,2.83,1.94,1.00];λ=1→[5.85,4.90,3.94,2.97,1.99,1.00]=几何级数)。
+- **$\lambda=0$**：$\hat A^{\mathrm{GAE}}=\delta_t$,即 1-step TD 优势.只信一步真实奖励 + Critic 自举,**方差最小、偏差完全取决于 Critic 准不准**.
+- **$\lambda=1$**：$\hat A^{\mathrm{GAE}}=\sum_{l\ge0}\gamma^l\delta_{t+l}=\sum_{l\ge0}\gamma^l r_{t+l}-V(s_t)$,即蒙特卡洛优势（整条回报减基线）.**无偏（只要 $V$ 期望对）、方差最大**.
+- **中间 $\lambda$**：在两端之间连续插值,偏差随 $\lambda$ 下降、方差随 $\lambda$ 上升（python3 复算 6 步 toy,$\gamma=0.99$ 全 1 奖励:λ=0→A=[1,1,1,1,1,1];λ=0.5→[1.95,1.92,1.86,1.74,1.50,1.00];λ=0.95→[5.18,4.44,3.66,2.83,1.94,1.00];λ=1→[5.85,4.90,3.94,2.97,1.99,1.00]=几何级数）.
 
-**为何 GAE 成了现代 actor-critic 的事实标准**:
+**为何 GAE 成了现代 actor-critic 的事实标准**：
 
-1. **即插即用**:GAE 只需要一个学到的 $V_\phi(s)$ 和采样到的转移 $(s,a,r,s')$,不依赖环境模型、不加额外机制——任何策略梯度算法都能把它当优势估计器直接换上。
-2. **解耦的偏差-方差控制**:$\gamma$ 与 $\lambda$ 分离,实践中 $\lambda\approx0.9\sim0.97$ 是跨大量环境都稳的默认值(上面 PPO 超参数表里取 0.97)——因为它把偏差压得足够低、把方差交给 PPO 裁剪和批量大小去扛。
-3. **实证背书**:GAE 原论文在 3D 双足/四足机器人步态学习上拿到当时最强结果(从原始运动学直映射到关节力矩,无手工特征),证明 model-free 深度 RL 能解高维连续控制。
-4. **被主流算法全盘采纳**:TRPO(原论文同期提出)→ A2C/A3C → **PPO** 全部默认用 GAE。SB3、RLlib、Spinning Up 等标准实现里 GAE 都是默认(往往是唯一)的优势估计器。尽管后续有 V-trace(IMPALA 的偏策略修正)等替代,没有一个在「理论 grounding + 简单 + 稳」上严格超过 GAE,它因此异常耐用。
+1. **即插即用**：GAE 只需要一个学到的 $V_\phi(s)$ 和采样到的转移 $(s,a,r,s')$，不依赖环境模型、不加额外机制——任何策略梯度算法都能把它当优势估计器直接换上。
+2. **解耦的偏差-方差控制**：$\gamma$ 与 $\lambda$ 分离，实践中 $\lambda\approx0.9\sim0.97$ 是跨大量环境都稳的默认值（上面 PPO 超参数表里取 0.97）——因为它把偏差压得足够低、把方差交给 PPO 裁剪和批量大小去扛。
+3. **实证背书**：GAE 原论文在 3D 双足/四足机器人步态学习上拿到当时最强结果（从原始运动学直映射到关节力矩，无手工特征），证明 model-free 深度 RL 能解高维连续控制。
+4. **被主流算法全盘采纳**：TRPO（原论文同期提出）→ A2C/A3C → **PPO** 全部默认用 GAE.SB3、RLlib、Spinning Up 等标准实现里 GAE 都是默认（往往是唯一）的优势估计器。尽管后续有 V-trace（IMPALA 的偏策略修正）等替代，没有一个在「理论 grounding + 简单 + 稳」上严格超过 GAE，它因此异常耐用。
 
-> 💡 **一句话总结**:GAE 把「选哪个 $n$」的离散难题换成「$\lambda$ 调多大」的连续旋钮——它是所有 $n$-step 优势的几何加权凸组合(权重和=1),$\lambda=0$ 退化为 1-step TD、$\lambda=1$ 退化为蒙特卡洛,中间连续插值偏差与方差。$\gamma$ 控回报视野、$\lambda$ 控估计器偏差-方差,两旋钮正交。它是 A2C/PPO/TRPO 的事实标准优势估计器,本质是**优势版的 TD(λ)**。
+> 💡 **一句话总结**：GAE 把「选哪个 $n$」的离散难题换成「$\lambda$ 调多大」的连续旋钮——它是所有 $n$-step 优势的几何加权凸组合（权重和=1），$\lambda=0$ 退化为 1-step TD、$\lambda=1$ 退化为蒙特卡洛，中间连续插值偏差与方差。$\gamma$ 控回报视野、$\lambda$ 控估计器偏差-方差，两旋钮正交。它是 A2C/PPO/TRPO 的事实标准优势估计器，本质是**优势版的 TD(λ)**。
 
-GAE 原论文用学习曲线直接展示了 $\lambda$ 的作用——cart-pole 任务上,$\gamma=0.99$ 固定、$\lambda$ 从 0 扫到 1:左图单次运行,$\lambda=0.92$ 收敛最快、$\lambda=0$ 与 $\lambda=1$(两个极端)都明显更慢;右图网格扫 $(\gamma,\lambda)$,同样的「中间 $\lambda$ 最快」模式在多个 $\gamma$ 下重现:
+GAE 原论文用学习曲线直接展示了 $\lambda$ 的作用——cart-pole 任务上，$\gamma=0.99$ 固定、$\lambda$ 从 0 扫到 1：左图单次运行，$\lambda=0.92$ 收敛最快、$\lambda=0$ 与 $\lambda=1$（两个极端）都明显更慢；右图网格扫 $(\gamma,\lambda)$，同样的「中间 $\lambda$ 最快」模式在多个 $\gamma$ 下重现：<Cite n={1} />
 
 <figure className="my-6 grid gap-4 sm:grid-cols-2">
-  <img src="./gae-cartpole.svg" alt="GAE 论文 Figure 2 左图:cart-pole 任务学习曲线,固定 γ=0.99 改变 λ,λ=0.92 收敛最快,λ=0 和 λ=1 都更慢,展示偏差-方差权衡的最优中间点" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
-  <img src="./gae-cartpole-grid.png" alt="GAE 论文 Figure 2 右图:γ 与 λ 组合的网格扫描学习曲线,多个 γ 下都是中间 λ 收敛最快,验证偏差-方差权衡的普遍性" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./gae-cartpole.svg" alt="GAE 论文 Figure 2 左图：cart-pole 任务学习曲线，固定 γ=0.99 改变 λ，λ=0.92 收敛最快，λ=0 和 λ=1 都更慢，展示偏差-方差权衡的最优中间点" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
+  <img src="./gae-cartpole-grid.png" alt="GAE 论文 Figure 2 右图：γ 与 λ 组合的网格扫描学习曲线，多个 γ 下都是中间 λ 收敛最快，验证偏差-方差权衡的普遍性" className="mx-auto h-auto max-w-full rounded-lg border border-zinc-200 shadow-sm dark:border-zinc-800" />
   <figcaption className="sm:col-span-2 mt-1 text-center text-xs text-zinc-500 dark:text-zinc-400">
-    图源:Schulman et al., <em>High-Dimensional Continuous Control Using Generalized Advantage Estimation</em>(arXiv:1506.02438)Figure 2(左、右)
+    <span className="figure-caption-main">GAE 论文 Figure 2 右图：γ 与 λ 组合的网格扫描学习曲线，多个 γ 下都是中间 λ 收敛最快，验证偏差-方差权衡的普遍性</span>
+    <span className="figure-caption-source">图源：Schulman et al., <em>High-Dimensional Continuous Control Using Generalized Advantage Estimation</em>(arXiv:1506.02438)Figure 2（左、右）</span>
   </figcaption>
 </figure>
 
-### GAE 的形式化偏差界:Critic 误差如何传导给优势
+### GAE 的形式化偏差界：Critic 误差如何传导给优势
 
-上面讲了 $\lambda$ 调偏差-方差的**直觉**,但「偏差」到底从哪来、能有多大?GAE 原论文 [1] 给了一个干净的形式化界。设 Critic $V_\phi$ 对真值 $v_\pi$ 的近似误差有上界 $\epsilon=\max_s|V_\phi(s)-v_\pi(s)|$,则用 $V_\phi$ 算的 GAE 优势 $\hat A^{GAE}_t$ 偏离「用真值算的 GAE 优势」$\hat A^{GAE,\pi}_t$ 不超过:
+上面讲了 $\lambda$ 调偏差-方差的**直觉**，但「偏差」到底从哪来、能有多大？GAE 原论文 [1] 给了一个干净的形式化界。设 Critic $V_\phi$ 对真值 $v_\pi$ 的近似误差有上界 $\epsilon=\max_s|V_\phi(s)-v_\pi(s)|$，则用 $V_\phi$ 算的 GAE 优势 $\hat A^{GAE}_t$ 偏离「用真值算的 GAE 优势」$\hat A^{GAE,\pi}_t$ 不超过：
 
 $$
 \big|\hat A^{GAE}_t - \hat A^{GAE,\pi}_t\big| \;\le\; \frac{2\,\epsilon}{1-\gamma\lambda}\qquad(\lambda<1)
 $$
 
-**推导** [1]:记偏差 $b(s)=V_\phi(s)-v_\pi(s)$(故 $|b(s)|\le\epsilon$)。用 $V_\phi$ 算的 TD 误差 $\delta_t^\phi=r_t+\gamma V_\phi(s_{t+1})-V_\phi(s_t)$ 与用真值的 $\delta_t^\pi=r_t+\gamma v_\pi(s_{t+1})-v_\pi(s_t)$ 之差为 $\gamma b(s_{t+1})-b(s_t)$(奖励与转移抵消,只剩 $b$ 的差)。GAE 优势是 $\delta$ 的几何加权和 $\sum_l(\gamma\lambda)^l\delta_{t+l}$,故偏差 $=\sum_l(\gamma\lambda)^l[\gamma b(s_{t+l+1})-b(s_{t+l})]$,每项绝对值 $\le\gamma\epsilon+\epsilon=\epsilon(1+\gamma)$,求和得 $\epsilon(1+\gamma)/(1-\gamma\lambda)\le 2\epsilon/(1-\gamma\lambda)$(因 $\gamma\le1$)。$\lambda=1$ 时分母 $1-\gamma\to0$,界发散——这正是「λ=1 退化为 MC、Critic 误差通过长 rollout 被放大」的极端。
+**推导** [1]：记偏差 $b(s)=V_\phi(s)-v_\pi(s)$（故 $|b(s)|\le\epsilon$）。用 $V_\phi$ 算的 TD 误差 $\delta_t^\phi=r_t+\gamma V_\phi(s_{t+1})-V_\phi(s_t)$ 与用真值的 $\delta_t^\pi=r_t+\gamma v_\pi(s_{t+1})-v_\pi(s_t)$ 之差为 $\gamma b(s_{t+1})-b(s_t)$（奖励与转移抵消，只剩 $b$ 的差）。GAE 优势是 $\delta$ 的几何加权和 $\sum_l(\gamma\lambda)^l\delta_{t+l}$，故偏差 $=\sum_l(\gamma\lambda)^l[\gamma b(s_{t+l+1})-b(s_{t+l})]$，每项绝对值 $\le\gamma\epsilon+\epsilon=\epsilon(1+\gamma)$，求和得 $\epsilon(1+\gamma)/(1-\gamma\lambda)\le 2\epsilon/(1-\gamma\lambda)$（因 $\gamma\le1$）。$\lambda=1$ 时分母 $1-\gamma\to0$，界发散——这正是「λ=1 退化为 MC、Critic 误差通过长 rollout 被放大」的极端。
 
-这个界揭示了三件事:
+这个界揭示了三件事：
 
-1. **偏差的根源是 Critic 误差 $\epsilon$**:GAE 自身不引入偏差,它只是把 $V_\phi$ 的误差**传导**给优势估计。Critic 学得越准($\epsilon$ 越小),GAE 优势越准——这就是 actor-critic 里 Critic 必须**单独训练到收敛**(回归 $V$ 的 MSE 损失 $\|V_\phi(s)-\hat R\|^2$)的根本原因。
-2. **$\lambda$ 放大偏差界**:$\lambda\uparrow \Rightarrow 1/(1-\gamma\lambda)\uparrow$,Critic 误差被累加更多次、偏差界更大。这与「$\lambda\uparrow$ 方差↓」是同一枚硬币的两面——$\lambda$ 大靠真实奖励(降方差)但累加更多 Critic 自举(放大偏差),$\lambda$ 小靠 Critic(降偏差)但单步噪声大(方差小)。**$\lambda$ 调的就是 Critic 误差与奖励噪声之间的权衡**,而非单纯的「偏差-方差」。
-3. **常数偏移几乎不传偏差**:若 $V_\phi$ 的误差是常数 $b(s)\equiv\epsilon$(各状态相同),则 $\gamma b-b=(\gamma-1)\epsilon$,累加得 $\epsilon(\gamma-1)/(1-\gamma\lambda)\ll 2\epsilon/(1-\gamma\lambda)$——常数 baseline 平移在 $\delta$ 里几乎抵消,不污染优势。**只有非常数误差**(不同状态 $V_\phi$ 误差不同)才逼近界。这也解释了为何减均值、归一化优势等**不改变最优策略的变换**对 GAE 安全。
+1. **偏差的根源是 Critic 误差 $\epsilon$**：GAE 自身不引入偏差，它只是把 $V_\phi$ 的误差**传导**给优势估计。Critic 学得越准（$\epsilon$ 越小），GAE 优势越准——这就是 actor-critic 里 Critic 必须**单独训练到收敛**（回归 $V$ 的 MSE 损失 $\|V_\phi(s)-\hat R\|^2$）的根本原因。
+2. **$\lambda$ 放大偏差界**：$\lambda\uparrow \Rightarrow 1/(1-\gamma\lambda)\uparrow$，Critic 误差被累加更多次、偏差界更大。这与「$\lambda\uparrow$ 方差↓」是同一枚硬币的两面——$\lambda$ 大靠真实奖励（降方差）但累加更多 Critic 自举（放大偏差），$\lambda$ 小靠 Critic（降偏差）但单步噪声大（方差小）。**$\lambda$ 调的就是 Critic 误差与奖励噪声之间的权衡**，而非单纯的「偏差-方差」。
+3. **常数偏移几乎不传偏差**：若 $V_\phi$ 的误差是常数 $b(s)\equiv\epsilon$（各状态相同），则 $\gamma b-b=(\gamma-1)\epsilon$，累加得 $\epsilon(\gamma-1)/(1-\gamma\lambda)\ll 2\epsilon/(1-\gamma\lambda)$——常数 baseline 平移在 $\delta$ 里几乎抵消，不污染优势。**只有非常数误差**（不同状态 $V_\phi$ 误差不同）才逼近界。这也解释了为何减均值、归一化优势等**不改变最优策略的变换**对 GAE 安全。
 
-下面用玩具把界与实际偏差跑出来:
+下面用玩具把界与实际偏差跑出来：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -491,44 +492,44 @@ print(f"  -> 若 Critic 误差 eps=0.1, 偏差界 = {0.1*coef:.2f}; eps=0.01 -> 
 print(f"  -> 这就是为何 PPO 默认 lam=0.95: 界可控 (~34*eps), 靠 Critic 学准 + 裁剪扛方差")
 `} />
 
-**段 1** 证实非常数误差下实际偏差 $\le$ 界 $2\epsilon/(1-\gamma\lambda)$(所有 λ 「紧否=是」),$\lambda\uparrow$ 界 $\uparrow$(0.6→6.0)——Critic 误差被累加更多次。**段 2** 证实常数偏移下偏差远小于界(λ=0.99 时 0.08 vs 界 5.5):$\delta$ 里 $\gamma b-b=(\gamma-1)\epsilon$ 大部分抵消,只有非常数误差才逼紧界——这正是「减均值、归一化优势」对 GAE 安全的数学根据。**段 3** 给实践量级:$\gamma=0.99,\lambda=0.95$(PPO 默认)下界 $\approx 34\epsilon$,若 Critic 学到 $\epsilon=0.01$ 则偏差界仅 0.34——可控。这就是为何 PPO 敢用 $\lambda=0.95$:**Critic 学准**($\epsilon$ 小)+ **裁剪扛方差**,两端合力让 GAE 既准又稳。
+**段 1** 证实非常数误差下实际偏差 $\le$ 界 $2\epsilon/(1-\gamma\lambda)$（所有 λ 「紧否=是」），$\lambda\uparrow$ 界 $\uparrow$（0.6→6.0）——Critic 误差被累加更多次。**段 2** 证实常数偏移下偏差远小于界（λ=0.99 时 0.08 vs 界 5.5）：$\delta$ 里 $\gamma b-b=(\gamma-1)\epsilon$ 大部分抵消，只有非常数误差才逼紧界——这正是「减均值、归一化优势」对 GAE 安全的数学根据。**段 3** 给实践量级：$\gamma=0.99,\lambda=0.95$（PPO 默认）下界 $\approx 34\epsilon$，若 Critic 学到 $\epsilon=0.01$ 则偏差界仅 0.34——可控。这就是为何 PPO 敢用 $\lambda=0.95$：**Critic 学准**（$\epsilon$ 小）+ **裁剪扛方差**，两端合力让 GAE 既准又稳。
 
-> 💡 **与 TD(λ) 收敛的关系**:[时序差分篇](/tutorials/temporal-difference#tdλ-预测的收敛性λ-改变什么不改变什么)证明了 TD(λ) 在 on-policy + Robbins-Monro 下收敛到 $v_\pi$($\lambda$ 不改终点)。GAE 是「优势版 TD(λ)」,但它的收敛性更微妙:Actor 的策略梯度在有偏优势 $\hat A^{GAE}$ 下**不**保证收敛到真策略梯度,而是收敛到「用 $V_\phi$ 估的优势」对应的梯度——**偏差完全由 $\epsilon$ 决定**。所以 GAE 的理论保证不是「收敛到真梯度」,而是「偏差有界 $\le 2\epsilon/(1-\gamma\lambda)$」——只要 Critic 够准,偏差就可控。这与 TD(λ) 的「收敛到真值」形成对照:预测问题里 $V_\phi$ 是被估量本身(自洽),控制问题里 $V_\phi$ 是辅助估计器(它的误差传给策略梯度)。
+> 💡 **与 TD（λ） 收敛的关系**：[时序差分篇](/tutorials/temporal-difference#tdλ-预测的收敛性λ-改变什么不改变什么)证明了 TD（λ） 在 on-policy + Robbins-Monro 下收敛到 $v_\pi$（$\lambda$ 不改终点）。GAE 是「优势版 TD(λ)」，但它的收敛性更微妙：Actor 的策略梯度在有偏优势 $\hat A^{GAE}$ 下**不**保证收敛到真策略梯度，而是收敛到「用 $V_\phi$ 估的优势」对应的梯度——**偏差完全由 $\epsilon$ 决定**。所以 GAE 的理论保证不是「收敛到真梯度」，而是「偏差有界 $\le 2\epsilon/(1-\gamma\lambda)$」——只要 Critic 够准，偏差就可控。这与 TD（λ） 的「收敛到真值」形成对照：预测问题里 $V_\phi$ 是被估量本身（自洽），控制问题里 $V_\phi$ 是辅助估计器（它的误差传给策略梯度）。
 
-### A2C 与 A3C:同步批量 vs 异步多线程
+### A2C 与 A3C：同步批量 vs 异步多线程
 
-Actor-Critic 的「批量更新」有两个主流工程实现,差别只在**怎么采集数据**:
+Actor-Critic 的「批量更新」有两个主流工程实现，差别只在**怎么采集数据**：<Cite n={[3,8]} />
 
-| | **A2C**(Advantage Actor-Critic,同步) | **A3C**(Asynchronous Advantage Actor-Critic,Mnih et al., 2016 [3]) |
+| | **A2C**（Advantage Actor-Critic，同步） | **A3C**(Asynchronous Advantage Actor-Critic,Mnih et al., 2016 [3]) |
 |---|---|---|
-| 采集 | 多个 actor **同步**各跑一段轨迹,凑齐一个 batch 再更新 | 多个 worker **异步**各自跑,谁ready谁就去更新共享参数 |
-| 参数 | 各 actor 参数一致(同一份 $\theta$) | 各 worker 参数可能落后于全局 $\theta$(异步读到旧值) |
-| GPU 利用 | 批量更新,**GPU 友好**(可大批量并行) | 频繁零碎更新,GPU 利用差 |
-| 去相关 | 同步采集的轨迹间相关性需靠多 actor 缓解 | **异步天然去相关**(各 worker 独立探索,梯度更新时序错开) |
-| 现状 | 主流(PPO 的采集基本是 A2C 式同步批量) | 经典开创性工作,但已被同步版取代 |
+| 采集 | 多个 actor **同步**各跑一段轨迹，凑齐一个 batch 再更新 | 多个 worker **异步**各自跑，谁ready谁就去更新共享参数 |
+| 参数 | 各 actor 参数一致（同一份 $\theta$） | 各 worker 参数可能落后于全局 $\theta$（异步读到旧值） |
+| GPU 利用 | 批量更新，**GPU 友好**（可大批量并行） | 频繁零碎更新，GPU 利用差 |
+| 去相关 | 同步采集的轨迹间相关性需靠多 actor 缓解 | **异步天然去相关**（各 worker 独立探索，梯度更新时序错开） |
+| 现状 | 主流（PPO 的采集基本是 A2C 式同步批量） | 经典开创性工作，但已被同步版取代 |
 
-#### 为什么需要并行采集:去相关替代经验回放
+#### 为什么需要并行采集：去相关替代经验回放
 
-[DQN](/tutorials/dqn) 靠**经验回放池**稳定训练:把转移存起来、打乱重采样,打破相邻样本的时间相关性。但 actor-critic 是 **on-policy** 的——策略 $\pi_\theta$ 每步都在变,旧策略采的转移对当前策略是「过时的」(importance ratio $\pi_\theta/\pi_{\theta_{\text{old}}}$ 偏离 1),不能像 DQN 那样反复回放老数据。那 on-policy 方法怎么解决样本相关性?
+[DQN](/tutorials/dqn) 靠**经验回放池**稳定训练：把转移存起来、打乱重采样，打破相邻样本的时间相关性。但 actor-critic 是 **on-policy** 的——策略 $\pi_\theta$ 每步都在变，旧策略采的转移对当前策略是「过时的」（importance ratio $\pi_\theta/\pi_{\theta_{\text{old}}}$ 偏离 1），不能像 DQN 那样反复回放老数据。那 on-policy 方法怎么解决样本相关性？
 
-A3C 的答案 [3] 是**用并行 worker 替代经验回放**:开 $K$ 个 worker,各自跑一份独立的环境副本、带不同的探索种子,它们的轨迹互不影响、**天然去相关**。同一个 batch 里的样本来自 $K$ 条独立轨迹而不是一条轨迹的相邻时刻——这起到了和 replay buffer 一样的去相关作用,但完全 on-policy(采完就用、用完就丢,不存旧数据)。论文里把这叫「parallel actor-learners have a stabilizing effect on training」[3],本质就是并行去相关。
+A3C 的答案 [3] 是**用并行 worker 替代经验回放**：开 $K$ 个 worker，各自跑一份独立的环境副本、带不同的探索种子，它们的轨迹互不影响、**天然去相关**。同一个 batch 里的样本来自 $K$ 条独立轨迹而不是一条轨迹的相邻时刻——这起到了和 replay buffer 一样的去相关作用，但完全 on-policy（采完就用、用完就丢，不存旧数据）。论文里把这叫「parallel actor-learners have a stabilizing effect on training」[3]，本质就是并行去相关。<Cite n={3} />
 
-> 💡 **为何 on-policy 不能用 replay**:replay 回放的是 $\pi_{\theta_{\text{old}}}$ 采的转移,但 actor-critic 的梯度 $\nabla\log\pi_\theta(a|s)\hat A$ 里 $\log\pi_\theta$ 是**当前**策略的对数概率——用旧数据算它需要重要性采样修正 $\frac{\pi_\theta}{\pi_{\theta_{\text{old}}}}$,且 ratio 会随训练发散。PPO 的裁剪就是为约束这个 ratio 才存在的(见上节)。A3C/A2C 用并行采集直接采当前策略的新数据,绕开了这整个问题。
+> 💡 **为何 on-policy 不能用 replay**：replay 回放的是 $\pi_{\theta_{\text{old}}}$ 采的转移，但 actor-critic 的梯度 $\nabla\log\pi_\theta(a|s)\hat A$ 里 $\log\pi_\theta$ 是**当前**策略的对数概率——用旧数据算它需要重要性采样修正 $\frac{\pi_\theta}{\pi_{\theta_{\text{old}}}}$，且 ratio 会随训练发散。PPO 的裁剪就是为约束这个 ratio 才存在的（见上节）。A3C/A2C 用并行采集直接采当前策略的新数据，绕开了这整个问题。
 
-#### A3C 异步架构:Hogwild! 式无锁更新
+#### A3C 异步架构：Hogwild！ 式无锁更新
 
-A3C 的工程结构(Mnih et al. 2016 [3],Lilian Weng 的讲法 [8] 给了清晰梳理):
+A3C 的工程结构（Mnih et al. 2016 [3]，Lilian Weng 的讲法 [8] 给了清晰梳理）：
 
-- **全局共享参数**:策略网络 $\theta$、价值网络 $w$,放在共享内存里,所有 worker 共用一份。
-- **线程本地副本**:每个 worker 有本地副本 $\theta', w'$。每轮开始时从全局同步 $\theta'\leftarrow\theta,\ w'\leftarrow w$。
-- **本地 rollout**:worker 用 $\theta'$ 在自己的环境副本里跑最多 $t_{\max}$ 步(或到终止),沿途收集 $(s_t,a_t,r_t)$。
-- **n-step return 后向累加**:从轨迹末端往前累加回报 $R\leftarrow \gamma R + r_t$,起点用 $V_w(s_{t_{\text{end}}})$ 做 bootstrap(非终止)或 0(终止)。这等价于 n-step return 目标:
+- **全局共享参数**：策略网络 $\theta$、价值网络 $w$,放在共享内存里,所有 worker 共用一份.
+- **线程本地副本**：每个 worker 有本地副本 $\theta', w'$.每轮开始时从全局同步 $\theta'\leftarrow\theta,\ w'\leftarrow w$.
+- **本地 rollout**：worker 用 $\theta'$ 在自己的环境副本里跑最多 $t_{\max}$ 步（或到终止）,沿途收集 $(s_t,a_t,r_t)$.
+- **n-step return 后向累加**：从轨迹末端往前累加回报 $R\leftarrow \gamma R + r_t$,起点用 $V_w(s_{t_{\text{end}}})$ 做 bootstrap（非终止）或 0（终止）.这等价于 n-step return 目标:
 
 $$
 \hat Q(s_t,a_t) \;=\; \sum_{i=0}^{n-1}\gamma^i r_{t+i} \;+\; \gamma^n V_w(s_{t+n})
 $$
 
-- **本地算梯度并异步写回**:policy 梯度 $d\theta \leftarrow d\theta + \nabla_{\theta'}\log\pi_{\theta'}(a_t|s_t)\,(R - V_{w'}(s_t))$,value 梯度 $dw \leftarrow dw + \nabla_{w'}(R - V_{w'}(s_t))^2$,累加完一步**直接异步写回全局 $\theta, w$**——**不加锁**(Hogwild! 式 [8]),写回期间别的 worker 可能正在读或写。这就是 A3C 名字里 **Asynchronous** 的来源。
+- **本地算梯度并异步写回**：policy 梯度 $d\theta \leftarrow d\theta + \nabla_{\theta'}\log\pi_{\theta'}(a_t|s_t)\,(R - V_{w'}(s_t))$,value 梯度 $dw \leftarrow dw + \nabla_{w'}(R - V_{w'}(s_t))^2$,累加完一步**直接异步写回全局 $\theta, w$**——**不加锁**（Hogwild! 式 [8]）,写回期间别的 worker 可能正在读或写.这就是 A3C 名字里 **Asynchronous** 的来源.
 
 ```
 # A3C 单个 worker 伪代码(Mnih et al. 2016 [3])
@@ -545,28 +546,28 @@ for i = t, t-1, ..., start:              # 后向累加 n-step return
 async_update(global θ, w, dθ, dw)        # 无锁异步写回
 ```
 
-#### entropy 正则化:别让策略太早收敛
+#### entropy 正则化：别让策略太早收敛
 
-A3C 在策略损失里还加了一项 **entropy bonus** $+\beta\,H(\pi_\theta(\cdot|s))$(熵 $H=-\sum_a \pi\log\pi$,均匀分布时最大)。直觉:策略越确定(概率越集中在一个动作上),熵越低。加 $+\beta H$ 是**鼓励策略保持一定随机性**,抵消梯度上升把概率往当前最优动作堆积的倾向——否则策略一旦坍缩到某个动作就不再探索,容易卡在局部最优。$\beta\approx0.01$ 是常见值。这个 trick 不止 A3C 用,PPO 的组合目标 $L^{\text{CLIP}+S+V}$ 里的 $S$ 项 [5]、SAC 的最大熵目标、IMPALA 的 entropy bonus 都是同一个东西。
+A3C 在策略损失里还加了一项 **entropy bonus** $+\beta\,H(\pi_\theta(\cdot|s))$（熵 $H=-\sum_a \pi\log\pi$，均匀分布时最大）。直觉：策略越确定（概率越集中在一个动作上），熵越低。加 $+\beta H$ 是**鼓励策略保持一定随机性**，抵消梯度上升把概率往当前最优动作堆积的倾向——否则策略一旦坍缩到某个动作就不再探索，容易卡在局部最优。$\beta\approx0.01$ 是常见值。这个 trick 不止 A3C 用，PPO 的组合目标 $L^{\text{CLIP}+S+V}$ 里的 $S$ 项 [5]、SAC 的最大熵目标、IMPALA 的 entropy bonus 都是同一个东西。
 
-#### A2C:同步版的工程简化
+#### A2C：同步版的工程简化
 
-A2C(Advantage Actor-Critic)是 A3C 的**同步版** [8]:一个 coordinator 等所有 $K$ 个并行 actor 都跑完各自 rollout,把数据凑成一个 batch,**一次性**更新全局参数,然后所有 actor 从同一份新 $\theta$ 出发开始下一轮。
+A2C（Advantage Actor-Critic）是 A3C 的**同步版** [8]：一个 coordinator 等所有 $K$ 个并行 actor 都跑完各自 rollout，把数据凑成一个 batch，**一次性**更新全局参数，然后所有 actor 从同一份新 $\theta$ 出发开始下一轮。
 
-代价是吞吐——要等最慢的 actor。但收益是:**staleness = 0**(所有样本都是当前策略采的,梯度基于当前参数算),而且批量更新对 GPU 友好(大批量矩阵运算比 A3C 的频繁零碎更新高效得多)。实践发现 **同步批量(A2C)+ 大批量 + GAE + PPO 裁剪**这套组合更稳更快,A3C 逐渐退场 [3][8]。**今天说「actor-critic」,默认就是 A2C 式的同步批量 + Critic 回归 $V$ + GAE 优势。**
+代价是吞吐——要等最慢的 actor。但收益是：**staleness = 0**（所有样本都是当前策略采的，梯度基于当前参数算），而且批量更新对 GPU 友好（大批量矩阵运算比 A3C 的频繁零碎更新高效得多）。实践发现 **同步批量（A2C）+ 大批量 + GAE + PPO 裁剪**这套组合更稳更快，A3C 逐渐退场 [3][8]。**今天说「actor-critic」，默认就是 A2C 式的同步批量 + Critic 回归 $V$ + GAE 优势。**
 
-#### 同步 vs 异步:一张表看懂取舍
+#### 同步 vs 异步：一张表看懂取舍
 
-| 维度 | **A3C**(异步) | **A2C**(同步) |
+| 维度 | **A3C**（异步） | **A2C**（同步） |
 |---|---|---|
-| 参数 staleness | 有(读到旧 $\theta$,写回时已被别人改) | **无**(同一份 $\theta$) |
-| GPU 利用 | 差(频繁零碎更新) | **好**(大批量并行) |
-| 吞吐 | 高(谁 ready 谁更新,不等) | 受最慢 actor 拖累 |
-| 实现复杂度 | 高(无锁共享内存、线程同步) | 低(coordinator + batch) |
-| 数据同质性 | 各 worker 轨迹时序错开,天然去相关 | 同一时刻采集,batch 内跨 worker 独立 |
-| 现代地位 | 经典开创工作 [3],已退场 | 主流(PPO 采集基本是 A2C 式) |
+| 参数 staleness | 有（读到旧 $\theta$，写回时已被别人改） | **无**（同一份 $\theta$） |
+| GPU 利用 | 差（频繁零碎更新） | **好**（大批量并行） |
+| 吞吐 | 高（谁 ready 谁更新，不等） | 受最慢 actor 拖累 |
+| 实现复杂度 | 高（无锁共享内存、线程同步） | 低（coordinator + batch） |
+| 数据同质性 | 各 worker 轨迹时序错开，天然去相关 | 同一时刻采集，batch 内跨 worker 独立 |
+| 现代地位 | 经典开创工作 [3]，已退场 | 主流（PPO 采集基本是 A2C 式） |
 
-下面这个 CodeRunner 把「并行去相关」「staleness」「entropy 正则」三件事用最小玩具演示一遍——脱离真实训练循环,直接看机理:
+下面这个 CodeRunner 把「并行去相关」「staleness」「entropy 正则」三件事用最小玩具演示一遍——脱离真实训练循环，直接看机理：
 
 <CodeRunner defaultCode={`import numpy as np
 
@@ -623,75 +624,75 @@ print("  => A3C 损失里加 +beta*H(pi)(beta~0.01),把 entropy 顶住不让它�
 print("     否则策略一旦确定就不再探索,陷入局部最优。PPO/SAC/IMPALA 都沿用此 trick。")
 `} />
 
-> 💡 **A3C 为什么不需要 target network**:DQN 用一个延迟更新的 target network 来稳定 Q 目标,但 A3C 的并行去相关 + 异步平均本身已经提供了稳定性(各 worker 的梯度噪声互相抵消、n-step return 缩短了 bootstrap 链),不再需要 target network 这层补丁 [3]。这是「并行去相关」红利的另一个体现——同一个机理(并行 worker)同时解决了样本相关性和训练不稳定两个问题。
+> 💡 **A3C 为什么不需要 target network**：DQN 用一个延迟更新的 target network 来稳定 Q 目标，但 A3C 的并行去相关 + 异步平均本身已经提供了稳定性（各 worker 的梯度噪声互相抵消、n-step return 缩短了 bootstrap 链），不再需要 target network 这层补丁 [3]。这是「并行去相关」红利的另一个体现——同一个机理（并行 worker）同时解决了样本相关性和训练不稳定两个问题。
 
-A3C 的核心创新是「**多个异步 worker 写同一份共享参数**」——不需要经验回放池(不像 DQN),靠 worker 之间的时间错位就实现了样本去相关,这让它在 2016 年能稳定训练纯策略方法 [3]。但异步更新有读写竞争、梯度可能是过时的(staleness,见上 CodeRunner 第 2 段),工程上不如同步批量干净;后来实践发现**同步批量(A2C)+ 大批量 + GAE + PPO 裁剪**这套组合更稳更快,A3C 逐渐退场 [8]。**今天说「actor-critic」,默认就是 A2C 式的同步批量 + Critic 回归 V + GAE 优势。**
+A3C 的核心创新是「**多个异步 worker 写同一份共享参数**」——不需要经验回放池（不像 DQN），靠 worker 之间的时间错位就实现了样本去相关，这让它在 2016 年能稳定训练纯策略方法 [3]。但异步更新有读写竞争、梯度可能是过时的（staleness，见上 CodeRunner 第 2 段），工程上不如同步批量干净；后来实践发现**同步批量（A2C）+ 大批量 + GAE + PPO 裁剪**这套组合更稳更快，A3C 逐渐退场 [8]。**今天说「actor-critic」，默认就是 A2C 式的同步批量 + Critic 回归 V + GAE 优势。**
 
 | 方法 | 权重用什么 | 方差 | 需要 Critic? |
 |---|---|---|---|
 | REINFORCE | 整条回报 $G_t$ | 高 | 否 |
-| REINFORCE + 基线 | $G_t - b$ | 中 | 否(b 常取均值) |
-| Actor-Critic(TD(0)) | 一步优势 $\delta_t$ | 低 | 是($V_\psi$) |
-| Actor-Critic(GAE) | $\sum(\gamma\lambda)^l\delta_{t+l}$ | 可调 | 是($V_\psi$) |
+| REINFORCE + 基线 | $G_t - b$ | 中 | 否（b 常取均值） |
+| Actor-Critic(TD(0)) | 一步优势 $\delta_t$ | 低 | 是（$V_\psi$） |
+| Actor-Critic(GAE) | $\sum(\gamma\lambda)^l\delta_{t+l}$ | 可调 | 是（$V_\psi$） |
 
-## IMPALA 与 V-trace:大规模分布式的偏策略修正
+## IMPALA 与 V-trace：大规模分布式的偏策略修正
 
-A2C 的同步批量有个天花板:**coordinator 要等所有 actor 跑完 rollout 才能更新**。actor 越多、环境越慢,「等最慢的 worker」的浪费越严重;而且所有 actor 必须在「同一份 $\theta$」上采集,意味着 actor 数量受 learner 单次更新能消化的 batch 大小限制——你想扩到几百个 actor 跨机器并行采集,A2C 的同步屏障就成了瓶颈。IMPALA(Importance-Weighted Actor-Learner Architectures,Espeholt et al. 2018 [19])就是为打破这个瓶颈设计的,它也是 DeepMind 那一批大规模分布式 RL 框架(后续的 Seed RL、Agent57 都沿用此架构)的工程奠基。
+A2C 的同步批量有个天花板：**coordinator 要等所有 actor 跑完 rollout 才能更新**。actor 越多、环境越慢，「等最慢的 worker」的浪费越严重；而且所有 actor 必须在「同一份 $\theta$」上采集，意味着 actor 数量受 learner 单次更新能消化的 batch 大小限制——你想扩到几百个 actor 跨机器并行采集，A2C 的同步屏障就成了瓶颈。IMPALA（Importance-Weighted Actor-Learner Architectures,Espeholt et al. 2018 [19]）就是为打破这个瓶颈设计的，它也是 DeepMind 那一批大规模分布式 RL 框架（后续的 Seed RL、Agent57 都沿用此架构）的工程奠基。<Cite n={19} />
 
-### actor-learner 解耦:采集与学习彻底分离
+### actor-learner 解耦：采集与学习彻底分离
 
 IMPALA 的核心架构改动是把 A3C 的「线程既是 actor 又是 learner」拆成两个角色 [19]:
 
-- **Actor**(只采集):一份环境 + 一份策略网络副本 $\theta_{\text{old}}$,只管 rollout 产生轨迹 $(s_t, a_t, r_t)$,把轨迹塞进一个队列。**Actor 不算梯度、不更新参数**。
-- **Learner**(只学习):从队列取轨迹,用 V-trace 算 off-policy 价值目标 + 策略梯度,更新唯一的「主 $\theta$」,再定期把新 $\theta$ 推回所有 actor。
+- **Actor**（只采集）：一份环境 + 一份策略网络副本 $\theta_{\text{old}}$，只管 rollout 产生轨迹 $(s_t, a_t, r_t)$，把轨迹塞进一个队列。**Actor 不算梯度、不更新参数**.
+- **Learner**（只学习）：从队列取轨迹，用 V-trace 算 off-policy 价值目标 + 策略梯度，更新唯一的「主 $\theta$」，再定期把新 $\theta$ 推回所有 actor.
 
-这个拆分带来一个根本性的变化:**actor 用的 $\theta_{\text{old}}$ 必然落后于 learner 当前的 $\theta$**。因为 actor 在 rollout 的几十步里(可能跨几秒),learner 已经从别的 actor 队列里取了好几批轨迹更新了好几次。于是一条轨迹里:**行为策略 $\mu=\pi_{\theta_{\text{old}}}$(旧参数采的),目标策略 $\pi=\pi_{\theta}$(新参数)**——这天然就是 off-policy。
+这个拆分带来一个根本性的变化：**actor 用的 $\theta_{\text{old}}$ 必然落后于 learner 当前的 $\theta$**。因为 actor 在 rollout 的几十步里（可能跨几秒），learner 已经从别的 actor 队列里取了好几批轨迹更新了好几次。于是一条轨迹里：**行为策略 $\mu=\pi_{\theta_{\text{old}}}$（旧参数采的），目标策略 $\pi=\pi_{\theta}$（新参数）**——这天然就是 off-policy。
 
-这正好和 A3C 形成对照。A3C 也是多 worker,但每个线程**自己 rollout 自己更新同一份共享 $\theta$**(Hogwild! 式无锁写回),staleness 来自「我读 $\theta$ 时别人在写」的读写竞争。IMPALA 把「采集」和「学习」彻底解耦:actor 不碰 $\theta$,staleness 来自「actor 用的 $\theta$ 版本落后于 learner」——而且这个落后是**结构性的、可量化的**(actor 的 $\theta$ 比 learner 落后 $V$ 个版本),不再像 A3C 那样是无锁竞争带来的随机读写错位。既然 staleness 不可避免,IMPALA 的思路就是**接受 staleness,但用一个正确的 off-policy 修正来抵消它**——这就是 V-trace。
+这正好和 A3C 形成对照。A3C 也是多 worker，但每个线程**自己 rollout 自己更新同一份共享 $\theta$**（Hogwild！ 式无锁写回），staleness 来自「我读 $\theta$ 时别人在写」的读写竞争。IMPALA 把「采集」和「学习」彻底解耦：actor 不碰 $\theta$，staleness 来自「actor 用的 $\theta$ 版本落后于 learner」——而且这个落后是**结构性的、可量化的**（actor 的 $\theta$ 比 learner 落后 $V$ 个版本），不再像 A3C 那样是无锁竞争带来的随机读写错位。既然 staleness 不可避免，IMPALA 的思路就是**接受 staleness，但用一个正确的 off-policy 修正来抵消它**——这就是 V-trace。
 
-### V-trace 目标:截断式 n-step 偏策略价值估计
+### V-trace 目标：截断式 n-step 偏策略价值估计
 
-V-trace 要解决的问题是:给定一条由 $\mu$(旧策略)采的轨迹,如何构造一个 $V_\theta(s_t)$ 的学习目标,使得它既能在 off-policy 下用、又不至于方差爆炸。朴素办法是 n-step 重要性采样——每步乘以 IS 比 $\rho_t=\pi(a_t\mid s_t)/\mu(a_t\mid s_t)$,但 $\rho_t$ 可能很大(分母 $\mu(a_t)$ 小时),n 步乘积随 $n$ 指数爆炸或塌零,方差失控。V-trace 的关键创新是**两个独立的截断系数** [19]:
+V-trace 要解决的问题是：给定一条由 $\mu$（旧策略）采的轨迹，如何构造一个 $V_\theta(s_t)$ 的学习目标，使得它既能在 off-policy 下用、又不至于方差爆炸。朴素办法是 n-step 重要性采样——每步乘以 IS 比 $\rho_t=\pi(a_t\mid s_t)/\mu(a_t\mid s_t)$，但 $\rho_t$ 可能很大（分母 $\mu(a_t)$ 小时），n 步乘积随 $n$ 指数爆炸或塌零，方差失控。V-trace 的关键创新是**两个独立的截断系数** [19]:
 
 $$
 v_t = V_\theta(s_t) + \sum_{i=t}^{t+n-1} \gamma^{i-t}\!\left(\prod_{j=t}^{i-1} c_j\right)\rho_i\!\left(r_i + \gamma V_\theta(s_{i+1}) - V_\theta(s_i)\right)
 $$
 
-其中两个**截断的重要性采样比**为:
+其中两个**截断的重要性采样比**为：
 
 $$
 \rho_i = \min\!\left(\bar\rho,\ \frac{\pi(a_i\mid s_i)}{\mu(a_i\mid s_i)}\right),\qquad c_j = \min\!\left(\bar c,\ \frac{\pi(a_j\mid s_j)}{\mu(a_j\mid s_j)}\right)
 $$
 
-这里 $\bar\rho \geq \bar c$ 是论文 Theorem 1 的假设 [19]。理解这个公式要看清三个角色:
+这里 $\bar\rho \geq \bar c$ 是论文 Theorem 1 的假设 [19]。理解这个公式要看清三个角色：
 
-- **$\rho_i$(在 TD 误差 $\delta_i$ 上)**:控制**这一步的 TD 误差以多大权重进入目标**。截断到 $\bar\rho$ 意味着「即便目标策略 $\pi$ 远比 $\mu$ 更想选这个动作,我也最多只信 $\bar\rho$ 倍」——防止单步 IS 比爆炸。
-- **$c_j$(在累积 trace 系数 $\prod c_j$ 上)**:控制**历史 TD 误差向当前状态回传的衰减率**。$\prod_{j=t}^{i-1} c_j$ 是一个沿时间的 trace 系数,截断到 $\bar c$ 使其单调不增——这就是 n-step return 的「折扣」部分,但用截断 IS 比替代了纯 $\gamma$。
-- **两者分离的妙处**:$\rho_i$ 决定**当前步的 TD 误差贡献多大**,$c_j$ 决定**过去的 TD 误差回传多远**。把它们截断到不同水平($\bar\rho \geq \bar c$)就能独立调节「不动点」和「收敛速度」两个性质。
+- **$\rho_i$（在 TD 误差 $\delta_i$ 上）**：控制**这一步的 TD 误差以多大权重进入目标**.截断到 $\bar\rho$ 意味着「即便目标策略 $\pi$ 远比 $\mu$ 更想选这个动作,我也最多只信 $\bar\rho$ 倍」——防止单步 IS 比爆炸.
+- **$c_j$（在累积 trace 系数 $\prod c_j$ 上）**：控制**历史 TD 误差向当前状态回传的衰减率**.$\prod_{j=t}^{i-1} c_j$ 是一个沿时间的 trace 系数,截断到 $\bar c$ 使其单调不增——这就是 n-step return 的「折扣」部分,但用截断 IS 比替代了纯 $\gamma$.
+- **两者分离的妙处**：$\rho_i$ 决定**当前步的 TD 误差贡献多大**,$c_j$ 决定**过去的 TD 误差回传多远**.把它们截断到不同水平（$\bar\rho \geq \bar c$）就能独立调节「不动点」和「收敛速度」两个性质.
 
-### $\bar\rho$ 决定不动点,$\bar c$ 决定收敛速度
+### $\bar\rho$ 决定不动点，$\bar c$ 决定收敛速度
 
 V-trace 最深刻的性质是这两个截断系数扮演**完全不同的角色** [8][19]:
 
-- **$\bar\rho$ 决定收敛的不动点**。可以证明,V-trace 目标对应的算子是一个收缩算子,其不动点是某个策略 $V^{\pi_{\bar\rho}}$ 的真值,其中 $\pi_{\bar\rho}$ 介于 $\mu$ 和 $\pi$ 之间:
-  - $\bar\rho = \infty$(不截断)→ 收敛到 $V^\pi$(目标策略真值,完全 off-policy 修正);
-  - $\bar\rho \approx 0$ → 收敛到 $V^\mu$(行为策略真值,几乎不修正);
+- **$\bar\rho$ 决定收敛的不动点**。可以证明，V-trace 目标对应的算子是一个收缩算子，其不动点是某个策略 $V^{\pi_{\bar\rho}}$ 的真值，其中 $\pi_{\bar\rho}$ 介于 $\mu$ 和 $\pi$ 之间：
+  - $\bar\rho = \infty$（不截断）→ 收敛到 $V^\pi$（目标策略真值，完全 off-policy 修正）；
+  - $\bar\rho \approx 0$ → 收敛到 $V^\mu$（行为策略真值，几乎不修正）；
   - $\bar\rho$ 在中间 → 收敛到 $\pi$ 与 $\mu$ 之间某策略的值。
-- **$\bar c$ 只影响收敛速度,不动点与 $\bar c$ 无关**。$\bar c$ 越大,trace 系数 $\prod c_j$ 衰减越慢、回传越远、方差越大但信息利用越充分;$\bar c$ 越小,trace 衰减越快、方差小但偏向 1-step TD。$\bar c$ 本质上是个**方差控制旋钮**,不动点由 $\bar\rho$ 锁死。
+- **$\bar c$ 只影响收敛速度，不动点与 $\bar c$ 无关**。$\bar c$ 越大，trace 系数 $\prod c_j$ 衰减越慢、回传越远、方差越大但信息利用越充分；$\bar c$ 越小，trace 衰减越快、方差小但偏向 1-step TD。$\bar c$ 本质上是个**方差控制旋钮**，不动点由 $\bar\rho$ 锁死。
 
-IMPALA 在 Atari 上的实验默认 **$\bar c = 1.0,\ \bar\rho = 1.0$**,并搜过 $\bar\rho\in\{1, 10, 100\}$,发现 $\bar\rho=1$ 最稳 [19]——也就是说,实践上倾向于「轻度偏策略修正」:把 IS 比夹在 1 以内,既容忍 actor-learner 的版本 staleness,又不让 off-policy 偏差把训练带偏。
+IMPALA 在 Atari 上的实验默认 **$\bar c = 1.0,\ \bar\rho = 1.0$**，并搜过 $\bar\rho\in\{1, 10, 100\}$，发现 $\bar\rho=1$ 最稳 [19]——也就是说，实践上倾向于「轻度偏策略修正」：把 IS 比夹在 1 以内，既容忍 actor-learner 的版本 staleness，又不让 off-policy 偏差把训练带偏。<Cite n={19} />
 
-### on-policy 无害退化:V-trace 的优雅
+### on-policy 无害退化：V-trace 的优雅
 
-V-trace 最讨人喜欢的一点是它**在 on-policy 情形下自动退化为标准 n-step Bellman target** [8]。当 $\pi=\mu$(actor 没落后、与 learner 同一份 $\theta$),所有 IS 比都是 1,截断后 $\rho_i = c_j = 1$(假设 $\bar c \geq 1$),V-trace 目标变成:
+V-trace 最讨人喜欢的一点是它**在 on-policy 情形下自动退化为标准 n-step Bellman target** [8]。当 $\pi=\mu$（actor 没落后、与 learner 同一份 $\theta$），所有 IS 比都是 1，截断后 $\rho_i = c_j = 1$（假设 $\bar c \geq 1$），V-trace 目标变成：
 
 $$
 v_t\big|_{\pi=\mu} = V_\theta(s_t) + \sum_{i=t}^{t+n-1}\gamma^{i-t}\!\left(r_i + \gamma V_\theta(s_{i+1}) - V_\theta(s_i)\right) = \text{标准 n-step Bellman target}
 $$
 
-一个公式两种模式:on-policy 时它就是 A2C 那个 n-step return,off-policy 时自动加 IS 修正——这让它能无缝插在「actor 偶尔落后」的分布式架构里,不需要在 on-policy/off-policy 之间切换代码路径。
+一个公式两种模式：on-policy 时它就是 A2C 那个 n-step return,off-policy 时自动加 IS 修正——这让它能无缝插在「actor 偶尔落后」的分布式架构里，不需要在 on-policy/off-policy 之间切换代码路径。
 
-下面这个 CodeRunner 把 V-trace 的三个关键性质用最小玩具演示一遍:截断如何控方差、$\bar\rho/\bar c$ 各自的角色、on-policy 退化。
+下面这个 CodeRunner 把 V-trace 的三个关键性质用最小玩具演示一遍：截断如何控方差、$\bar\rho/\bar c$ 各自的角色、on-policy 退化。
 
 <CodeRunner defaultCode={`import numpy as np
 
@@ -754,105 +755,105 @@ print(f"   -> V-trace target = V(s)+sum gamma^k (r+gamma V(s')-V(s)) = 标准 n-
 print(f"   V-trace 的优雅:on-policy 无害退化,off-policy 自动加 IS 修正,一个公式两种模式")
 `} />
 
-> 💡 **V-trace 与 PPO 裁剪的关系**:两者都在控制 importance sampling 比的爆炸,但位置不同。PPO 在**策略梯度**里裁剪 $r_t(\theta)=\min(\text{ratio}, 1+\epsilon)$,目的是限制「单步策略更新幅度」防策略崩;V-trace 在**价值估计**里截断 $\rho_i, c_j$,目的是在分布式 off-policy 采集下给 $V$ 一个低方差目标。一个管 actor 的更新步长,一个管 critic 的学习目标,经常在同一系统里配合使用(IMPALA 自己的 actor 也用 PPO-style 裁剪)。
+> 💡 **V-trace 与 PPO 裁剪的关系**：两者都在控制 importance sampling 比的爆炸，但位置不同。PPO 在**策略梯度**里裁剪 $r_t(\theta)=\min(\text{ratio}, 1+\epsilon)$，目的是限制「单步策略更新幅度」防策略崩；V-trace 在**价值估计**里截断 $\rho_i, c_j$，目的是在分布式 off-policy 采集下给 $V$ 一个低方差目标。一个管 actor 的更新步长，一个管 critic 的学习目标，经常在同一系统里配合使用（IMPALA 自己的 actor 也用 PPO-style 裁剪）。
 
-### IMPALA vs A3C vs A2C:三种分布式架构的取舍
+### IMPALA vs A3C vs A2C：三种分布式架构的取舍
 
-| 维度 | **A3C**(异步 Hogwild) | **A2C**(同步批量) | **IMPALA**(actor-learner 解耦) |
+| 维度 | **A3C**（异步 Hogwild） | **A2C**（同步批量） | **IMPALA**（actor-learner 解耦） |
 |---|---|---|---|
-| 采集与学习 | 线程内合一(rollout+更新) | 同步屏障分开 | **彻底解耦**(actor 只采集,learner 只学习) |
-| 参数 staleness | 有(无锁读写竞争,随机) | **无**(同一份 $\theta$) | 有(结构化,actor 版本落后 learner $V$ 步) |
-| off-policy 修正 | 无(假装 on-policy) | 无(真 on-policy) | **V-trace**(截断 IS) |
+| 采集与学习 | 线程内合一（rollout+更新） | 同步屏障分开 | **彻底解耦**（actor 只采集，learner 只学习） |
+| 参数 staleness | 有（无锁读写竞争，随机） | **无**（同一份 $\theta$） | 有（结构化，actor 版本落后 learner $V$ 步） |
+| off-policy 修正 | 无（假装 on-policy） | 无（真 on-policy） | **V-trace**（截断 IS） |
 | 扩展性 | 受单机线程数限制 | 受同步屏障 + batch 大小限制 | **可跨机器扩到数百 actor** |
-| GPU 利用 | 差(零碎更新) | 好(大批量) | 好(learner 单点批量,actor 不占 GPU) |
-| 现代地位 | 经典开创 [3],已退场 | PPO 采集的事实形态 | 大规模分布式 RL 工程奠基 [19] |
+| GPU 利用 | 差（零碎更新） | 好（大批量） | 好（learner 单点批量，actor 不占 GPU） |
+| 现代地位 | 经典开创 [3]，已退场 | PPO 采集的事实形态 | 大规模分布式 RL 工程奠基 [19] |
 
-一句话总结三种架构的演进:**A3C** 证明了「并行去相关 + 异步更新」能稳定训练 on-policy 策略;**A2C** 把异步改成同步、消除 staleness、吃满 GPU,成为 PPO 的采集层;**IMPALA** 接受了 staleness 不可避免,用 V-trace 给它一个正确的 off-policy 修正,从而打破同步屏障、把采集扩到跨机器的几百个 actor——这是从「单机多线程」到「分布式大规模」的工程跃迁 [19]。
+一句话总结三种架构的演进：**A3C** 证明了「并行去相关 + 异步更新」能稳定训练 on-policy 策略；**A2C** 把异步改成同步、消除 staleness、吃满 GPU，成为 PPO 的采集层；**IMPALA** 接受了 staleness 不可避免，用 V-trace 给它一个正确的 off-policy 修正，从而打破同步屏障、把采集扩到跨机器的几百个 actor——这是从「单机多线程」到「分布式大规模」的工程跃迁 [19]。
 
-## TRPO:信赖域与单调提升
+## TRPO：信赖域与单调提升
 
-有了优势,直接按 $\nabla\log\pi\cdot A$ 更新还有个隐患:**一步走太远会把策略搞崩**。为什么不能大步更新?因为策略参数 $\theta$ 的微小变动可能让行为概率分布剧变——参数空间里挨得很近的两点,在**策略分布空间**里可能差出十万八千里(尤其神经网络放大这种非线性)。于是「自信地迈一大步」常常直接把策略带崩,且无法恢复。
+有了优势，直接按 $\nabla\log\pi\cdot A$ 更新还有个隐患：**一步走太远会把策略搞崩**。为什么不能大步更新？因为策略参数 $\theta$ 的微小变动可能让行为概率分布剧变——参数空间里挨得很近的两点，在**策略分布空间**里可能差出十万八千里（尤其神经网络放大这种非线性）。于是「自信地迈一大步」常常直接把策略带崩，且无法恢复。
 
-**TRPO(Trust Region Policy Optimization,Schulman et al., 2015 [6])** 的核心思想:**不在参数空间限制步长,而在策略分布空间画一个「信任圈」**——要求新策略与旧策略的 KL 散度不超过阈值 $\delta$。在圈内更新,能证明**单调提升**(每步策略至少不比旧策略差);出了圈,理论保证失效。
+**TRPO（Trust Region Policy Optimization,Schulman et al., 2015 [6]）** 的核心思想：**不在参数空间限制步长，而在策略分布空间画一个「信任圈」**——要求新策略与旧策略的 KL 散度不超过阈值 $\delta$。在圈内更新，能证明**单调提升**（每步策略至少不比旧策略差）；出了圈，理论保证失效。<Cite n={6} />
 
-### 替代优势:用旧策略的数据评新策略
+### 替代优势：用旧策略的数据评新策略
 
-第一步要把「新策略有多好」表达成可用旧策略数据估计的形式。定义**概率比** $r_t(\theta)=\dfrac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_k}(a_t\mid s_t)}$(新策略采到该动作的概率 / 旧策略采到的概率)。按重要性采样的恒等式,$\mathbb{E}_{a\sim\pi_{\theta_k}}[\,r_t(\theta)\,A^{\pi_{\theta_k}}(s_t,a_t)\,]$ 正好等于 $\mathbb{E}_{a\sim\pi_\theta}[A^{\pi_{\theta_k}}(s_t,a_t)]$——即用**旧策略采的样本**就能无偏估计「新策略下优势的期望」。这个量叫**替代优势(surrogate advantage)** [6]:
+第一步要把「新策略有多好」表达成可用旧策略数据估计的形式。定义**概率比** $r_t(\theta)=\dfrac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_k}(a_t\mid s_t)}$（新策略采到该动作的概率 / 旧策略采到的概率）。按重要性采样的恒等式，$\mathbb{E}_{a\sim\pi_{\theta_k}}[\,r_t(\theta)\,A^{\pi_{\theta_k}}(s_t,a_t)\,]$ 正好等于 $\mathbb{E}_{a\sim\pi_\theta}[A^{\pi_{\theta_k}}(s_t,a_t)]$——即用**旧策略采的样本**就能无偏估计「新策略下优势的期望」。这个量叫**替代优势（surrogate advantage）** [6]:
 
 $$
 L(\theta_k,\theta)=\mathbb{E}_{s,a\sim\pi_{\theta_k}}\!\left[\frac{\pi_\theta(a\mid s)}{\pi_{\theta_k}(a\mid s)}\,A^{\pi_{\theta_k}}(s,a)\right]
 $$
 
-注意 $L(\theta_k,\theta_k)=0$(比自己,$r=1$、优势期望为 0)。若新策略真比旧策略好,$L$ 应为正;但单独最大化 $L$ 会让 $\theta$ 飞远($r$ 可以任意大),所以必须加约束。
+注意 $L(\theta_k,\theta_k)=0$（比自己，$r=1$、优势期望为 0）。若新策略真比旧策略好，$L$ 应为正；但单独最大化 $L$ 会让 $\theta$ 飞远（$r$ 可以任意大），所以必须加约束。
 
-### KL 信赖域:在分布空间画圈
+### KL 信赖域：在分布空间画圈
 
-TRPO 把「别走太远」写成对**平均 KL 散度**的硬约束 [6]:
+TRPO 把「别走太远」写成对**平均 KL 散度**的硬约束 [6]：<Cite n={6} />
 
 $$
 \theta_{k+1}=\arg\max_\theta\; L(\theta_k,\theta)\quad\text{s.t.}\quad \bar D_{\mathrm{KL}}(\theta_k\,\|\,\theta)\le\delta,\qquad \bar D_{\mathrm{KL}}(\theta_k\,\|\,\theta)=\mathbb{E}_{s\sim\pi_{\theta_k}}\!\big[D_{\mathrm{KL}}\!\big(\pi_{\theta_k}(\cdot\mid s)\,\big\|\,\pi_\theta(\cdot\mid s)\big)\big]
 $$
 
-$\delta$ 很小(如 0.01)。Kakade & Langford (2002) 证明:在 $\bar D_{\mathrm{KL}}\le\delta$ 这个信赖域内,真实策略性能 $J(\pi_\theta)$ 的改进量**有下界**——$J(\pi_\theta)\ge J(\pi_{\theta_k}) - \frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$($\epsilon$ 与优势上界有关)。也就是说,**只要约束满足,新策略一定不比旧策略差**(单调提升)。这是 TRPO 区别于朴素策略梯度的理论贡献 [6]。
+$\delta$ 很小（如 0.01）。Kakade & Langford （2002） 证明：在 $\bar D_{\mathrm{KL}}\le\delta$ 这个信赖域内，真实策略性能 $J(\pi_\theta)$ 的改进量**有下界**——$J(\pi_\theta)\ge J(\pi_{\theta_k}) - \frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$（$\epsilon$ 与优势上界有关）。也就是说，**只要约束满足，新策略一定不比旧策略差**（单调提升）。这是 TRPO 区别于朴素策略梯度的理论贡献 [6]。
 
-### 单调提升定理:为何 KL 约束能保证不退步
+### 单调提升定理：为何 KL 约束能保证不退步
 
-上面那句「单调提升」是 TRPO 的理论基石,但结论 $-\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$ 这个下界从哪来、为何 KL 约束能控制性能退化,Kakade & Langford 2002 给了三步推导 [6]。把它拆开,能看清「信赖域」到底兜住了什么。
+上面那句「单调提升」是 TRPO 的理论基石，但结论 $-\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$ 这个下界从哪来、为何 KL 约束能控制性能退化，Kakade & Langford 2002 给了三步推导 [6]。把它拆开，能看清「信赖域」到底兜住了什么。
 
-**第一步:策略提升恒等式(policy improvement identity)。** 任意两个策略 $\pi_k$ 与 $\pi$,它们性能的差可以**精确**写成旧策略优势在新策略轨迹上的期望:
+**第一步：策略提升恒等式（policy improvement identity）。** 任意两个策略 $\pi_k$ 与 $\pi$，它们性能的差可以**精确**写成旧策略优势在新策略轨迹上的期望：
 
 $$
 J(\pi)-J(\pi_k)\;=\;\frac{1}{1-\gamma}\,\mathbb E_{\substack{s\sim d^{\pi}\\a\sim\pi}}\!\Big[A_{\pi_k}(s,a)\Big],
 $$
 
-其中 $d^\pi(s)=(1-\gamma)\sum_{t\ge0}\gamma^t\Pr(s_t=s\mid\pi)$ 是归一化折扣状态访问分布(那个 $\frac{1}{1-\gamma}$ 把归一化的 $d^\pi$ 还原回未归一化的 $\sum_t\gamma^t\Pr$)。这个恒等式不近似、不放大——它就是 $J$ 的差拆成「新策略访问的状态 × 新策略选的动作 × 旧策略觉得这个动作比平均好多少」。若 $\pi$ 总选 $A_{\pi_k}>0$ 的动作,性能升;总选 $A_{\pi_k}<0$ 的动作,性能降。问题在于 $d^\pi$ 依赖 $\pi$ 自身,无法直接优化——这正是要近似的地方。
+其中 $d^\pi(s)=(1-\gamma)\sum_{t\ge0}\gamma^t\Pr(s_t=s\mid\pi)$ 是归一化折扣状态访问分布（那个 $\frac{1}{1-\gamma}$ 把归一化的 $d^\pi$ 还原回未归一化的 $\sum_t\gamma^t\Pr$）。这个恒等式不近似、不放大——它就是 $J$ 的差拆成「新策略访问的状态 × 新策略选的动作 × 旧策略觉得这个动作比平均好多少」。若 $\pi$ 总选 $A_{\pi_k}>0$ 的动作，性能升；总选 $A_{\pi_k}<0$ 的动作，性能降。问题在于 $d^\pi$ 依赖 $\pi$ 自身，无法直接优化——这正是要近似的地方。
 
-**第二步:用 $\pi_k$ 的访问分布近似 + 误差界。** 把 $d^\pi$ 换成 $d^{\pi_k}$(旧策略的访问分布,已知),误差由两个策略的 KL 散度控制。定义优势上界 $\epsilon=\max_{s,a}|A_{\pi_k}(s,a)|$(旧策略优势的最大幅值),Schulman et al. 2015 [6] Lemma 2 证明:在 $\bar D_{\mathrm{KL}}(\pi_k\|\pi)\le\delta$ 下,
+**第二步：用 $\pi_k$ 的访问分布近似 + 误差界。** 把 $d^\pi$ 换成 $d^{\pi_k}$（旧策略的访问分布，已知），误差由两个策略的 KL 散度控制。定义优势上界 $\epsilon=\max_{s,a}|A_{\pi_k}(s,a)|$（旧策略优势的最大幅值），Schulman et al. 2015 [6] Lemma 2 证明：在 $\bar D_{\mathrm{KL}}(\pi_k\|\pi)\le\delta$ 下，
 
 $$
 \Big|\mathbb E_{a\sim\pi}[A_{\pi_k}(s,a)]-\mathbb E_{a\sim\pi_k}[A_{\pi_k}(s,a)]\Big|\;\le\;\frac{4\epsilon\gamma}{1-\gamma}\,\sqrt{\delta}\;\;\to\;\;\text{累积后}\;\;\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta.
 $$
 
-直觉:KL 小意味着 $\pi$ 与 $\pi_k$ 在每个状态选的动作分布接近,故两者对 $A_{\pi_k}$ 的期望也接近;差距随 $\delta$ 增长,且被 $\epsilon$ 放大(优势本身大,扰动它造成的损失也大)。$\gamma/(1-\gamma)$ 因子来自折扣累积——每步的误差沿轨迹传播,$\gamma$ 接近 1 时长程累积放大。
+直觉：KL 小意味着 $\pi$ 与 $\pi_k$ 在每个状态选的动作分布接近，故两者对 $A_{\pi_k}$ 的期望也接近；差距随 $\delta$ 增长，且被 $\epsilon$ 放大（优势本身大，扰动它造成的损失也大）。$\gamma/(1-\gamma)$ 因子来自折扣累积——每步的误差沿轨迹传播，$\gamma$ 接近 1 时长程累积放大。
 
-**第三步:拼出单调提升下界。** 把误差界代回恒等式:用 $d^{\pi_k}$ 近似 $d^\pi$ 引入 $\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$ 的误差,而 $d^{\pi_k}$ 下的期望 $\mathbb E_{s\sim d^{\pi_k},a\sim\pi_k}[A_{\pi_k}]=0$(旧策略对自己的优势期望为零),故
+**第三步：拼出单调提升下界。** 把误差界代回恒等式：用 $d^{\pi_k}$ 近似 $d^\pi$ 引入 $\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$ 的误差，而 $d^{\pi_k}$ 下的期望 $\mathbb E_{s\sim d^{\pi_k},a\sim\pi_k}[A_{\pi_k}]=0$（旧策略对自己的优势期望为零），故
 
 $$
 J(\pi)-J(\pi_k)\;\ge\;0-\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta\;=\;-\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta.
 $$
 
-这就是 line 787 的下界。它**允许小幅退步**(下界为负),但退步量被 $\delta$ 线性控制——$\delta\to0$ 时下界 $\to0$,即「每步几乎单调不退」。TRPO 选 $\delta=0.01$ 让下界几乎贴零,工程上等价于「保证每步不退步」。注意这个界**很松**:下界 $-\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$ 常比实际退化量大几十倍,因为 $\frac{4\gamma}{(1-\gamma)^2}$ 在 $\gamma=0.9$ 时已是 360。理论给的是「最坏情况兜底」,实际退化远小于界——TRPO 还用回溯线搜索(line 896)在每步显式验证 $J$ 真的没降,把松弛的理论界补成紧的工程保证。
+这就是 line 787 的下界。它**允许小幅退步**（下界为负），但退步量被 $\delta$ 线性控制——$\delta\to0$ 时下界 $\to0$，即「每步几乎单调不退」。TRPO 选 $\delta=0.01$ 让下界几乎贴零，工程上等价于「保证每步不退步」。注意这个界**很松**：下界 $-\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$ 常比实际退化量大几十倍，因为 $\frac{4\gamma}{(1-\gamma)^2}$ 在 $\gamma=0.9$ 时已是 360。理论给的是「最坏情况兜底」，实际退化远小于界——TRPO 还用回溯线搜索（line 896）在每步显式验证 $J$ 真的没降，把松弛的理论界补成紧的工程保证。
 
-### 单步 $\sqrt\delta$ 到累积 $\delta$:两个 Pinsker 界相乘
+### 单步 $\sqrt\delta$ 到累积 $\delta$：两个 Pinsker 界相乘
 
-上面第二步里有个容易被略过的细节:单步误差界是 $\frac{4\epsilon\gamma}{1-\gamma}\sqrt\delta$(line 804,带 $\sqrt\delta$),但累积下界却是 $\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$(line 812,带 $\delta$)。**$\sqrt\delta$ 怎么变成 $\delta$ 的?** 这不是「$\sqrt\delta$ 沿轨迹求和」——$\sum_t\gamma^t\sqrt\delta=\frac{\sqrt\delta}{1-\gamma}$ 仍是 $\sqrt\delta$ 量级。真正的机制是 **Schulman 2015 [6] Lemma 1(单步)到 Lemma 2(累积)的转换:两个独立的 Pinsker 界相乘**,把两个 $\sqrt\delta$ 变成一个 $\delta$。
+上面第二步里有个容易被略过的细节：单步误差界是 $\frac{4\epsilon\gamma}{1-\gamma}\sqrt\delta$（line 804，带 $\sqrt\delta$），但累积下界却是 $\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$（line 812，带 $\delta$）。**$\sqrt\delta$ 怎么变成 $\delta$ 的？** 这不是「$\sqrt\delta$ 沿轨迹求和」——$\sum_t\gamma^t\sqrt\delta=\frac{\sqrt\delta}{1-\gamma}$ 仍是 $\sqrt\delta$ 量级。真正的机制是 **Schulman 2015 [6] Lemma 1（单步）到 Lemma 2（累积）的转换：两个独立的 Pinsker 界相乘**，把两个 $\sqrt\delta$ 变成一个 $\delta$。
 
-**Lemma 1(单步策略差)**:对任意状态 $s$,新旧策略选动作的差异由**总变差距离(total variation, TV)**控制:
+**Lemma 1（单步策略差）**：对任意状态 $s$，新旧策略选动作的差异由**总变差距离（total variation, TV）**控制：
 
 $$
 \Big|\mathbb E_{a\sim\pi}[A_{\pi_k}(s,a)]-\mathbb E_{a\sim\pi_k}[A_{\pi_k}(s,a)]\Big|\;\le\;2\,\epsilon\,\mathrm{TV}\big(\pi(\cdot|s)\,\big\|\,\pi_k(\cdot|s)\big),\qquad \epsilon=\max_{s,a}|A_{\pi_k}(s,a)|.
 $$
 
-(把 $A_{\pi_k}$ 的正负部分别求和,用 $\epsilon$ 截断,即得 $2\epsilon\cdot\text{TV}$;TV 是两分布密度差之和的一半 $\mathrm{TV}=\frac12\sum_a|\pi(a|s)-\pi_k(a|s)|$。)接着用 **Pinsker 不等式**把 TV 换成 KL:
+（把 $A_{\pi_k}$ 的正负部分别求和，用 $\epsilon$ 截断，即得 $2\epsilon\cdot\text{TV}$；TV 是两分布密度差之和的一半 $\mathrm{TV}=\frac12\sum_a|\pi(a|s)-\pi_k(a|s)|$。）接着用 **Pinsker 不等式**把 TV 换成 KL:
 
 $$
 \mathrm{TV}\big(\pi\,\|\,\pi_k\big)\;\le\;\sqrt{\tfrac12 D_{\mathrm{KL}}\big(\pi\,\|\,\pi_k\big)}.
 $$
 
-代入得单步界 $\le 2\epsilon\sqrt{D_{\mathrm{KL}}/2}=\sqrt{2}\,\epsilon\sqrt{D_{\mathrm{KL}}}\sim\sqrt\delta$——**这就是单步 $\sqrt\delta$ 的来源**(Pinsker 把 KL 的 $\sqrt{}$ 引了进来)。
+代入得单步界 $\le 2\epsilon\sqrt{D_{\mathrm{KL}}/2}=\sqrt{2}\,\epsilon\sqrt{D_{\mathrm{KL}}}\sim\sqrt\delta$——**这就是单步 $\sqrt\delta$ 的来源**（Pinsker 把 KL 的 $\sqrt{}$ 引了进来）。
 
-**Lemma 2(累积界)的关键**:累积性能差 $J(\pi)-J(\pi_k)=\frac{1}{1-\gamma}\mathbb E_{s\sim d^\pi,a\sim\pi}[A_{\pi_k}]$ 里有**两处**分布偏离,各自独立套 Pinsker:
+**Lemma 2（累积界）的关键**：累积性能差 $J(\pi)-J(\pi_k)=\frac{1}{1-\gamma}\mathbb E_{s\sim d^\pi,a\sim\pi}[A_{\pi_k}]$ 里有**两处**分布偏离，各自独立套 Pinsker:
 
 | 误差源 | 偏离的分布 | Pinsker 界 |
 |---|---|---|
 | 动作分布 | $\pi(\cdot\|s)$ vs $\pi_k(\cdot\|s)$ | $\sim\sqrt\delta$ |
 | 状态访问分布 | $d^\pi$ vs $d^{\pi_k}$ | $\sim\sqrt\delta$ |
 
-两处 $\sqrt\delta$ 用 Cauchy-Schwarz 合并:$\sqrt\delta\times\sqrt\delta=\delta$。沿轨迹几何级数求和 $\sum_t\gamma^t=\frac{1}{1-\gamma}$,再乘恒等式因子 $\frac{1}{1-\gamma}$,得累积界 $\sim\frac{\delta}{(1-\gamma)^2}$。**所以 $\sqrt\delta\to\delta$ 不是求和,是相乘**——两个独立的 Pinsker 界(一个管动作、一个管状态占用)各贡献一个 $\sqrt\delta$,乘起来变 $\delta$。这也解释了为何累积界比单步界「紧一阶」:单步只有一个 $\sqrt\delta$,累积有两个且相乘。
+两处 $\sqrt\delta$ 用 Cauchy-Schwarz 合并：$\sqrt\delta\times\sqrt\delta=\delta$。沿轨迹几何级数求和 $\sum_t\gamma^t=\frac{1}{1-\gamma}$，再乘恒等式因子 $\frac{1}{1-\gamma}$，得累积界 $\sim\frac{\delta}{(1-\gamma)^2}$。**所以 $\sqrt\delta\to\delta$ 不是求和，是相乘**——两个独立的 Pinsker 界（一个管动作、一个管状态占用）各贡献一个 $\sqrt\delta$，乘起来变 $\delta$。这也解释了为何累积界比单步界「紧一阶」：单步只有一个 $\sqrt\delta$，累积有两个且相乘。
 
-> ⚠️ 这里只证 $\sqrt\delta\to\delta$ 的**阶数转换**(为何累积是 $\delta$ 不是 $\sqrt\delta$),不证精确常数 $4\gamma$。Schulman 2015 [6] Lemma 2 的精确系数 $4\epsilon\gamma/(1-\gamma)^2$ 涉及 $\gamma$ 因子(折扣累积)与 2 倍 TV 约束的细致合并,与阶数转换无关。下面用数值验证 Pinsker 与「两 sqrt 相乘」的机制,不验证精确系数。
+> ⚠️ 这里只证 $\sqrt\delta\to\delta$ 的**阶数转换**（为何累积是 $\delta$ 不是 $\sqrt\delta$），不证精确常数 $4\gamma$。Schulman 2015 [6] Lemma 2 的精确系数 $4\epsilon\gamma/(1-\gamma)^2$ 涉及 $\gamma$ 因子（折扣累积）与 2 倍 TV 约束的细致合并，与阶数转换无关。下面用数值验证 Pinsker 与「两 sqrt 相乘」的机制，不验证精确系数。
 
-下面的可运行示例把这套机制数值化:① Pinsker 不等式 $\text{TV}\le\sqrt{D_{\mathrm{KL}}/2}$ 在伯努利分布上成立;② 单步策略差 $\le 2\epsilon\cdot\text{TV}\sim\sqrt{2\delta}$;③ 累积界 $\delta/(1-\gamma)^2$ 与单步 $\sqrt\delta$ 的阶数对比。
+下面的可运行示例把这套机制数值化：① Pinsker 不等式 $\text{TV}\le\sqrt{D_{\mathrm{KL}}/2}$ 在伯努利分布上成立；② 单步策略差 $\le 2\epsilon\cdot\text{TV}\sim\sqrt{2\delta}$；③ 累积界 $\delta/(1-\gamma)^2$ 与单步 $\sqrt\delta$ 的阶数对比。
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -909,7 +910,7 @@ print("  -> 实际累积 d/(1-g)^2 是 delta 量级 (两 sqrt 相乘), 比求和
 print("  -> 这就是 Lemma 1 (单步 sqrt) -> Lemma 2 (累积 delta) 的转换根因")
 `} title="TRPO 单步 sqrt(delta) 到累积 delta: 两个 Pinsker 界相乘" />
 
-下面用 3 状态链 toy 把这三步数值化:① 策略提升恒等式左右两侧精确相等;② KL 约束下的下界成立(实际退化 ≥ 下界);③ 扫描 $\delta$ 看下界如何随 KL 放宽而变负。
+下面用 3 状态链 toy 把这三步数值化：① 策略提升恒等式左右两侧精确相等；② KL 约束下的下界成立（实际退化 ≥ 下界）；③ 扫描 $\delta$ 看下界如何随 KL 放宽而变负。
 
 <CodeRunner defaultCode={`import numpy as np
 
@@ -1019,28 +1020,28 @@ print(f"  -> delta->0 时下界->0 (单调提升); delta 大则下界越负 (允
 print(f"  -> TRPO 选 delta=0.01 让下界几乎贴 0, 工程上保证每步不退步 [6]")
 `} title="TRPO 单调提升定理:策略提升恒等式与 KL 下界" />
 
-跑完看三件事:① 段1 策略提升恒等式左右两侧残差 $\sim10^{-12}$(精确成立)——$J$ 的差确实等于旧策略优势在新策略轨迹上的期望;② 段2 下界 $-\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$ 成立(实际退化 $\ge$ 下界),但很松(实际 $-0.254$ 远大于下界 $-5.86$),印证「理论给最坏情况兜底」;③ 段3 扫描 $\delta$:KL 越大下界越负,$\delta\to0$ 时下界 $\to0$ 即单调——这正是 TRPO 选小 $\delta=0.01$ 的根因,让理论下界几乎贴零,配合回溯线搜索(line 896)把松弛界补成紧的工程保证 [6]。
+跑完看三件事：① 段1 策略提升恒等式左右两侧残差 $\sim10^{-12}$（精确成立）——$J$ 的差确实等于旧策略优势在新策略轨迹上的期望；② 段2 下界 $-\frac{4\epsilon\gamma}{(1-\gamma)^2}\delta$ 成立（实际退化 $\ge$ 下界），但很松（实际 $-0.254$ 远大于下界 $-5.86$），印证「理论给最坏情况兜底」；③ 段3 扫描 $\delta$：KL 越大下界越负，$\delta\to0$ 时下界 $\to0$ 即单调——这正是 TRPO 选小 $\delta=0.01$ 的根因，让理论下界几乎贴零，配合回溯线搜索（line 896）把松弛界补成紧的工程保证 [6]。
 
-### 二阶近似:目标一阶、约束二阶
+### 二阶近似：目标一阶、约束二阶
 
-直接解上面带约束的优化很难(TRPO 要的是 $\theta$ 是个高维神经网络参数)。TRPO 的做法是**在 $\theta_k$ 附近做泰勒展开** [6]:
+直接解上面带约束的优化很难（TRPO 要的是 $\theta$ 是个高维神经网络参数）。TRPO 的做法是**在 $\theta_k$ 附近做泰勒展开** [6]:
 
-- **目标一阶近似**:$L(\theta_k,\theta)\approx g^\top(\theta-\theta_k)$,其中 $g=\nabla_\theta L(\theta_k,\theta)\big|_{\theta=\theta_k}$ 就是策略梯度;
-- **约束二阶近似**:$\bar D_{\mathrm{KL}}(\theta_k\,\|\,\theta)\approx \tfrac12(\theta-\theta_k)^\top H(\theta-\theta_k)$,其中 $H$ 是 KL 的 Hessian——它恰好等于 **Fisher 信息矩阵** $\mathbb{E}[\nabla\log\pi\,\nabla\log\pi^\top]$。
+- **目标一阶近似**：$L(\theta_k,\theta)\approx g^\top(\theta-\theta_k)$,其中 $g=\nabla_\theta L(\theta_k,\theta)\big|_{\theta=\theta_k}$ 就是策略梯度;
+- **约束二阶近似**：$\bar D_{\mathrm{KL}}(\theta_k\,\|\,\theta)\approx \tfrac12(\theta-\theta_k)^\top H(\theta-\theta_k)$,其中 $H$ 是 KL 的 Hessian——它恰好等于 **Fisher 信息矩阵** $\mathbb{E}[\nabla\log\pi\,\nabla\log\pi^\top]$.
 
-近似后的优化变成:**在椭球 $\tfrac12(\theta-\theta_k)^\top H(\theta-\theta_k)\le\delta$ 内,沿 $g$ 方向走到边界**。
+近似后的优化变成：**在椭球 $\tfrac12(\theta-\theta_k)^\top H(\theta-\theta_k)\le\delta$ 内，沿 $g$ 方向走到边界**。
 
-### 自然策略梯度:解析解
+### 自然策略梯度：解析解
 
-这个带二次约束的线性目标有闭式解。用拉格朗日对偶消去约束,得到 [6]:
+这个带二次约束的线性目标有闭式解。用拉格朗日对偶消去约束，得到 [6]:
 
 $$
 \theta_{k+1}=\theta_k+\sqrt{\frac{2\delta}{g^\top H^{-1}g}}\;H^{-1}g
 $$
 
-这就是 **自然策略梯度(natural policy gradient)**——方向 $H^{-1}g$ 用 Fisher 矩阵的逆把普通梯度 $g$ 「折弯」到分布空间的自然度量下(梯度大的方向若在分布空间里其实变动小,自然梯度会多走;反之少走)。步长系数 $\sqrt{2\delta/(g^\top H^{-1}g)}$ 恰好让约束取等(走到椭球边界)。
+这就是 **自然策略梯度（natural policy gradient）**——方向 $H^{-1}g$ 用 Fisher 矩阵的逆把普通梯度 $g$ 「折弯」到分布空间的自然度量下（梯度大的方向若在分布空间里其实变动小，自然梯度会多走；反之少走）。步长系数 $\sqrt{2\delta/(g^\top H^{-1}g)}$ 恰好让约束取等（走到椭球边界）。
 
-下面用 numpy 验证这个解析解确实是「可行域内 $g^\top s$ 最大」的点:
+下面用 numpy 验证这个解析解确实是「可行域内 $g^\top s$ 最大」的点：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -1079,15 +1080,15 @@ print(f"\\ng 与 H^-1 g 的夹角余弦 = {cos:.4f} (非 1 -> 自然梯度对度
 print("机制: H^-1 g 把'参数空间梯度'折弯到'分布空间自然度量'下, 沿真实变动最大的方向走")
 `} />
 
-### 共轭梯度:避开 $H^{-1}$ 的二阶求解
+### 共轭梯度：避开 $H^{-1}$ 的二阶求解
 
-解析解要算 $H^{-1}g$,而 $H$ 是 $|\theta|\times|\theta|$ 的矩阵(神经网络参数动辄百万维),求逆**不可行**。TRPO 的工程巧思 [6]:
+解析解要算 $H^{-1}g$，而 $H$ 是 $|\theta|\times|\theta|$ 的矩阵（神经网络参数动辄百万维），求逆**不可行**。TRPO 的工程巧思 [6]:
 
-1. **共轭梯度法(conjugate gradient, CG)**:不显式构造 $H$,只需算 **Hessian-向量积** $Hv$。CG 至多 $n$ 步收敛到 $H^{-1}g$ 的精确解(实践中只跑 10 步左右,够用)。
-2. **Hessian-向量积的自动微分技巧**:利用恒等式 $Hx=\nabla_\theta\!\big[(\nabla_\theta \bar D_{\mathrm{KL}})^\top x\big]$——先算 KL 梯度(一次反向传播),与 $x$ 内积后再算梯度(第二次反向传播),就得到 $Hx$,**全程不显式存 $H$**。
-3. **阻尼(damping)**:给 $H$ 加个小对角 $H\leftarrow H+\alpha I$,保证正定、数值稳定。
+1. **共轭梯度法（conjugate gradient, CG）**：不显式构造 $H$，只需算 **Hessian-向量积** $Hv$。CG 至多 $n$ 步收敛到 $H^{-1}g$ 的精确解（实践中只跑 10 步左右，够用）。
+2. **Hessian-向量积的自动微分技巧**：利用恒等式 $Hx=\nabla_\theta\!\big[(\nabla_\theta \bar D_{\mathrm{KL}})^\top x\big]$——先算 KL 梯度（一次反向传播），与 $x$ 内积后再算梯度（第二次反向传播），就得到 $Hx$，**全程不显式存 $H$**.
+3. **阻尼（damping）**：给 $H$ 加个小对角 $H\leftarrow H+\alpha I$，保证正定、数值稳定。
 
-下面验证 CG 在 $n$ 步内精确收敛到 $H^{-1}g$:
+下面验证 CG 在 $n$ 步内精确收敛到 $H^{-1}g$：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -1126,12 +1127,12 @@ print(f"\\n要点: CG 只调用 Hv(n 次), 从不显式构造/求逆 H")
 print("      神经网络参数百万维时, H 是百万x百万矩阵无法存储, 但 Hv 可用自动微分一次算出")
 `} />
 
-### 回溯线搜索:弥补泰勒近似的误差
+### 回溯线搜索：弥补泰勒近似的误差
 
-泰勒展开只是局部近似,真走过去可能违反约束或没改进。TRPO 加一道**回溯线 search** 兜底 [6]:算出自然梯度方向后,试步长 $\alpha^j$($j=0,1,2,\dots$,$\alpha\in(0,1)$ 是回溯系数),找**最小的 $j$** 使更新后同时满足:
+泰勒展开只是局部近似，真走过去可能违反约束或没改进。TRPO 加一道**回溯线 search** 兜底 [6]：算出自然梯度方向后，试步长 $\alpha^j$（$j=0,1,2,\dots$，$\alpha\in(0,1)$ 是回溯系数），找**最小的 $j$** 使更新后同时满足：
 
-1. **KL 约束**:$\bar D_{\mathrm{KL}}(\theta_k\|\theta_{k+1})\le\delta$(没出圈);
-2. **替代优势改进**:$L(\theta_k,\theta_{k+1})\ge 0$(新策略确实不差)。
+1. **KL 约束**：$\bar D_{\mathrm{KL}}(\theta_k\|\theta_{k+1})\le\delta$（没出圈）；
+2. **替代优势改进**：$L(\theta_k,\theta_{k+1})\ge 0$（新策略确实不差）。
 
 ```python
 # 伪代码: TRPO 一次策略更新
@@ -1144,68 +1145,68 @@ for j in range(max_backtracks):
         theta = theta_new; break         # 找到满足约束与改进的步长
 ```
 
-回溯让 TRPO 即便在泰勒近似不准时也不崩——宁可走小步,也不出圈。
+回溯让 TRPO 即便在泰勒近似不准时也不崩——宁可走小步，也不出圈。
 
-### TRPO vs PPO:精确求解 vs 一阶近似
+### TRPO vs PPO：精确求解 vs 一阶近似
 
-TRPO 理论漂亮(单调提升)、训练稳定,但**工程沉重**:每步要算 Fisher-向量积 + 跑 CG + 回溯,计算贵;超参($\delta$、阻尼系数、CG 迭代数)都敏感。**PPO** 把这套二阶机制**砍成一阶**——丢掉 Hessian 和 CG,改用裁剪目标把「KL 约束」翻译成「概率比约束」,用普通 SGD/Adam 多 epoch 复用数据。PPO 牺牲了单调提升的严格证明,换来工程上的简单鲁棒,从 Atari 一路用到 RLHF,成了主流 [5]。下面的小节就讲 PPO 怎么做这个一阶近似。
+TRPO 理论漂亮（单调提升）、训练稳定，但**工程沉重**：每步要算 Fisher-向量积 + 跑 CG + 回溯，计算贵；超参（$\delta$、阻尼系数、CG 迭代数）都敏感。**PPO** 把这套二阶机制**砍成一阶**——丢掉 Hessian 和 CG，改用裁剪目标把「KL 约束」翻译成「概率比约束」，用普通 SGD/Adam 多 epoch 复用数据。PPO 牺牲了单调提升的严格证明，换来工程上的简单鲁棒，从 Atari 一路用到 RLHF，成了主流 [5]。下面的小节就讲 PPO 怎么做这个一阶近似。
 
-## PPO:别让一步迈太大
+## PPO：别让一步迈太大
 
-**PPO(Proximal Policy Optimization)** 是对 TRPO 的**一阶近似** [5]:丢掉二阶 Hessian 与共轭梯度,改用一个巧妙的**裁剪目标**把「分布空间约束」翻译成「概率比约束」——先定义新旧策略的概率比 $r=\dfrac{\pi_\theta(a\mid s)}{\pi_{\text{old}}(a\mid s)}$,然后:
+**PPO(Proximal Policy Optimization)** 是对 TRPO 的**一阶近似** [5]：丢掉二阶 Hessian 与共轭梯度，改用一个巧妙的**裁剪目标**把「分布空间约束」翻译成「概率比约束」——先定义新旧策略的概率比 $r=\dfrac{\pi_\theta(a\mid s)}{\pi_{\text{old}}(a\mid s)}$，然后：<Cite n={5} />
 
 $$
 L^{\text{CLIP}} = \min\Big(r\,A,\;\; \text{clip}(r,\,1-\varepsilon,\,1+\varepsilon)\,A\Big)
 $$
 
-**拖动 $\varepsilon$、切换优势正负**,看裁剪如何为更新「封顶」:
+**拖动 $\varepsilon$、切换优势正负**，看裁剪如何为更新「封顶」：
 
 <PPOClipExplorer />
 
-关键是那个 $\min$ 的**非对称**性:当动作是好的($A>0$),概率比涨过 $1+\varepsilon$ 后目标封顶、梯度归零——不再奖励「贪心地把概率推到天上」;但如果更新方向**错了**(把好动作反而压低),走的是未裁剪那一支,照罚不误。于是每步都被温柔地拴在旧策略附近,训练又快又稳。这正是 RLHF 里对齐大模型的主力算法。
+关键是那个 $\min$ 的**非对称**性：当动作是好的（$A>0$），概率比涨过 $1+\varepsilon$ 后目标封顶、梯度归零——不再奖励「贪心地把概率推到天上」；但如果更新方向**错了**（把好动作反而压低），走的是未裁剪那一支，照罚不误。于是每步都被温柔地拴在旧策略附近，训练又快又稳。这正是 RLHF 里对齐大模型的主力算法。
 
-### 完整目标:裁剪 + 价值 + 熵
+### 完整目标：裁剪 + 价值 + 熵
 
-上面那个 $L^{\text{CLIP}}$ 只是策略部分。实际实现里,PPO 每步同时优化三件事——策略变好、价值估计准、别太确定(保持探索)——拼成一个组合目标 [5]:
+上面那个 $L^{\text{CLIP}}$ 只是策略部分。实际实现里，PPO 每步同时优化三件事——策略变好、价值估计准、别太确定（保持探索）——拼成一个组合目标 [5]：<Cite n={5} />
 
 $$
 L^{\text{CLIP+VF+S}}(\theta)=\underbrace{\mathbb{E}_t\big[\min(r_t A_t,\,\text{clip}(r_t,1-\varepsilon,1+\varepsilon)A_t)\big]}_{\text{策略裁剪 }L^{\text{CLIP}}}\;-\;c_v\underbrace{\mathbb{E}_t\big[\big(V_\theta(s_t)-\hat R_t\big)^2\big]}_{\text{价值损失 }L^{\text{VF}}}\;+\;c_s\underbrace{\mathbb{E}_t\big[S[\pi_\theta](s_t)\big]}_{\text{熵奖励 }S}
 $$
 
-三项的职责清晰分开:
+三项的职责清晰分开：
 
-1. **$L^{\text{CLIP}}$**(策略):用裁剪把策略更新拴在旧策略附近,前面讲过;
-2. **$L^{\text{VF}}$**(价值):让 $V_\theta$ 拟合 reward-to-go $\hat R_t$。注意 PPO 的价值损失也常带裁剪 $c_v\cdot\text{clip}\big((V_\theta-\hat R_t)^2,(1-\varepsilon_v)V_{\text{old}}\text{-}V)^2\big)$,与策略裁剪同理——防止价值网络一步跳太远;不少实现为简洁起见省掉价值裁剪,直接用 MSE;
-3. **$S$**(熵奖励):策略分布的熵 $S[\pi](s)=-\sum_a\pi(a\mid s)\log\pi(a\mid s)$,鼓励策略**别太尖**——熵高=探索多。$c_s$ 通常取 $0.01$,小但不为零,是防止策略过早坍缩成确定性策略的保险丝。
+1. **$L^{\text{CLIP}}$**（策略）：用裁剪把策略更新拴在旧策略附近，前面讲过；
+2. **$L^{\text{VF}}$**（价值）：让 $V_\theta$ 拟合 reward-to-go $\hat R_t$。注意 PPO 的价值损失也常带裁剪 $c_v\cdot\text{clip}\big((V_\theta-\hat R_t)^2,(1-\varepsilon_v)V_{\text{old}}\text{-}V)^2\big)$，与策略裁剪同理——防止价值网络一步跳太远；不少实现为简洁起见省掉价值裁剪，直接用 MSE;
+3. **$S$**（熵奖励）：策略分布的熵 $S1=-\sum_a\pi(a\mid s)\log\pi(a\mid s)$，鼓励策略**别太尖**——熵高=探索多。$c_s$ 通常取 $0.01$，小但不为零，是防止策略过早坍缩成确定性策略的保险丝。
 
-三个系数 $c_v\approx0.5$、$c_s\approx0.01$ 是 Spinning Up 等参考实现的常用量级 [5][2]。**符号约定**:策略部分求最大(梯度上升),价值和熵部分以「减去损失 / 加上熵」并入,故同一个 Adam 步同时调三者的梯度。
+三个系数 $c_v\approx0.5$、$c_s\approx0.01$ 是 Spinning Up 等参考实现的常用量级 [5][2]。**符号约定**：策略部分求最大（梯度上升），价值和熵部分以「减去损失 / 加上熵」并入，故同一个 Adam 步同时调三者的梯度。
 
-### 裁剪目标的偏差-方差分析:ε 改变什么、不改变什么
+### 裁剪目标的偏差-方差分析：ε 改变什么、不改变什么
 
-前面把 $L^{\text{CLIP}}$ 当成一个「防一步迈太大」的工程技巧讲。但裁剪本质上是用一个**有偏目标**去近似**无偏的策略梯度** $L^{\text{PG}}=\mathbb E[r_t A_t]$——裁剪支把越界样本的梯度截断了,这必然引入偏差。这一小节把这个偏差形式化,看清 ε 调的到底是什么、与 [GAE 的形式化偏差界](#gae-的形式化偏差界critic-误差如何传导给优势)如何对仗。
+前面把 $L^{\text{CLIP}}$ 当成一个「防一步迈太大」的工程技巧讲。但裁剪本质上是用一个**有偏目标**去近似**无偏的策略梯度** $L^{\text{PG}}=\mathbb E[r_t A_t]$——裁剪支把越界样本的梯度截断了，这必然引入偏差。这一小节把这个偏差形式化，看清 ε 调的到底是什么、与 [GAE 的形式化偏差界](#gae-的形式化偏差界critic-误差如何传导给优势)如何对仗。
 
-**无偏与有偏的分界。** 把裁剪目标写成期望:$L^{\text{CLIP}}=\mathbb E_t[\min(r_t A_t,\,\text{clip}(r_t,1-\varepsilon,1+\varepsilon)A_t)]$。逐样本看,$\min$ 的选择**非对称**:
+**无偏与有偏的分界。** 把裁剪目标写成期望：$L^{\text{CLIP}}=\mathbb E_t[\min(r_t A_t,\,\text{clip}(r_t,1-\varepsilon,1+\varepsilon)A_t)]$。逐样本看，$\min$ 的选择**非对称**：
 
-- 当 $A>0$(好动作,想增大概率):$r>1+\varepsilon$ 时走**裁剪支**(封顶在 $(1+\varepsilon)A$,梯度归零,有偏差);$r<1-\varepsilon$ 时走**未裁剪支**($rA$ 本就比 $(1-\varepsilon)A$ 小,$\min$ 选 $rA$,无偏差)。
-- 当 $A<0$(坏动作,想减小概率):对称地反过来——$r<1-\varepsilon$ 时走裁剪支,$r>1+\varepsilon$ 时走未裁剪支。
+- 当 $A>0$（好动作，想增大概率）：$r>1+\varepsilon$ 时走**裁剪支**（封顶在 $(1+\varepsilon)A$，梯度归零，有偏差）；$r<1-\varepsilon$ 时走**未裁剪支**（$rA$ 本就比 $(1-\varepsilon)A$ 小，$\min$ 选 $rA$，无偏差）。
+- 当 $A<0$（坏动作，想减小概率）：对称地反过来——$r<1-\varepsilon$ 时走裁剪支，$r>1+\varepsilon$ 时走未裁剪支。
 
-精妙之处正在这种非对称:**裁剪只在「更新过头」方向截断,「更新不足」方向放行**。把好动作概率推得太高($r>1+\varepsilon$)会被叫停,但把好动作压低了($r<1-\varepsilon$)不会——后者本就是错的方向,任由梯度纠正。
+精妙之处正在这种非对称：**裁剪只在「更新过头」方向截断，「更新不足」方向放行**。把好动作概率推得太高（$r>1+\varepsilon$）会被叫停，但把好动作压低了（$r<1-\varepsilon$）不会——后者本就是错的方向，任由梯度纠正。
 
-**形式化偏差界。** 用 $L^{\text{PG}}=\mathbb E[rA]$ 与 $L^{\text{CLIP}}$ 的期望差度量裁剪引入的偏差。逐样本上,裁剪支与未裁剪支的差仅在越界时为非零,且等于 $|A|\cdot|r-1|-\varepsilon|A|$(被截掉的部分)。对期望取上界,得:
+**形式化偏差界。** 用 $L^{\text{PG}}=\mathbb E[rA]$ 与 $L^{\text{CLIP}}$ 的期望差度量裁剪引入的偏差。逐样本上，裁剪支与未裁剪支的差仅在越界时为非零，且等于 $|A|\cdot|r-1|-\varepsilon|A|$（被截掉的部分）。对期望取上界，得：
 
 $$
 \big|\mathbb E[L^{\text{CLIP}}]-\mathbb E[L^{\text{PG}}]\big|\;\le\;\mathbb E\Big[\,|A_t|\cdot|r_t-1|\cdot\mathbb 1_{\{|r_t-1|>\varepsilon\}}\Big]
 $$
 
-右边三因子各司其职:**$|A|$** 是优势幅值(大优势的样本裁剪损失大)、**$|r-1|$** 是策略比偏离幅度(离 1 越远截掉越多)、**$\mathbb 1_{|r-1|>\varepsilon}$** 是越界指示(只有越界样本才贡献偏差)。这个界只在**越界样本**上计偏差——这就是「信任域」的几何含义:裁剪把偏差严格限制在 $r\notin[1-\varepsilon,1+\varepsilon]$ 的样本上,域内零偏差。
+右边三因子各司其职：**$|A|$** 是优势幅值（大优势的样本裁剪损失大）、**$|r-1|$** 是策略比偏离幅度（离 1 越远截掉越多）、**$\mathbb 1_{|r-1|>\varepsilon}$** 是越界指示（只有越界样本才贡献偏差）。这个界只在**越界样本**上计偏差——这就是「信任域」的几何含义：裁剪把偏差严格限制在 $r\notin[1-\varepsilon,1+\varepsilon]$ 的样本上，域内零偏差。
 
 **三件事。**
 
-1. **偏差根源是越界样本,不是裁剪本身。** ε 不改变「裁剪有偏」这一性质,只改变**越界率**。ε 越大,信任域越宽,越界样本越少,偏差界越紧。这与 [GAE 偏差界](#gae-的形式化偏差界critic-误差如何传导给优势)的 $\frac{2\epsilon_{\text{critic}}}{1-\gamma\lambda}$ 不同——GAE 的偏差根源是 Critic 误差 $\epsilon_{\text{critic}}$,通过 λ 放大系数传导;PPO 的偏差根源是策略比越界,通过 ε 控制越界率。
-2. **ε 调的是偏差-方差权衡,且方向与 GAE 的 λ 同构。** ε↑ → 越界率↓ → 偏差↓;但裁剪支变少 → 离群 $r$ 更多保留 → 方差↑。ε=∞ 时退化为无偏 PG(方差最大),ε=0 时每步更新完全封顶(偏差最大、方差最小但学不动)。这与 GAE 完全对仗:λ↑ → 偏差↓方差↑。两个旋钮都是**「信任域宽度」**——GAE 的信任域在**优势估计**层(λ 控制 bootstrap 多少),PPO 的信任域在**策略更新**层(ε 控制 ratio 走多远)。
-3. **裁剪的非对称性是 PPO 优于朴素裁剪的关键。** 若用对称裁剪 $\text{clip}(rA,\cdot)$(两端都截),「更新不足」方向也被截断,梯度信号丢失。PPO 的 $\min$ 只截「过头」方向,保留「不足」方向的纠正信号——这让 PPO 在保持单向防崩的同时不损失下降方向的梯度。
+1. **偏差根源是越界样本，不是裁剪本身。** ε 不改变「裁剪有偏」这一性质，只改变**越界率**。ε 越大，信任域越宽，越界样本越少，偏差界越紧。这与 [GAE 偏差界](#gae-的形式化偏差界critic-误差如何传导给优势)的 $\frac{2\epsilon_{\text{critic}}}{1-\gamma\lambda}$ 不同——GAE 的偏差根源是 Critic 误差 $\epsilon_{\text{critic}}$，通过 λ 放大系数传导；PPO 的偏差根源是策略比越界，通过 ε 控制越界率。
+2. **ε 调的是偏差-方差权衡，且方向与 GAE 的 λ 同构。** ε↑ → 越界率↓ → 偏差↓；但裁剪支变少 → 离群 $r$ 更多保留 → 方差↑。ε=∞ 时退化为无偏 PG（方差最大），ε=0 时每步更新完全封顶（偏差最大、方差最小但学不动）。这与 GAE 完全对仗：λ↑ → 偏差↓方差↑。两个旋钮都是**「信任域宽度」**——GAE 的信任域在**优势估计**层（λ 控制 bootstrap 多少），PPO 的信任域在**策略更新**层（ε 控制 ratio 走多远）。
+3. **裁剪的非对称性是 PPO 优于朴素裁剪的关键。** 若用对称裁剪 $\text{clip}(rA,\cdot)$（两端都截），「更新不足」方向也被截断，梯度信号丢失。PPO 的 $\min$ 只截「过头」方向，保留「不足」方向的纠正信号——这让 PPO 在保持单向防崩的同时不损失下降方向的梯度。
 
-下面三段代码分别印证:裁剪的非对称性、形式化偏差界成立、ε 的偏差-方差权衡曲线。
+下面三段代码分别印证：裁剪的非对称性、形式化偏差界成立、ε 的偏差-方差权衡曲线。
 
 <CodeRunner defaultCode={`import numpy as np
 
@@ -1273,27 +1274,27 @@ print("      与 GAE 对仗: lambda↑ -> 偏差↓方差↑; 都是'信任域�
 print("      GAE 的信任域在优势估计层 (lambda 控 bootstrap), PPO 的在策略更新层 (eps 控 ratio)。")
 `} title="段3: eps 的偏差-方差权衡" />
 
-> 💡 **与 GAE 偏差界的对照**:R123 节给出 GAE 的形式化偏差界 $|\hat A^{GAE}-\hat A^{GAE,\pi}|\le\frac{2\epsilon_{\text{critic}}}{1-\gamma\lambda}$,偏差根源是 Critic 误差 $\epsilon_{\text{critic}}$,通过 λ 放大。本节的 PPO 裁剪偏差界 $|\mathbb E[L^{\text{CLIP}}]-\mathbb E[L^{\text{PG}}]|\le\mathbb E[|A|\cdot|r-1|\cdot\mathbb 1_{|r-1|>\varepsilon}]$,偏差根源是策略比越界,通过 ε 控制越界率。**两者是 PPO 训练流水线前后相接的两层偏差**:GAE 在**优势估计**层(Critic 误差传给优势),PPO 裁剪在**策略更新**层(ratio 越界传给梯度)。调 $\lambda$ 调前者,调 $\varepsilon$ 调后者,两者共同决定 PPO 实际梯度与真策略梯度的总偏离。Spinning Up 默认 $\lambda=0.97$、$\varepsilon=0.2$ [2][5] 就是这两层信任域的工程平衡点。
+> 💡 **与 GAE 偏差界的对照**：R123 节给出 GAE 的形式化偏差界 $|\hat A^{GAE}-\hat A^{GAE,\pi}|\le\frac{2\epsilon_{\text{critic}}}{1-\gamma\lambda}$，偏差根源是 Critic 误差 $\epsilon_{\text{critic}}$，通过 λ 放大。本节的 PPO 裁剪偏差界 $|\mathbb E[L^{\text{CLIP}}]-\mathbb E[L^{\text{PG}}]|\le\mathbb E[|A|\cdot|r-1|\cdot\mathbb 1_{|r-1|>\varepsilon}]$，偏差根源是策略比越界，通过 ε 控制越界率。**两者是 PPO 训练流水线前后相接的两层偏差**：GAE 在**优势估计**层（Critic 误差传给优势），PPO 裁剪在**策略更新**层（ratio 越界传给梯度）。调 $\lambda$ 调前者，调 $\varepsilon$ 调后者，两者共同决定 PPO 实际梯度与真策略梯度的总偏离。Spinning Up 默认 $\lambda=0.97$、$\varepsilon=0.2$ [2][5] 就是这两层信任域的工程平衡点。
 
-### 两种 PPO:Clip 与 Penalty
+### 两种 PPO：Clip 与 Penalty
 
-PPO 其实是**一族**方法 [5],最常用的是上面讲的 **PPO-Clip**(靠裁剪拴住)。还有一个变体 **PPO-Penalty**:不裁剪,而是把「偏离旧策略」写成目标里的一个 **KL 惩罚**项——
+PPO 其实是**一族**方法 [5]，最常用的是上面讲的 **PPO-Clip**（靠裁剪拴住）。还有一个变体 **PPO-Penalty**：不裁剪，而是把「偏离旧策略」写成目标里的一个 **KL 惩罚**项——
 
 $$
 L^{\text{KPEN}}(\theta)=\mathbb{E}_t\big[r_t A_t\big]-\beta\,\mathbb{E}_t\big[D_{\text{KL}}(\pi_{\text{old}}(\cdot\mid s_t)\,\|\,\pi_\theta(\cdot\mid s_t))\big]
 $$
 
-$\beta$ 是惩罚系数,关键是它**自适应**:每轮更新后算实际 KL 散度 $d=\bar D_{\text{KL}}$,与目标 $d_{\text{tgt}}$ 比——
+$\beta$ 是惩罚系数，关键是它**自适应**：每轮更新后算实际 KL 散度 $d=\bar D_{\text{KL}}$，与目标 $d_{\text{tgt}}$ 比——
 
 $$
 \beta\leftarrow\begin{cases}2\beta & d<d_{\text{tgt}}/1.5\;\text{(偏离不够,加大惩罚)}\\ \beta/2 & d>d_{\text{tgt}}\cdot1.5\;\text{(偏离过头,也加大惩罚)}\\ \beta & \text{否则}\end{cases}
 $$
 
-逻辑是:KL 太小说明约束太松(策略不动)、把 $\beta$ 调大逼它多动;KL 太大说明约束没管住(策略跑偏)、也把 $\beta$ 调大拽回来。这套自适应让 PPO-Penalty 近似求解了 TRPO 那个「KL 约束下的更新」[5],只是把硬约束换成软惩罚。实践中 **PPO-Clip 更主流**(少一个要调的 $\beta/d_{\text{tgt}}$,且裁剪对单个样本生效、比分布级 KL 更局部稳定),PPO-Penalty 偶尔在 KL 容易估计的连续控制里用。
+逻辑是：KL 太小说明约束太松（策略不动）、把 $\beta$ 调大逼它多动；KL 太大说明约束没管住（策略跑偏）、也把 $\beta$ 调大拽回来。这套自适应让 PPO-Penalty 近似求解了 TRPO 那个「KL 约束下的更新」[5]，只是把硬约束换成软惩罚。实践中 **PPO-Clip 更主流**（少一个要调的 $\beta/d_{\text{tgt}}$，且裁剪对单个样本生效、比分布级 KL 更局部稳定），PPO-Penalty 偶尔在 KL 容易估计的连续控制里用。
 
-### KL 早停:裁剪之外的第二道保险
+### KL 早停：裁剪之外的第二道保险
 
-裁剪管的是「单个样本的概率比」,但累积起来整批更新仍可能把策略推远。主流实现(包括 Spinning Up [2])加了一道**全局安全网**:每轮策略梯度步之后,算新策略相对旧策略的平均 KL $\bar D_{\text{KL}}(\pi_{\text{old}}\|\pi_\theta)$;一旦超过阈值 `target_kl`(通常 $0.01$),**立即停止本轮后续梯度步**——
+裁剪管的是「单个样本的概率比」，但累积起来整批更新仍可能把策略推远。主流实现（包括 Spinning Up [2]）加了一道**全局安全网**：每轮策略梯度步之后，算新策略相对旧策略的平均 KL $\bar D_{\text{KL}}(\pi_{\text{old}}\|\pi_\theta)$；一旦超过阈值 `target_kl`（通常 $0.01$），**立即停止本轮后续梯度步**——
 
 ```python
 for i in range(train_pi_iters):
@@ -1305,16 +1306,16 @@ for i in range(train_pi_iters):
         break
 ```
 
-于是 PPO 实际有**两层防崩**:$\varepsilon$ 裁剪(样本级)+ `target_kl` 早停(批次级)。前者便宜、局部;后者贵一点(每步要重算 KL)、全局。两者协作,正是 PPO 能用「多 epoch 复用同一批数据」而不崩的关键——原始策略梯度每条数据只用一次,PPO 却能在同一批轨迹上跑 10~80 个 epoch 的小批量更新 [5],样本效率由此大涨。
+于是 PPO 实际有**两层防崩**：$\varepsilon$ 裁剪（样本级）+ `target_kl` 早停（批次级）。前者便宜、局部；后者贵一点（每步要重算 KL）、全局。两者协作，正是 PPO 能用「多 epoch 复用同一批数据」而不崩的关键——原始策略梯度每条数据只用一次，PPO 却能在同一批轨迹上跑 10~80 个 epoch 的小批量更新 [5]，样本效率由此大涨。
 
 ### 工程超参数表
 
-把上面拼起来,一个能跑的 PPO 长这样(Spinning Up 默认值 [2]):
+把上面拼起来，一个能跑的 PPO 长这样（Spinning Up 默认值 [2]）：
 
 | 超参数 | 符号 | 典型值 | 作用 |
 |---|---|---|---|
-| 裁剪比 | $\varepsilon$ | 0.2 | 概率比封顶宽度,通常 $0.1\sim0.3$ |
-| GAE $\lambda$ | $\lambda$ | 0.97 | 优势估计的偏差-方差旋钮,接近 1 |
+| 裁剪比 | $\varepsilon$ | 0.2 | 概率比封顶宽度，通常 $0.1\sim0.3$ |
+| GAE $\lambda$ | $\lambda$ | 0.97 | 优势估计的偏差-方差旋钮，接近 1 |
 | KL 早停阈值 | `target_kl` | 0.01 | 每轮策略更新的「偏离熔断」 |
 | 每轮 epoch 数 | $K$ | 10~80 | 同一批数据复用多少次小批量更新 |
 | 折扣 | $\gamma$ | 0.99 | 回报折扣 |
@@ -1322,11 +1323,11 @@ for i in range(train_pi_iters):
 | 价值系数 | $c_v$ | 0.5 | 价值损失权重 |
 | 熵系数 | $c_s$ | 0.01 | 鼓励探索的保险丝 |
 
-> 💡 **PPO 为什么是「工程赢家」**:看这张表就懂了——全是**一阶**量(没有 Hessian、没有共轭梯度),每个超参数都有合理默认值且不敏感,$\varepsilon=0.2$ 几乎对所有任务都管用。对比 TRPO 要调 $\delta$、阻尼系数、CG 迭代数且都敏感 [5],PPO 把「理论上的 trust region」翻译成「一组鲁棒的一阶技巧」(裁剪 + 早停 + 熵 + 多 epoch),牺牲了单调提升的严格证明,换来了能从 Atari 一路用到 RLHF 的通用性。
+> 💡 **PPO 为什么是「工程赢家」**：看这张表就懂了——全是**一阶**量（没有 Hessian、没有共轭梯度），每个超参数都有合理默认值且不敏感，$\varepsilon=0.2$ 几乎对所有任务都管用。对比 TRPO 要调 $\delta$、阻尼系数、CG 迭代数且都敏感 [5]，PPO 把「理论上的 trust region」翻译成「一组鲁棒的一阶技巧」（裁剪 + 早停 + 熵 + 多 epoch），牺牲了单调提升的严格证明，换来了能从 Atari 一路用到 RLHF 的通用性。
 
 ### 可运行 PPO 训练循环骨架
 
-把前面所有零件拼成一个训练循环。这里用最简设定(连续动作、高斯策略)展示数据流,省去并行采集与数值稳定细节:
+把前面所有零件拼成一个训练循环。这里用最简设定（连续动作、高斯策略）展示数据流，省去并行采集与数值稳定细节：
 
 ```python
 import numpy as np
@@ -1416,61 +1417,61 @@ for epoch in range(50):
     print(f"epoch {epoch}: mean_adv={(buf[3].sum()/len(buf[3])).item():.2f}")
 ```
 
-跑一下,关注三件事:① 把 `EPS` 调到 1.0(几乎不裁剪),训练会变不稳甚至发散——直观感受裁剪的作用;② 把 `TARGET_KL` 调到 1.0(几乎不早停),同样会变不稳;③ 优势归一化 `adv = (adv-mean)/std` 看似不起眼,去掉它方差会明显变大——这是工程上降方差的免费午餐。注意真实 PPO 实现还会把 4000 步切成小批量(minibatch)做多个 epoch,这里为可读性省略。
+跑一下，关注三件事：① 把 `EPS` 调到 1.0（几乎不裁剪），训练会变不稳甚至发散——直观感受裁剪的作用；② 把 `TARGET_KL` 调到 1.0（几乎不早停），同样会变不稳；③ 优势归一化 `adv = (adv-mean)/std` 看似不起眼，去掉它方差会明显变大——这是工程上降方差的免费午餐。注意真实 PPO 实现还会把 4000 步切成小批量（minibatch）做多个 epoch，这里为可读性省略。
 
-## 策略梯度的收敛性:理论保证与它的天花板
+## 策略梯度的收敛性：理论保证与它的天花板
 
-前面四节——REINFORCE → Actor-Critic → TRPO → PPO——都在解决同一类工程问题:**把 $\nabla_\theta J(\pi_\theta)$ 估得更准、把每步更新走得更稳**(降方差、加基线、加信赖域、加裁剪)。但有一个更根本的问题一直没正面回答:**这样反复更新,最终能收敛到最优策略吗?** 这一节把策略梯度法放进**随机近似理论**的框架里,看清它**能保证什么、保证不了什么**。结论先说在前:**REINFORCE 是期望梯度的无偏估计,在 Robbins-Monro 步长下几乎处处收敛到一个驻点——但 $J(\theta)$ 一般非凹,所以只能收敛到局部最优,且收敛到哪个局部最优取决于初值**。这正是后续 TRPO/PPO 乃至自然梯度都在试图「缓解」的天花板。
+前面四节——REINFORCE → Actor-Critic → TRPO → PPO——都在解决同一类工程问题：**把 $\nabla_\theta J(\pi_\theta)$ 估得更准、把每步更新走得更稳**（降方差、加基线、加信赖域、加裁剪）。但有一个更根本的问题一直没正面回答：**这样反复更新，最终能收敛到最优策略吗？** 这一节把策略梯度法放进**随机近似理论**的框架里，看清它**能保证什么、保证不了什么**。结论先说在前：**REINFORCE 是期望梯度的无偏估计，在 Robbins-Monro 步长下几乎处处收敛到一个驻点——但 $J(\theta)$ 一般非凹，所以只能收敛到局部最优，且收敛到哪个局部最优取决于初值**。这正是后续 TRPO/PPO 乃至自然梯度都在试图「缓解」的天花板。
 
 ### REINFORCE 是期望梯度的无偏估计
 
-策略梯度定理(见前文)告诉我们真梯度是 $\nabla_\theta J(\theta)=\mathbb E_{\tau\sim\pi_\theta}\big[\sum_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)\,R(\tau)\big]$。REINFORCE 直接用 Monte Carlo 样本估这个期望:$\hat g=\frac1N\sum_{i=1}^N\big(\sum_t\nabla_\theta\log\pi_\theta(a_t^{(i)}\mid s_t^{(i)})\big)R(\tau^{(i)})$。由**期望的线性性**与**对数导数技巧**(score function trick,即 $\nabla_\theta\log\pi_\theta=\nabla_\theta\pi_\theta/\pi_\theta$,故 $\pi_\theta\cdot\nabla_\theta\log\pi_\theta=\nabla_\theta\pi_\theta$),有
+策略梯度定理（见前文）告诉我们真梯度是 $\nabla_\theta J(\theta)=\mathbb E_{\tau\sim\pi_\theta}\big[\sum_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)\,R(\tau)\big]$。REINFORCE 直接用 Monte Carlo 样本估这个期望：$\hat g=\frac1N\sum_{i=1}^N\big(\sum_t\nabla_\theta\log\pi_\theta(a_t^{(i)}\mid s_t^{(i)})\big)R(\tau^{(i)})$。由**期望的线性性**与**对数导数技巧**（score function trick，即 $\nabla_\theta\log\pi_\theta=\nabla_\theta\pi_\theta/\pi_\theta$，故 $\pi_\theta\cdot\nabla_\theta\log\pi_\theta=\nabla_\theta\pi_\theta$），有
 
 $$\mathbb E_{\tau\sim\pi_\theta}[\hat g]=\mathbb E_{\tau\sim\pi_\theta}\Big[\sum_t\nabla_\theta\log\pi_\theta(a_t\mid s_t)\,R(\tau)\Big]=\nabla_\theta J(\theta).$$
 
-所以 $\hat g$ 是 $\nabla_\theta J(\theta)$ 的**无偏估计**——这是 REINFORCE 最重要的一条性质,由 Williams (1992) [14] 在「REINFORCE」族算法里首次系统建立。无偏意味着:只要步长合适(见下),沿着 $\hat g$ 反复走**期望意义下**就是在沿着真梯度上升。**但无偏 ≠ 一定收敛到全局最优**——下面两小节是它的两个天花板。
+所以 $\hat g$ 是 $\nabla_\theta J(\theta)$ 的**无偏估计**——这是 REINFORCE 最重要的一条性质，由 Williams (1992) [14] 在「REINFORCE」族算法里首次系统建立。无偏意味着：只要步长合适（见下），沿着 $\hat g$ 反复走**期望意义下**就是在沿着真梯度上升。**但无偏 ≠ 一定收敛到全局最优**——下面两小节是它的两个天花板。<Cite n={14} />
 
-### 天花板一:$J(\theta)$ 一般非凹,只能收敛到局部最优
+### 天花板一：$J(\theta)$ 一般非凹，只能收敛到局部最优
 
-无偏估计只保证「期望梯度方向是对的」,不保证「$J(\theta)$ 是个凸函数」。事实上策略梯度的目标 $J(\theta)=\mathbb E_{\tau\sim\pi_\theta}[R(\tau)]$ 对 $\theta$ 几乎总是**非凹**的:策略参数 $\theta$ 通过概率 $\pi_\theta$ 影响轨迹分布,这是一个高度非线性的映射,多个局部最优是常态而非例外(Sutton & Barto, 2018, Ch.13 [4])。
+无偏估计只保证「期望梯度方向是对的」，不保证「$J(\theta)$ 是个凸函数」。事实上策略梯度的目标 $J(\theta)=\mathbb E_{\tau\sim\pi_\theta}[R(\tau)]$ 对 $\theta$ 几乎总是**非凹**的：策略参数 $\theta$ 通过概率 $\pi_\theta$ 影响轨迹分布，这是一个高度非线性的映射，多个局部最优是常态而非例外（Sutton & Barto, 2018, Ch.13 [4]）。
 
-非凹的直接后果:**随机梯度上升只能保证收敛到一个驻点($\nabla_\theta J=0$ 的点),而这个驻点可能是局部最优、可能是鞍点,不一定是全局最优**。而且从不同初值出发,会收敛到不同的局部最优——这是策略梯度法(以及它后面的 TRPO/PPO)**无法从理论上消除**的局限。TRPO 的单调提升保证(见前文)只是说「每步不会让 $J$ 变差」,不是说「最终能到全局最优」;PPO 的裁剪同理,是**稳定性**的保证,不是**全局性**的保证。
+非凹的直接后果：**随机梯度上升只能保证收敛到一个驻点（$\nabla_\theta J=0$ 的点），而这个驻点可能是局部最优、可能是鞍点，不一定是全局最优**。而且从不同初值出发，会收敛到不同的局部最优——这是策略梯度法（以及它后面的 TRPO/PPO）**无法从理论上消除**的局限。TRPO 的单调提升保证（见前文）只是说「每步不会让 $J$ 变差」，不是说「最终能到全局最优」；PPO 的裁剪同理，是**稳定性**的保证，不是**全局性**的保证。
 
-### 天花板二:Robbins-Monro 步长与几乎处处收敛
+### 天花板二：Robbins-Monro 步长与几乎处处收敛
 
-无偏估计 + 非凹目标,在什么条件下能收敛到(局部)驻点?这要用**随机近似**(stochastic approximation)的经典结论。Robbins & Monro (1951) 给出:若步长 $\alpha_t$ 满足
+无偏估计 + 非凹目标，在什么条件下能收敛到（局部）驻点？这要用**随机近似**（stochastic approximation）的经典结论。Robbins & Monro （1951） 给出：若步长 $\alpha_t$ 满足
 
 $$\sum_{t=1}^\infty \alpha_t=\infty,\qquad \sum_{t=1}^\infty \alpha_t^2<\infty,$$
 
-且梯度估计无偏、方差有界,则随机梯度上升 $\theta_{t+1}=\theta_t+\alpha_t\hat g_t$ **几乎处处收敛**到一个驻点 $\nabla_\theta J(\theta^*)=0$。两个条件的直觉:**$\sum\alpha_t=\infty$** 保证总步长足够大、不会困在离驻点还远的地方就停步(足够「探索」参数空间);**$\sum\alpha_t^2<\infty$** 保证噪声方差累积有界、不会永远抖动(足够「收敛」)。典型满足条件的步长是 $\alpha_t=c/t^{0.55}$ 这类多项式衰减(本节 CodeRunner 就用它)。
+且梯度估计无偏、方差有界，则随机梯度上升 $\theta_{t+1}=\theta_t+\alpha_t\hat g_t$ **几乎处处收敛**到一个驻点 $\nabla_\theta J(\theta^*)=0$。两个条件的直觉：**$\sum\alpha_t=\infty$** 保证总步长足够大、不会困在离驻点还远的地方就停步（足够「探索」参数空间）；**$\sum\alpha_t^2<\infty$** 保证噪声方差累积有界、不会永远抖动（足够「收敛」）。典型满足条件的步长是 $\alpha_t=c/t^{0.55}$ 这类多项式衰减（本节 CodeRunner 就用它）。
 
-实践里几乎没人真用 $c/t^{0.55}$——它衰减太慢、训练效率不可接受。大家用 Adam 这类**自适应步长**(CS285 [16] 的实证建议:策略梯度用比监督学习大得多的 batch、Adam 可「凑合用」、但调学习率极难)。代价是:**自适应步长不严格满足 Robbins-Monro 条件,理论收敛保证就不再成立**——这是「工程好用」与「理论可证」之间的取舍。TRPO 的共轭梯度 + 线搜索、PPO 的裁剪 + KL 早停,本质都是在用**结构性约束**部分补回这个丢失的稳定性保证,而不是重新拿到收敛性证明。
+实践里几乎没人真用 $c/t^{0.55}$——它衰减太慢、训练效率不可接受。大家用 Adam 这类**自适应步长**（CS285 [16] 的实证建议：策略梯度用比监督学习大得多的 batch、Adam 可「凑合用」、但调学习率极难）。代价是：**自适应步长不严格满足 Robbins-Monro 条件，理论收敛保证就不再成立**——这是「工程好用」与「理论可证」之间的取舍。TRPO 的共轭梯度 + 线搜索、PPO 的裁剪 + KL 早停，本质都是在用**结构性约束**部分补回这个丢失的稳定性保证，而不是重新拿到收敛性证明。
 
-### 自然梯度:换一种「距离」让收敛更稳
+### 自然梯度：换一种「距离」让收敛更稳
 
-Kakade (2001) [15] 提出一个缓解非凹 + 高方差的思路:**不沿欧氏梯度走,沿「策略分布空间」的最陡上升方向走**。欧氏参数空间里,「$\theta$ 与 $\theta+d$ 接近」不等于「$\pi_\theta$ 与 $\pi_{\theta+d}$ 接近」——参数的小欧氏位移可能让策略分布剧变(尤其策略接近确定性时)。Kakade 用 **KL 散度**作为策略分布空间的度量,在该度量下的最陡上升方向称为**自然梯度**:
+Kakade (2001) [15] 提出一个缓解非凹 + 高方差的思路：**不沿欧氏梯度走，沿「策略分布空间」的最陡上升方向走**。欧氏参数空间里，「$\theta$ 与 $\theta+d$ 接近」不等于「$\pi_\theta$ 与 $\pi_{\theta+d}$ 接近」——参数的小欧氏位移可能让策略分布剧变（尤其策略接近确定性时）。Kakade 用 **KL 散度**作为策略分布空间的度量，在该度量下的最陡上升方向称为**自然梯度**：<Cite n={15} />
 
 $$\tilde g = F(\theta)^{-1}\,\nabla_\theta J(\theta),$$
 
-其中 $F(\theta)=\mathbb E_{\tau\sim\pi_\theta}\big[\nabla_\theta\log\pi_\theta(\tau)\nabla_\theta\log\pi_\theta(\tau)^\top\big]$ 是策略的**Fisher 信息矩阵**。直觉:自然梯度在「策略变化剧烈」的方向上自动减小步长($F$ 大、$F^{-1}$ 小),在「策略变化迟钝」的方向上加大步长,使每步更新在**策略分布**意义上等距,而非在参数意义上等距。这是后续 TRPO 信赖域($\bar D_{\mathrm{KL}}\le\delta$)的理论前身——TRPO 可看作「带单调提升保证的自然梯度近似」(Schulman et al., 2015 [6])。自然梯度本身**不解决非凹**(局部最优问题依旧),但让收敛路径更稳健、对参数化更不敏感。
+其中 $F(\theta)=\mathbb E_{\tau\sim\pi_\theta}\big[\nabla_\theta\log\pi_\theta(\tau)\nabla_\theta\log\pi_\theta(\tau)^\top\big]$ 是策略的**Fisher 信息矩阵**。直觉：自然梯度在「策略变化剧烈」的方向上自动减小步长（$F$ 大、$F^{-1}$ 小），在「策略变化迟钝」的方向上加大步长，使每步更新在**策略分布**意义上等距，而非在参数意义上等距。这是后续 TRPO 信赖域（$\bar D_{\mathrm{KL}}\le\delta$）的理论前身——TRPO 可看作「带单调提升保证的自然梯度近似」（Schulman et al., 2015 [6]）。自然梯度本身**不解决非凹**（局部最优问题依旧），但让收敛路径更稳健、对参数化更不敏感。
 
-**Fisher 信息矩阵是分布空间的黎曼度量张量。** $F$ 之所以能当「分布空间的距离」,不是凑出来的——它正是 KL 散度的二阶主项。把 $\bar D_{\mathrm{KL}}(\pi_\theta\,\|\,\pi_{\theta+d})$ 在 $d=0$ 处泰勒展开,一阶项为零(KL 在同点取极小),二阶项正是 $\tfrac12 d^\top F(\theta)\,d$。所以「参数位移 $d$ 在分布空间走了多远」的局部度量就是 $\sqrt{d^\top F\,d}$——$F$ 是把欧氏参数空间「折弯」到分布空间的**度量张量**。策略接近确定性时(分布尖锐),$F$ 大,同样欧氏位移 $d$ 让分布移动更远;策略接近均匀时(分布平坦),$F$ 小,分布移动更近。1-D 高斯 $a\sim\mathcal N(\mu,\sigma^2)$ 里这层关系最干净:对 $\mu$ 的 Fisher $F=1/\sigma^2$ 恰是方差的倒数,$\sigma$ 小(策略尖锐)则 $F$ 大,$\sigma$ 大(策略迟钝)则 $F$ 小。
+**Fisher 信息矩阵是分布空间的黎曼度量张量。** $F$ 之所以能当「分布空间的距离」，不是凑出来的——它正是 KL 散度的二阶主项。把 $\bar D_{\mathrm{KL}}(\pi_\theta\,\|\,\pi_{\theta+d})$ 在 $d=0$ 处泰勒展开，一阶项为零（KL 在同点取极小），二阶项正是 $\tfrac12 d^\top F(\theta)\,d$。所以「参数位移 $d$ 在分布空间走了多远」的局部度量就是 $\sqrt{d^\top F\,d}$——$F$ 是把欧氏参数空间「折弯」到分布空间的**度量张量**。策略接近确定性时（分布尖锐），$F$ 大，同样欧氏位移 $d$ 让分布移动更远；策略接近均匀时（分布平坦），$F$ 小，分布移动更近。1-D 高斯 $a\sim\mathcal N(\mu,\sigma^2)$ 里这层关系最干净：对 $\mu$ 的 Fisher $F=1/\sigma^2$ 恰是方差的倒数，$\sigma$ 小（策略尖锐）则 $F$ 大，$\sigma$ 大（策略迟钝）则 $F$ 小。
 
-**自然梯度是 KL 信赖域内的最陡上升方向。** 把「每步走多远」形式化成一个约束优化:在分布空间走不超过 $\epsilon$ 的前提下,选 $d$ 让目标一阶提升最大,
+**自然梯度是 KL 信赖域内的最陡上升方向。** 把「每步走多远」形式化成一个约束优化：在分布空间走不超过 $\epsilon$ 的前提下，选 $d$ 让目标一阶提升最大，
 
 $$
 d^*=\arg\max_d\;\nabla_\theta J(\theta)^\top d\quad\text{s.t.}\quad \tfrac12\,d^\top F(\theta)\,d\le\epsilon.
 $$
 
-拉格朗日法给 $\nabla J-\lambda Fd=0$,即 $d^*\propto F^{-1}\nabla J$——**自然梯度方向正是 KL 椭球约束下的最陡上升方向**。步长系数 $\sqrt{2\epsilon/(g^\top F^{-1}g)}$ 让约束取等(走到椭球边界),与 line 806 的 TRPO 解析解同源。关键在于:约束用的是 $F$-加权距离而非欧氏距离,所以「最陡」是在**分布空间**意义下的最陡——梯度大但分布几乎不动的方向,$F$ 大、$F^{-1}$ 小,自然梯度会少走;梯度小但分布剧变的方向,$F$ 小、$F^{-1}$ 大,自然梯度会多走。欧氏梯度看不到这层分布几何,可能在一个「参数意义陡」但「分布意义平」的方向上浪费步长。
+拉格朗日法给 $\nabla J-\lambda Fd=0$，即 $d^*\propto F^{-1}\nabla J$——**自然梯度方向正是 KL 椭球约束下的最陡上升方向**。步长系数 $\sqrt{2\epsilon/(g^\top F^{-1}g)}$ 让约束取等（走到椭球边界），与 line 806 的 TRPO 解析解同源。关键在于：约束用的是 $F$-加权距离而非欧氏距离，所以「最陡」是在**分布空间**意义下的最陡——梯度大但分布几乎不动的方向，$F$ 大、$F^{-1}$ 小，自然梯度会少走；梯度小但分布剧变的方向，$F$ 小、$F^{-1}$ 大，自然梯度会多走。欧氏梯度看不到这层分布几何，可能在一个「参数意义陡」但「分布意义平」的方向上浪费步长。
 
-**为何对参数化不敏感:协变变换。** 自然梯度最深的性质是**参数化无关**——同一策略换一种参数化(如把 $\sigma$ 换成 $\log\sigma$),自然梯度的物理方向不变,而欧氏梯度的方向会变。机制是 Fisher 与梯度在参数重参数化 $\theta=\phi(\theta')$(雅可比 $J=\partial\phi/\partial\theta'$)下**协变变换**:
+**为何对参数化不敏感：协变变换。** 自然梯度最深的性质是**参数化无关**——同一策略换一种参数化（如把 $\sigma$ 换成 $\log\sigma$），自然梯度的物理方向不变，而欧氏梯度的方向会变。机制是 Fisher 与梯度在参数重参数化 $\theta=\phi(\theta')$（雅可比 $J=\partial\phi/\partial\theta'$）下**协变变换**：
 
 $$
 F_{\theta'}=J^\top F_\theta\,J,\qquad g_{\theta'}=J^\top g_\theta\;\;\Longrightarrow\;\;\tilde g_{\theta'}=F_{\theta'}^{-1}g_{\theta'}=J^{-1}\tilde g_\theta.
 $$
 
-欧氏梯度 $g_{\theta'}=J^\top g_\theta$ 随 $J^\top$ 变换(不是 $J^{-1}$),所以物理方向变;自然梯度 $\tilde g_{\theta'}=J^{-1}\tilde g_\theta$ 随 $J^{-1}$ 变换,恰好抵消参数变换——在分布空间里它指向同一个方向。这就是 Kakade 2001 [15] 的核心动机:**让算法依赖策略分布本身,而非任意的参数化选择**。欧氏梯度下降在「学 $\sigma$」与「学 $\log\sigma$」两种参数化下收敛到不同点,自然梯度下降收敛到同一点——下面的 CodeRunner 把这件事量化。
+欧氏梯度 $g_{\theta'}=J^\top g_\theta$ 随 $J^\top$ 变换（不是 $J^{-1}$），所以物理方向变；自然梯度 $\tilde g_{\theta'}=J^{-1}\tilde g_\theta$ 随 $J^{-1}$ 变换，恰好抵消参数变换——在分布空间里它指向同一个方向。这就是 Kakade 2001 [15] 的核心动机：**让算法依赖策略分布本身，而非任意的参数化选择**。欧氏梯度下降在「学 $\sigma$」与「学 $\log\sigma$」两种参数化下收敛到不同点，自然梯度下降收敛到同一点——下面的 CodeRunner 把这件事量化。
 
 <CodeRunner defaultCode={`import numpy as np
 
@@ -1587,11 +1588,11 @@ print(f"  -> 这正是 Kakade 2001 [15] 的核心动机: 让算法依赖策略�
 print(f"     而非任意的参数化选择。欧氏梯度做不到这点, 因其度量随参数化改变。")
 `} title="自然梯度:Fisher 度量、KL 最陡上升、参数化不变性" />
 
-跑完看三件事:① 段1 里高斯策略的 Fisher $F=1/\sigma^2$ 恰是方差倒数——策略越尖锐(sigma 小)Fisher 越大,印证「Fisher 是分布敏感度」;② 段2 里 KL 信赖域约束下的自然梯度步($\sqrt{2\epsilon/F}$)比同等欧氏信赖域步($\sqrt{2\epsilon}$)长——分布迟钝时 Fisher 小,自然梯度在 KL 约束内能走更远,欧氏度量低估了可走距离;③ 段3 是核心:同一策略换两种参数化(学 $\sigma$ vs 学 $\log\sigma$),欧氏梯度下降收敛到不同点,自然梯度下降收敛到同一点——**参数化不变性**是 natural gradient 区别于欧氏梯度的根本性质,也是 TRPO/PPO 用 KL 信赖域(而非欧氏步长)的理论根基 [15]。
+跑完看三件事：① 段1 里高斯策略的 Fisher $F=1/\sigma^2$ 恰是方差倒数——策略越尖锐（sigma 小）Fisher 越大，印证「Fisher 是分布敏感度」；② 段2 里 KL 信赖域约束下的自然梯度步（$\sqrt{2\epsilon/F}$）比同等欧氏信赖域步（$\sqrt{2\epsilon}$）长——分布迟钝时 Fisher 小，自然梯度在 KL 约束内能走更远，欧氏度量低估了可走距离；③ 段3 是核心：同一策略换两种参数化（学 $\sigma$ vs 学 $\log\sigma$），欧氏梯度下降收敛到不同点，自然梯度下降收敛到同一点——**参数化不变性**是 natural gradient 区别于欧氏梯度的根本性质，也是 TRPO/PPO 用 KL 信赖域（而非欧氏步长）的理论根基 [15]。
 
-### 动手看:无偏、高方差、与初值决定的局部最优
+### 动手看：无偏、高方差、与初值决定的局部最优
 
-下面这个 CodeRunner 用一个最小玩具把本节三件事一次看清:① REINFORCE 估计**无偏**(估计均值 ≈ 真梯度);② 但**高方差**(单次估计与真梯度偏差大);③ $J(\mu)$ 双峰非凹,REINFORCE 从不同初值出发**收敛到不同局部最优**。奖励 $r(a)=e^{-(a-2)^2}+0.6\,e^{-(a+3)^2}$ 在 $a=+2$ 处有全局峰、$a=-3$ 处有次峰;策略是 1-D 高斯 $a\sim\mathcal N(\mu,1.5^2)$,只学 $\mu$。
+下面这个 CodeRunner 用一个最小玩具把本节三件事一次看清：① REINFORCE 估计**无偏**（估计均值 ≈ 真梯度）；② 但**高方差**（单次估计与真梯度偏差大）；③ $J(\mu)$ 双峰非凹，REINFORCE 从不同初值出发**收敛到不同局部最优**。奖励 $r(a)=e^{-(a-2)^2}+0.6\,e^{-(a+3)^2}$ 在 $a=+2$ 处有全局峰、$a=-3$ 处有次峰；策略是 1-D 高斯 $a\sim\mathcal N(\mu,1.5^2)$，只学 $\mu$。
 
 <CodeRunner defaultCode={`import numpy as np
 
@@ -1643,93 +1644,93 @@ for mu0 in [-3.0, 0.0, 2.0]:
 print("-> mu0=-3 困在次峰 (局部最优); mu0=+2 到达全局峰; 初值决定终点")
 `} title="策略梯度收敛性:无偏、高方差、局部最优" />
 
-跑完会看到三件事:① 在 $\mu=0$ 处,2000 次 REINFORCE 估计的均值(约 0.096)贴近真梯度(约 0.096)——**无偏性**成立;② 但单次估计的标准差(约 0.024)与真梯度本身同量级——**高方差**,这正是前面「REINFORCE 的致命伤」一节的根因;③ 从 $\mu_0=-3$ 出发收敛到 $\mu\approx-2.93$(次峰,局部最优,$J\approx0.26$),从 $\mu_0=+2$ 出发收敛到 $\mu\approx1.97$(全局峰,$J\approx0.43$)——**$J$ 非凹导致初值决定终点**。把 `steps` 调大、把 `n` 调大,这两点不会改变:无偏性是渐近的、非凹是结构性的,更多样本只降方差、不消除局部最优。
+跑完会看到三件事：① 在 $\mu=0$ 处，2000 次 REINFORCE 估计的均值（约 0.096）贴近真梯度（约 0.096）——**无偏性**成立；② 但单次估计的标准差（约 0.024）与真梯度本身同量级——**高方差**，这正是前面「REINFORCE 的致命伤」一节的根因；③ 从 $\mu_0=-3$ 出发收敛到 $\mu\approx-2.93$（次峰，局部最优，$J\approx0.26$），从 $\mu_0=+2$ 出发收敛到 $\mu\approx1.97$（全局峰，$J\approx0.43$）——**$J$ 非凹导致初值决定终点**。把 `steps` 调大、把 `n` 调大，这两点不会改变：无偏性是渐近的、非凹是结构性的，更多样本只降方差、不消除局部最优。
 
 ### 四种方法的收敛保证层级
 
 | 方法 | 每步保证 | 收敛目标 | 关键机制 |
 |------|---------|---------|---------|
-| REINFORCE [14] | 梯度估计无偏 | 驻点(局部最优,Robbins-Monro 步长下几乎处处) | score-function 蒙特卡洛 |
-| 自然梯度 [15] | 在 KL 度量下最陡上升 | 驻点(局部最优,路径更稳健) | Fisher 信息逆矩阵 |
-| TRPO [6] | 单调提升 $J(\pi_{k+1})\ge J(\pi_k)$ | 局部最优(信赖域内每步不降) | KL 硬约束 + 共轭梯度 |
-| PPO [5] | 一阶近似,clip 防过步 | 无形式收敛证明,工程稳定 | 裁剪 + KL 早停 |
+| REINFORCE [14] | 梯度估计无偏 | 驻点（局部最优，Robbins-Monro 步长下几乎处处） | score-function 蒙特卡洛 |
+| 自然梯度 [15] | 在 KL 度量下最陡上升 | 驻点（局部最优，路径更稳健） | Fisher 信息逆矩阵 |
+| TRPO [6] | 单调提升 $J(\pi_{k+1})\ge J(\pi_k)$ | 局部最优（信赖域内每步不降） | KL 硬约束 + 共轭梯度 |
+| PPO [5] | 一阶近似，clip 防过步 | 无形式收敛证明，工程稳定 | 裁剪 + KL 早停 |
 
-从上到下,**「每步保证」越来越弱**(从无偏梯度 → KL 最陡 → 单调提升 → 工程启发),但**工程效率越来越高**(二阶共轭梯度贵、一阶 clip 便宜)。这就是策略梯度法的现实:**理论保证与工程效率此消彼长**,没有免费午餐。
+从上到下，**「每步保证」越来越弱**（从无偏梯度 → KL 最陡 → 单调提升 → 工程启发），但**工程效率越来越高**（二阶共轭梯度贵、一阶 clip 便宜）。这就是策略梯度法的现实：**理论保证与工程效率此消彼长**，没有免费午餐。
 
-> 💡 **一句话总结**:REINFORCE 是无偏梯度估计,Robbins-Monro 步长下几乎处处收敛到驻点——但 $J(\theta)$ 非凹,驻点未必是全局最优,初值决定终点;自然梯度 / TRPO / PPO 是在不同层面「让收敛更稳」的工程缓解,但都没从理论上消除非凹带来的局部最优天花板。
+> 💡 **一句话总结**：REINFORCE 是无偏梯度估计，Robbins-Monro 步长下几乎处处收敛到驻点——但 $J(\theta)$ 非凹，驻点未必是全局最优，初值决定终点；自然梯度 / TRPO / PPO 是在不同层面「让收敛更稳」的工程缓解，但都没从理论上消除非凹带来的局部最优天花板。
 
-## 安全强化学习:带约束的优化
+## 安全强化学习：带约束的优化
 
-前面所有方法——REINFORCE、Actor-Critic、TRPO、PPO——都假设「**奖励越大越好**」,智能体可以不择手段地最大化回报。但真实世界很少这样:自动驾驶要快但**不能撞人**(安全约束)、机器人要完成任务但**不能用力过猛扭坏关节**(物理约束)、推荐系统要点击率但**不能推送违规内容**(合规约束)、电网调度要省钱但**不能过载**(运行约束)。这些场景里,有一类「**代价(cost)**」必须压在某个上限之下,奖励再高也不能突破。**安全强化学习(safe RL)** 研究的就是:**在满足代价约束的前提下最大化回报**。
+前面所有方法——REINFORCE、Actor-Critic、TRPO、PPO——都假设「**奖励越大越好**」，智能体可以不择手段地最大化回报。但真实世界很少这样：自动驾驶要快但**不能撞人**（安全约束）、机器人要完成任务但**不能用力过猛扭坏关节**（物理约束）、推荐系统要点击率但**不能推送违规内容**（合规约束）、电网调度要省钱但**不能过载**（运行约束）。这些场景里，有一类「**代价（cost）**」必须压在某个上限之下，奖励再高也不能突破。**安全强化学习（safe RL）** 研究的就是：**在满足代价约束的前提下最大化回报**。
 
-### CMDP:把约束写进问题定义
+### CMDP：把约束写进问题定义
 
-标准 MDP 只有奖励 $r$。**约束马尔可夫决策过程(Constrained MDP,CMDP)**[12] 在此基础上加一组辅助代价函数 $C_i:S\times A\times S\to\mathbb R$ 与对应上限 $d_i$。策略的**代价回报**定义为:
+标准 MDP 只有奖励 $r$。**约束马尔可夫决策过程（Constrained MDP,CMDP）**[12] 在此基础上加一组辅助代价函数 $C_i:S\times A\times S\to\mathbb R$ 与对应上限 $d_i$。<Cite n={12} />策略的**代价回报**定义为：
 
 $$
 J_{C_i}(\pi)\;=\;\mathbb E_{\tau\sim\pi}\!\left[\sum_{t=0}^{\infty}\gamma^t\,C_i(s_t,a_t,s_{t+1})\right]
 $$
 
-可行策略集是所有代价都不超限的策略:
+可行策略集是所有代价都不超限的策略：
 
 $$
 \Pi_C\;\doteq\;\bigl\{\pi\in\Pi:\;\forall i,\;J_{C_i}(\pi)\le d_i\bigr\}
 $$
 
-CMDP 的优化问题就是把策略空间从全部 $\Pi$ 收到 $\Pi_C$:
+CMDP 的优化问题就是把策略空间从全部 $\Pi$ 收到 $\Pi_C$：
 
 $$
 \pi^*\;=\;\arg\max_{\pi\in\Pi_C}\;J(\pi)
 $$
 
-**与标准 MDP 唯一的本质差别**就是策略空间从「全部」收到「代价不超限的子集」。朴素做法是把代价折进奖励($r'=r-\sum\lambda_i C_i$,即奖励塑质),但 $\lambda_i$ 要手调、且塑质后最优策略未必满足原约束(potential-based 塑质保证最优策略不变但**不保证约束满足**)。安全 RL 需要专门算法**显式处理约束**。
+**与标准 MDP 唯一的本质差别**就是策略空间从「全部」收到「代价不超限的子集」。朴素做法是把代价折进奖励（$r'=r-\sum\lambda_i C_i$，即奖励塑质），但 $\lambda_i$ 要手调、且塑质后最优策略未必满足原约束（potential-based 塑质保证最优策略不变但**不保证约束满足**）。安全 RL 需要专门算法**显式处理约束**。
 
-### 三种解法:CPO 信赖域 / PPO-Lagrangian 对偶 / 奖励塑质
+### 三种解法：CPO 信赖域 / PPO-Lagrangian 对偶 / 奖励塑质
 
-主流安全 RL 有三种把约束融进优化的思路,区别在「约束怎么生效」:
+主流安全 RL 有三种把约束融进优化的思路，区别在「约束怎么生效」：
 
 | 方法 | 约束怎么生效 | 代表算法 | 特点 |
 |---|---|---|---|
-| **信赖域硬约束** | 每步更新在 KL 信赖域内**显式投影**到可行集 | CPO(Achiam et al. 2017 [11]) | 每步近约束满足有理论保证,二阶求解复杂 |
-| **拉格朗日对偶** | 把约束上升为对偶变量 $\lambda$,与策略交替优化 | PPO-Lagrangian | 一阶简单,但 $\lambda$ 调参敏感、振荡 |
-| **安全滤波(双策略)** | 任务策略只管奖励,**安全 critic 估违反概率**,超阈值则用**恢复策略**覆盖动作 | Recovery RL(Thanananjeyan et al. 2021 [13]) | 解耦任务与安全,可叠加任意基座算法,需离线数据预学危险区 |
-| **奖励塑质(软)** | $r'=r-\sum\lambda_i C_i$ 折进奖励 | potential-based shaping | 最简单但**不保证约束满足**,只鼓励 |
+| **信赖域硬约束** | 每步更新在 KL 信赖域内**显式投影**到可行集 | CPO(Achiam et al. 2017 [11]) | 每步近约束满足有理论保证，二阶求解复杂 |
+| **拉格朗日对偶** | 把约束上升为对偶变量 $\lambda$，与策略交替优化 | PPO-Lagrangian | 一阶简单，但 $\lambda$ 调参敏感、振荡 |
+| **安全滤波（双策略）** | 任务策略只管奖励，**安全 critic 估违反概率**，超阈值则用**恢复策略**覆盖动作 | Recovery RL(Thanananjeyan et al. 2021 [13]) | 解耦任务与安全，可叠加任意基座算法，需离线数据预学危险区 |
+| **奖励塑质（软）** | $r'=r-\sum\lambda_i C_i$ 折进奖励 | potential-based shaping | 最简单但**不保证约束满足**，只鼓励 |
 
-**CPO(Constrained Policy Optimization)**[11] 是 TRPO 的约束版——TRPO 在 KL 信赖域 $\bar D_{KL}(\pi\|\pi_k)\le\delta$ 内最大化替代优势,CPO 在同样的信赖域内**同时**满足代价约束。它的局部近似是:
+**CPO(Constrained Policy Optimization)**[11] 是 TRPO 的约束版——TRPO 在 KL 信赖域 $\bar D_{KL}(\pi\|\pi_k)\le\delta$ 内最大化替代优势，CPO 在同样的信赖域内**同时**满足代价约束。<Cite n={11} />它的局部近似是：
 
 $$
 \pi_{k+1}=\arg\max_{\pi}\;\mathbb E_{\substack{s\sim d^{\pi_k}\\a\sim\pi}}\!\Bigl[A^{\pi_k}(s,a)\Bigr]\quad\text{s.t.}\quad J_{C_i}(\pi_k)+\frac{1}{1-\gamma}\,\mathbb E_{\substack{s\sim d^{\pi_k}\\a\sim\pi}}\!\Bigl[A^{\pi_k}_{C_i}(s,a)\Bigr]\le d_i,\;\;\bar D_{KL}(\pi\|\pi_k)\le\delta
 $$
 
-代价约束用一阶上界近似(代价替代 $\bar C_i(\pi)=J_{C_i}(\pi_k)+\frac{1}{1-\gamma}E[A^{\pi_k}_{C_i}]$),Proposition 2 给出每步约束违反界 $J_{C_i}(\pi_{k+1})\le d_i+\frac{\sqrt{2\delta}\,\gamma\,\epsilon^{\pi_{k+1}}_{C_i}}{(1-\gamma)^2}$——**每次迭代近约束满足**,这是 CPO 相比拉格朗日法的核心优势(后者可能大幅违反再慢慢拉回)。
+代价约束用一阶上界近似（代价替代 $\bar C_i(\pi)=J_{C_i}(\pi_k)+\frac{1}{1-\gamma}E[A^{\pi_k}_{C_i}]$），Proposition 2 给出每步约束违反界 $J_{C_i}(\pi_{k+1})\le d_i+\frac{\sqrt{2\delta}\,\gamma\,\epsilon^{\pi_{k+1}}_{C_i}}{(1-\gamma)^2}$——**每次迭代近约束满足**，这是 CPO 相比拉格朗日法的核心优势（后者可能大幅违反再慢慢拉回）。<Cite n={11} />
 
-### CPO 的实用求解:线性-二次凸规划
+### CPO 的实用求解：线性-二次凸规划
 
-高维参数下上面那个问题用线性化目标/代价 + 二次 KL 近似转成一个凸规划。记目标梯度 $g$、代价梯度 $b_i$、KL 的 Hessian( Fisher 信息矩阵)$H$、当前代价余量 $c_i\doteq J_{C_i}(\pi_k)-d_i$(>0 表示已违反):
+高维参数下上面那个问题用线性化目标/代价 + 二次 KL 近似转成一个凸规划。记目标梯度 $g$、代价梯度 $b_i$、KL 的 Hessian（ Fisher 信息矩阵）$H$、当前代价余量 $c_i\doteq J_{C_i}(\pi_k)-d_i$（>0 表示已违反）：
 
 $$
 \theta_{k+1}=\arg\max_\theta\;g^\top(\theta-\theta_k)\quad\text{s.t.}\quad c_i+b_i^\top(\theta-\theta_k)\le0,\;\;\tfrac12(\theta-\theta_k)^\top H(\theta-\theta_k)\le\delta
 $$
 
-这是凸规划(线性目标 + 线性/二次约束)。它的对偶(单约束时 $B=b$、$r=g^\top H^{-1}b$、$S=b^\top H^{-1}b$):
+这是凸规划（线性目标 + 线性/二次约束）。它的对偶（单约束时 $B=b$、$r=g^\top H^{-1}b$、$S=b^\top H^{-1}b$）:
 
 $$
 \max_{\substack{\lambda\ge0\\\nu\succeq0}}\;\frac{-1}{2\lambda}\Bigl(g^\top H^{-1}g-2r^\top\nu+\nu^\top S\nu\Bigr)+\nu^\top c-\frac{\lambda\delta}{2}
 $$
 
-解出对偶变量 $(\lambda^*,\nu^*)$ 后,原问题解为:
+解出对偶变量 $(\lambda^*,\nu^*)$ 后，原问题解为：
 
 $$
 \theta^*=\theta_k+\frac{1}{\lambda^*}\,H^{-1}\bigl(g-B\nu^*\bigr)
 $$
 
-直觉:$\nu^*=0$ 时退化为自然梯度步(约束未激活);$\nu^*>0$ 时把目标梯度 $g$ 减去代价方向 $B\nu^*$ 再走,即在「奖励提升」与「代价不涨」间权衡。**当线性化本身不可行**($c_i>0$,当前已违反约束、信赖域内无法修复),CPO 走**可行恢复投影**——放弃奖励、纯降代价:
+直觉：$\nu^*=0$ 时退化为自然梯度步（约束未激活）；$\nu^*>0$ 时把目标梯度 $g$ 减去代价方向 $B\nu^*$ 再走，即在「奖励提升」与「代价不涨」间权衡。**当线性化本身不可行**（$c_i>0$，当前已违反约束、信赖域内无法修复），CPO 走**可行恢复投影**——放弃奖励、纯降代价：
 
 $$
 \theta^*=\theta_k-\sqrt{\frac{2\delta}{b^\top H^{-1}b}}\,H^{-1}b
 $$
 
-朝 $-b$ 方向走到信赖域边界,先把代价拉回可行域再说奖励。下面这个 toy 演示三种情形:
+朝 $-b$ 方向走到信赖域边界，先把代价拉回可行域再说奖励。下面这个 toy 演示三种情形：
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -1795,61 +1796,61 @@ print("CPO A (feasible): walk along constraint boundary (reward up, cost <= limi
 print("CPO B (infeasible): abandon reward, pure cost reduction (feasibility recovery).")
 `} title="CPO: 信赖域内带代价约束的策略更新" />
 
-跑一下看三种情形:**朴素自然梯度步**只追奖励不管代价,代价变化 $+1.10$(持续升,迟早越界);**Case A(可行,$c\le0$)** CPO 沿约束边界走——奖励涨 $+0.59$ 但代价只涨 $+0.05$(恰好补到上限,不再超);**Case B(不可行,$c>0$)** CPO 放弃奖励(奖励 $-0.71$)纯降代价($-1.41$,把已违反的代价拉回可行域)。这就是 CPO 相比朴素 PPO 的本质:**在「奖励提升」与「代价守界」间显式权衡,违反时优先修复**。
+跑一下看三种情形：**朴素自然梯度步**只追奖励不管代价，代价变化 $+1.10$（持续升，迟早越界）；**Case A（可行，$c\le0$）** CPO 沿约束边界走——奖励涨 $+0.59$ 但代价只涨 $+0.05$（恰好补到上限，不再超）；**Case B（不可行，$c>0$）** CPO 放弃奖励（奖励 $-0.71$）纯降代价（$-1.41$，把已违反的代价拉回可行域）。这就是 CPO 相比朴素 PPO 的本质：**在「奖励提升」与「代价守界」间显式权衡，违反时优先修复**。
 
-### PPO-Lagrangian:一阶对偶的工程友好版
+### PPO-Lagrangian：一阶对偶的工程友好版
 
-CPO 的二阶凸规划(Fisher 矩阵 + 共轭梯度,继承自 TRPO)工程复杂。**PPO-Lagrangian** 把约束用拉格朗日对偶处理,直接套用 PPO 的一阶优化:把约束 $J_{C_i}(\pi)\le d_i$ 上升为乘子 $\lambda_i\ge0$,构造拉格朗日函数:
+CPO 的二阶凸规划（Fisher 矩阵 + 共轭梯度，继承自 TRPO）工程复杂。**PPO-Lagrangian** 把约束用拉格朗日对偶处理，直接套用 PPO 的一阶优化：把约束 $J_{C_i}(\pi)\le d_i$ 上升为乘子 $\lambda_i\ge0$，构造拉格朗日函数：
 
 $$
 \mathcal L(\pi,\lambda)=J(\pi)-\sum_i\lambda_i\bigl(J_{C_i}(\pi)-d_i\bigr)
 $$
 
-策略最大化 $\mathcal L$(即 PPO 优化 $r-\sum\lambda_i C_i$ 的塑质奖励),乘子 $\lambda_i$ 对偶上升(约束违反则增大 $\lambda_i$、满足则减小):
+策略最大化 $\mathcal L$（即 PPO 优化 $r-\sum\lambda_i C_i$ 的塑质奖励），乘子 $\lambda_i$ 对偶上升（约束违反则增大 $\lambda_i$、满足则减小）:
 
 $$
 \lambda_i\leftarrow\max\!\bigl(0,\;\lambda_i+\eta\,(J_{C_i}(\pi)-d_i)\bigr)
 $$
 
-两者交替:固定 $\lambda$ 跑几步 PPO 更新策略,再用新策略的代价回报更新 $\lambda$。优点是一阶(复用 PPO 工程)、实现简单;缺点是 $\lambda$ 学习率 $\eta$ 敏感——太大振荡、太小收敛慢,且不像 CPO 有每步近约束满足的理论保证(可能大幅违反再慢慢拉回)。实践中 PPO-Lagrangian 因工程友好更常用,CPO 因理论保证用在安全关键场景。
+两者交替：固定 $\lambda$ 跑几步 PPO 更新策略，再用新策略的代价回报更新 $\lambda$。优点是一阶（复用 PPO 工程）、实现简单；缺点是 $\lambda$ 学习率 $\eta$ 敏感——太大振荡、太小收敛慢，且不像 CPO 有每步近约束满足的理论保证（可能大幅违反再慢慢拉回）。实践中 PPO-Lagrangian 因工程友好更常用，CPO 因理论保证用在安全关键场景。
 
-### Recovery RL:安全滤波的双策略分解
+### Recovery RL：安全滤波的双策略分解
 
-CPO 和 PPO-Lagrangian 都是**单策略**框架——同一个 $\pi_\theta$ 既要追奖励又要守约束,约束只能通过修改目标(塑质)或更新规则(信赖域投影)间接介入。**Recovery RL**[13] 换了个思路:**把任务和安全拆给两个策略**,任务策略 $\pi_{\text{task}}$ 完全无视约束只管奖励,一个**安全 critic** $\hat Q^{\pi}_{\text{risk}}(s,a)$ 估当前 $(s,a)$ 的未来违反概率,超阈值就把动作**覆盖**成恢复策略 $\pi_{\text{rec}}$ 输出的安全动作——这就是「安全滤波(safety filter)」。
+CPO 和 PPO-Lagrangian 都是**单策略**框架——同一个 $\pi_\theta$ 既要追奖励又要守约束，约束只能通过修改目标（塑质）或更新规则（信赖域投影）间接介入。**Recovery RL**[13] 换了个思路：**把任务和安全拆给两个策略**，任务策略 $\pi_{\text{task}}$ 完全无视约束只管奖励，一个**安全 critic** $\hat Q^{\pi}_{\text{risk}}(s,a)$ 估当前 $(s,a)$ 的未来违反概率，超阈值就把动作**覆盖**成恢复策略 $\pi_{\text{rec}}$ 输出的安全动作——这就是「安全滤波（safety filter）」。<Cite n={13} />
 
-先看约束设定。Recovery RL 把代价函数限定为**二元违反指示** $C:S\to\{0,1\}$($C(s)=1$ 表示该状态违反约束,如碰撞/越界),并引入一个**独立于奖励折扣的 $\gamma_{\text{risk}}$** 折扣未来违反。安全 critic 估的是**当前策略 $\pi$ 下、从 $(s,a)$ 出发的未来违反折扣概率**:
+先看约束设定。Recovery RL 把代价函数限定为**二元违反指示** $C:S\to\{0,1\}$（$C(s)=1$ 表示该状态违反约束，如碰撞/越界），并引入一个**独立于奖励折扣的 $\gamma_{\text{risk}}$** 折扣未来违反。安全 critic 估的是**当前策略 $\pi$ 下、从 $(s,a)$ 出发的未来违反折扣概率**：
 
 $$
 Q^{\pi}_{\text{risk}}(s_t,a_t)=\mathbb E_\pi\!\Bigl[\sum_{t'=t}^{\infty}\gamma_{\text{risk}}^{\,t'-t}\,c_{t'}\;\Big|\;s_t,a_t\Bigr]
 $$
 
-关键在于「episode 在 $c_t=1$ 时终止」(一违反就结束),所以它的 Bellman 目标比标准 Q 多一个「未违反才 bootstrap」的闸:
+关键在于「episode 在 $c_t=1$ 时终止」（一违反就结束），所以它的 Bellman 目标比标准 Q 多一个「未违反才 bootstrap」的闸：
 
 $$
 Q^{\pi}_{\text{risk}}(s_t,a_t)=c_t+(1-c_t)\,\gamma_{\text{risk}}\,\mathbb E_{a\sim\pi}\!\bigl[Q^{\pi}_{\text{risk}}(s_{t+1},a_{t+1})\bigr]
 $$
 
-$(1-c_t)$ 这项保证:一旦 $c_t=1$ 就不再 bootstrap(违反后没有未来),这正是「终止于违反」的数学体现。安全 critic 用 MSE 训练(目标网络稳住):
+$(1-c_t)$ 这项保证：一旦 $c_t=1$ 就不再 bootstrap（违反后没有未来），这正是「终止于违反」的数学体现。安全 critic 用 MSE 训练（目标网络稳住）：
 
 $$
 J_{\text{risk}}=\tfrac12\Bigl(\hat Q^{\pi}_{\text{risk}}(s_t,a_t)-\bigl[c_t+(1-c_t)\,\gamma_{\text{risk}}\,\mathbb E_{a\sim\pi}\hat Q^{\pi}_{\text{risk}}(s_{t+1},a_{t+1})\bigr]\Bigr)^2
 $$
 
-有了安全 critic 就能定义**安全集**与**恢复集**——把状态-动作空间按「未来违反概率是否超阈值 $\varepsilon_{\text{risk}}$」二分:
+有了安全 critic 就能定义**安全集**与**恢复集**——把状态-动作空间按「未来违反概率是否超阈值 $\varepsilon_{\text{risk}}$」二分：
 
 $$
 \mathcal T^{\pi}_{\text{safe}}=\bigl\{(s,a):Q^{\pi}_{\text{risk}}(s,a)\le\varepsilon_{\text{risk}}\bigr\},\qquad \mathcal T^{\pi}_{\text{rec}}=S\times A\setminus\mathcal T^{\pi}_{\text{safe}}
 $$
 
-**推理时的安全滤波规则**——任务策略提议 $a^{\pi_{\text{task}}}$,若 $(s,a^{\pi_{\text{task}}})$ 落在安全集就执行它,否则用恢复策略覆盖:
+**推理时的安全滤波规则**——任务策略提议 $a^{\pi_{\text{task}}}$，若 $(s,a^{\pi_{\text{task}}})$ 落在安全集就执行它，否则用恢复策略覆盖：
 
 $$
 a_t=\begin{cases}a_t^{\pi_{\text{task}}} & \text{若 }(s_t,a_t^{\pi_{\text{task}}})\in\mathcal T^{\pi}_{\text{safe}}\\[2pt] a_t^{\pi_{\text{rec}}} & \text{若 }(s_t,a_t^{\pi_{\text{task}}})\in\mathcal T^{\pi}_{\text{rec}}\end{cases}
 $$
 
-三个组件各自训练、各司其职:**任务策略 $\pi_{\text{task}}$** 用任意基座算法(原文用 SAC)只优化奖励,完全不碰约束;**恢复策略 $\pi_{\text{rec}}$** 是个 RL agent 但目标是**最小化**安全 critic $\hat Q^{\pi}_{\text{risk}}(s,\pi_{\text{rec}}(s))$(确定性策略梯度下降,把动作推向低违反区);**安全 critic** 用上面的 MSE 训练。一个工程细节很关键——**动作重标号**:当 $\pi_{\text{rec}}$ 覆盖了 $\pi_{\text{task}}$ 的动作,环境里执行的是 $a^{\pi_{\text{rec}}}$,但喂给 $\pi_{\text{task}}$ 训练的 transition 要把动作**改回 $a^{\pi_{\text{task}}}$**,否则 $\pi_{\text{task}}$ 会以为「我提的动作产生了这个结果」而持续提同样的危险动作(实际上是被 $\pi_{\text{rec}}$ 改写过)。
+三个组件各自训练、各司其职：**任务策略 $\pi_{\text{task}}$** 用任意基座算法（原文用 SAC）只优化奖励，完全不碰约束；**恢复策略 $\pi_{\text{rec}}$** 是个 RL agent 但目标是**最小化**安全 critic $\hat Q^{\pi}_{\text{risk}}(s,\pi_{\text{rec}}(s))$（确定性策略梯度下降，把动作推向低违反区）；**安全 critic** 用上面的 MSE 训练。一个工程细节很关键——**动作重标号**：当 $\pi_{\text{rec}}$ 覆盖了 $\pi_{\text{task}}$ 的动作，环境里执行的是 $a^{\pi_{\text{rec}}}$，但喂给 $\pi_{\text{task}}$ 训练的 transition 要把动作**改回 $a^{\pi_{\text{task}}}$**，否则 $\pi_{\text{task}}$ 会以为「我提的动作产生了这个结果」而持续提同样的危险动作（实际上是被 $\pi_{\text{rec}}$ 改写过）。
 
-还有一处与 CPO/PPO-Lagrangian 截然不同的设计——**离线预学危险区**。安全 critic 和 $\pi_{\text{rec}}$ 在任何在线交互前,先用一批离线数据 $D_{\text{offline}}$ 预训练(这批数据不必展示任务成功,只需展示「怎么会违反约束」)。这让智能体在碰真实环境前就已「知道哪里危险」,在线时直接用这个先验做滤波,不必拿真实违反去试错——这是 Recovery RL 在机器人接触丰富任务上比 CPO/PPO-Lagrangian 违反率低 2-20 倍的关键。
+还有一处与 CPO/PPO-Lagrangian 截然不同的设计——**离线预学危险区**。安全 critic 和 $\pi_{\text{rec}}$ 在任何在线交互前，先用一批离线数据 $D_{\text{offline}}$ 预训练（这批数据不必展示任务成功，只需展示「怎么会违反约束」）。这让智能体在碰真实环境前就已「知道哪里危险」，在线时直接用这个先验做滤波，不必拿真实违反去试错——这是 Recovery RL 在机器人接触丰富任务上比 CPO/PPO-Lagrangian 违反率低 2-20 倍的关键。
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -1936,48 +1937,48 @@ for t in range(12):
 print(f"无滤波违反次数 {tc} (Recovery RL {total_c})")
 `} title="Recovery RL: 安全 critic + 恢复策略的安全滤波" />
 
-跑一下看滤波怎么守住边界:任务策略 $\pi_{\text{task}}$ 一直提议 $a=1$(朝右追奖励),状态从 $-1$ 一路右移。**未到危险区**时 $Q_{\text{risk}}(s,1)\le\varepsilon_{\text{risk}}$,滤波放行,$\pi_{\text{task}}$ 自由追奖励;**靠近悬崖**($s$ 接近 $0.7$)时 $Q_{\text{risk}}(s,1)>\varepsilon_{\text{risk}}$ 触发恢复,$\pi_{\text{rec}}$ 输出朝左动作把状态拉回安全区。对照无滤波纯任务策略硬冲——几步内 $s$ 越过 $0.7$ 直接违反。**Recovery RL 的本质**:不让任务策略「学会害怕」,而是外挂一个安全 critic 当「刹车」,任务策略只管踩油门,刹车由独立模块按阈值接管。
+跑一下看滤波怎么守住边界：任务策略 $\pi_{\text{task}}$ 一直提议 $a=1$（朝右追奖励），状态从 $-1$ 一路右移。**未到危险区**时 $Q_{\text{risk}}(s,1)\le\varepsilon_{\text{risk}}$，滤波放行，$\pi_{\text{task}}$ 自由追奖励；**靠近悬崖**（$s$ 接近 $0.7$）时 $Q_{\text{risk}}(s,1)>\varepsilon_{\text{risk}}$ 触发恢复，$\pi_{\text{rec}}$ 输出朝左动作把状态拉回安全区。对照无滤波纯任务策略硬冲——几步内 $s$ 越过 $0.7$ 直接违反。**Recovery RL 的本质**：不让任务策略「学会害怕」，而是外挂一个安全 critic 当「刹车」，任务策略只管踩油门，刹车由独立模块按阈值接管。
 
-**与 CPO / PPO-Lagrangian 的对照**:三者把约束融进学习的位置不同——CPO 在**更新规则**层(每步信赖域内显式投影到可行集,改的是 $\theta$ 怎么走);PPO-Lagrangian 在**目标函数**层(把约束上升为乘子 $\lambda$ 塑质奖励,改的是优化什么);Recovery RL 在**执行层**(任务策略照常学、照常提动作,只在动作执行前用安全 critic 滤一道,改的是「做不做」)。前两者是「内化约束」(策略本身变安全),Recovery RL 是「外挂约束」(策略不变、外挂滤波器)——后者好处是**可叠加任意基座算法**(SAC、PPO、DQN 都能当 $\pi_{\text{task}}$),坏处是需要离线数据预学危险区、且二元违反指示 $C(s)$ 比 shaped cost 更难获得。
+**与 CPO / PPO-Lagrangian 的对照**：三者把约束融进学习的位置不同——CPO 在**更新规则**层（每步信赖域内显式投影到可行集，改的是 $\theta$ 怎么走）；PPO-Lagrangian 在**目标函数**层（把约束上升为乘子 $\lambda$ 塑质奖励，改的是优化什么）；Recovery RL 在**执行层**（任务策略照常学、照常提动作，只在动作执行前用安全 critic 滤一道，改的是「做不做」）。前两者是「内化约束」（策略本身变安全），Recovery RL 是「外挂约束」（策略不变、外挂滤波器）——后者好处是**可叠加任意基座算法**（SAC、PPO、DQN 都能当 $\pi_{\text{task}}$），坏处是需要离线数据预学危险区、且二元违反指示 $C(s)$ 比 shaped cost 更难获得。
 
 ### 与 TRPO/PPO 的关系
 
-CPO 是 TRPO 的约束版——两者都用 KL 信赖域 $\bar D_{KL}\le\delta$ + 二阶 Fisher 求解,CPO 多了代价约束与可行恢复投影。PPO-Lagrangian 是 PPO 的约束版——两者都是一阶多 epoch 小批量更新,PPO-Lagrangian 多了拉格朗日乘子 $\lambda$ 的对偶上升。所以学完 TRPO/PPO 再看安全 RL,只是给原更新规则「加一道代价约束的闸」——TRPO 的闸是「KL 别迈太大」,CPO/PPO-Lagrangian 在此之上再加「代价别超限」。安全 RL 的难点不在算法本身,而在**约束估计**(代价回报 $J_{C_i}$ 也是期望、需用 critic 估)与**约束违反的容忍度**(硬约束 vs 软约束、单次违反的代价)。
+CPO 是 TRPO 的约束版——两者都用 KL 信赖域 $\bar D_{KL}\le\delta$ + 二阶 Fisher 求解，CPO 多了代价约束与可行恢复投影。PPO-Lagrangian 是 PPO 的约束版——两者都是一阶多 epoch 小批量更新，PPO-Lagrangian 多了拉格朗日乘子 $\lambda$ 的对偶上升。所以学完 TRPO/PPO 再看安全 RL，只是给原更新规则「加一道代价约束的闸」——TRPO 的闸是「KL 别迈太大」，CPO/PPO-Lagrangian 在此之上再加「代价别超限」。安全 RL 的难点不在算法本身，而在**约束估计**（代价回报 $J_{C_i}$ 也是期望、需用 critic 估）与**约束违反的容忍度**（硬约束 vs 软约束、单次违反的代价）。
 
-## 元强化学习:学会快速学习
+## 元强化学习：学会快速学习
 
-前面所有方法——REINFORCE、Actor-Critic、TRPO、PPO——都假设智能体在一个**固定的** MDP 里从零学起,靠成千上万步交互慢慢把策略磨出来。但很多真实场景不是这样:机器人面对新地形、推荐系统面对新用户群、智能体面对新对手——**任务在变,而每个新任务上你没有几百万步可挥霍**。元强化学习(meta-RL)要回答的问题就是:**能不能从一堆过往任务里学到一种「先验」,让面对新任务时几步就适配?** 它不是让单任务学得快,而是**跨任务学到的先验让新任务快速适配**——所谓「学会如何快速学习(learning to learn)」。
+前面所有方法——REINFORCE、Actor-Critic、TRPO、PPO——都假设智能体在一个**固定的** MDP 里从零学起，靠成千上万步交互慢慢把策略磨出来。但很多真实场景不是这样：机器人面对新地形、推荐系统面对新用户群、智能体面对新对手——**任务在变，而每个新任务上你没有几百万步可挥霍**。元强化学习（meta-RL）要回答的问题就是：**能不能从一堆过往任务里学到一种「先验」，让面对新任务时几步就适配？** 它不是让单任务学得快，而是**跨任务学到的先验让新任务快速适配**——所谓「学会如何快速学习（learning to learn）」。
 
-### 问题设定:任务分布 p(T)
+### 问题设定：任务分布 p(T)
 
-元 RL 把「单个 MDP」升级成「**任务分布** $p(\mathcal T)$」。每个任务 $\mathcal T_i$ 是一个 MDP(转移/奖励不同,但共享结构——比如都是迷宫但出口位置不同、都是机器人但质量不同)。训练时从 $p(\mathcal T)$ 采样很多任务,学一个**元参数** $\theta$ 使「在采样的新任务上**几步适配**后回报高」。测试时给一个从未见过的新任务 $\mathcal T_{\text{new}}\sim p(\mathcal T)$,只允许少量交互,看 $\theta$ 能否快速适配。这与监督学习的 few-shot learning 同构——那里是「见几张猫就认新猫」,这里是「玩几局新游戏就上手」。
+元 RL 把「单个 MDP」升级成「**任务分布** $p(\mathcal T)$」。每个任务 $\mathcal T_i$ 是一个 MDP（转移/奖励不同，但共享结构——比如都是迷宫但出口位置不同、都是机器人但质量不同）。训练时从 $p(\mathcal T)$ 采样很多任务，学一个**元参数** $\theta$ 使「在采样的新任务上**几步适配**后回报高」。测试时给一个从未见过的新任务 $\mathcal T_{\text{new}}\sim p(\mathcal T)$，只允许少量交互，看 $\theta$ 能否快速适配。这与监督学习的 few-shot learning 同构——那里是「见几张猫就认新猫」，这里是「玩几局新游戏就上手」。
 
-### 两条路:MAML 学初始化,RL² 学算法
+### 两条路：MAML 学初始化，RL² 学算法
 
-元 RL 有两大范式,思路截然不同:
+元 RL 有两大范式，思路截然不同：
 
-**MAML(Model-Agnostic Meta-Learning,[Finn et al., 2017][9])** 学一个「**易微调的初始化**」$\theta$。核心是**双层优化(bi-level optimization)**:
+**MAML（Model-Agnostic Meta-Learning,[Finn et al., 2017][9]）** 学一个「**易微调的初始化**」$\theta$。核心是**双层优化（bi-level optimization）**：<Cite n={9} />
 
-- **内循环(inner loop)**:对采样任务 $\mathcal T_i$,从 $\theta$ 走几步梯度下降,得到任务适配参数 $\theta'_i = \theta - \alpha\nabla_\theta \mathcal L_{\mathcal T_i}(f_\theta)$。在 RL 里 $\mathcal L_{\mathcal T_i}$ 就是 policy gradient 损失(在 $\mathcal T_i$ 上采几条轨迹,REINFORCE 或 actor-critic 更新)。
-- **外循环(outer loop)**:meta 目标评估**适配后**的 $\theta'_i$ 在该任务新轨迹上的泛化损失,$\min_\theta \mathbb E_{\mathcal T_i}[\mathcal L_{\mathcal T_i}(f_{\theta'_i})]$。关键是 **meta 梯度穿过内循环的梯度更新本身**——对原始 $\theta$ 求导时,要算 $\theta'_i$ 如何依赖 $\theta$($\theta'_i=\theta-\alpha\nabla\mathcal L$,故 $\partial\theta'_i/\partial\theta=I-\alpha\nabla^2\mathcal L$ 含二阶 Hessian 项)。这一阶泰勒近似即 **FOMAML**(first-order MAML),省掉 Hessian 算力。
+- **内循环（inner loop）**：对采样任务 $\mathcal T_i$,从 $\theta$ 走几步梯度下降,得到任务适配参数 $\theta'_i = \theta - \alpha\nabla_\theta \mathcal L_{\mathcal T_i}(f_\theta)$.在 RL 里 $\mathcal L_{\mathcal T_i}$ 就是 policy gradient 损失（在 $\mathcal T_i$ 上采几条轨迹,REINFORCE 或 actor-critic 更新）.
+- **外循环（outer loop）**：meta 目标评估**适配后**的 $\theta'_i$ 在该任务新轨迹上的泛化损失,$\min_\theta \mathbb E_{\mathcal T_i}[\mathcal L_{\mathcal T_i}(f_{\theta'_i})]$.关键是 **meta 梯度穿过内循环的梯度更新本身**——对原始 $\theta$ 求导时,要算 $\theta'_i$ 如何依赖 $\theta$（$\theta'_i=\theta-\alpha\nabla\mathcal L$,故 $\partial\theta'_i/\partial\theta=I-\alpha\nabla^2\mathcal L$ 含二阶 Hessian 项）.这一阶泰勒近似即 **FOMAML**(first-order MAML),省掉 Hessian 算力.
 
-直觉:MAML 不优化 $\theta$ 在任务上的直接损失,而是优化「**从 $\theta$ 走几步后**的损失」——所以 $\theta$ 被推向参数空间里「几步梯度就能到达好解」的区域,而非「本身就在好解」的区域。
+直觉：MAML 不优化 $\theta$ 在任务上的直接损失，而是优化「**从 $\theta$ 走几步后**的损失」——所以 $\theta$ 被推向参数空间里「几步梯度就能到达好解」的区域，而非「本身就在好解」的区域。
 
-**RL²([Duan et al., 2016][10])** 不手设快速 RL 算法,**把 RL 算法本身编码进 RNN 的权重**。一个 RNN 策略跨 episode 维持隐藏状态(同一个 MDP 内**不重置**隐藏状态),隐藏激活充当「面对未见 MDP 时的算法记忆」。输入是 $(o_t, a_{t-1}, r_{t-1}, \text{done}_{t-1})$——正是普通 RL 算法需要的信息。双时间尺度:训练时**慢速**权重更新学出一个 RNN(用标准 PPO/TRPO 在任务分布上训),测试时**快速**激活更新(按 episode 累积隐藏状态)即可适配新 MDP,无需任何梯度步。
+**RL²（[Duan et al., 2016][10]）** 不手设快速 RL 算法，**把 RL 算法本身编码进 RNN 的权重**。一个 RNN 策略跨 episode 维持隐藏状态（同一个 MDP 内**不重置**隐藏状态），隐藏激活充当「面对未见 MDP 时的算法记忆」。输入是 $(o_t, a_{t-1}, r_{t-1}, \text{done}_{t-1})$——正是普通 RL 算法需要的信息。双时间尺度：训练时**慢速**权重更新学出一个 RNN（用标准 PPO/TRPO 在任务分布上训），测试时**快速**激活更新（按 episode 累积隐藏状态）即可适配新 MDP，无需任何梯度步。<Cite n={10} />
 
 | 范式 | 学什么 | 优化结构 | 梯度阶数 | 算法可解释性 |
 |---|---|---|---|---|
-| **MAML** | 易微调的初始化 $\theta$ | 显式双层(内/外循环) | 二阶(可一阶近似 FOMAML) | 高(就是梯度下降) |
-| **RL²** | RNN 权重 = 学到的算法 | 单层(RNN 跨 episode) | 一阶(靠 RNN 记忆) | 低(算法隐式学出,黑箱) |
-| PEARL(进阶) | 任务上下文后验 $z\sim q_\phi(z\mid c)$ | off-policy + 变分推断 | 一阶 | 中(上下文变量可解释) |
+| **MAML** | 易微调的初始化 $\theta$ | 显式双层（内/外循环） | 二阶（可一阶近似 FOMAML） | 高（就是梯度下降） |
+| **RL²** | RNN 权重 = 学到的算法 | 单层（RNN 跨 episode） | 一阶（靠 RNN 记忆） | 低（算法隐式学出，黑箱） |
+| PEARL（进阶） | 任务上下文后验 $z\sim q_\phi(z\mid c)$ | off-policy + 变分推断 | 一阶 | 中（上下文变量可解释） |
 
-两者本质区别:MAML 显式建模「内循环 = 梯度下降」,meta 学的是**初始化**;RL² 让 RNN 自己学出内循环算法,meta 学的是**算法本身**(藏在 RNN 权重 + 隐藏状态动态里)。MAML 透明但受限于「内循环是梯度下降」这一归纳偏置;RL² 灵活但黑箱、难调试。后续 **PEARL**([Rakelly et al., 2019])走第三条路:学一个**上下文变量** $z$ 的后验 $q_\phi(z\mid c)$($c$ 是任务的一小批 transition),策略 $\pi(a\mid s,z)$ 条件化于 $z$——把「任务身份」显式编码成可推断的潜变量,且是 off-policy(样本效率高)。
+两者本质区别：MAML 显式建模「内循环 = 梯度下降」，meta 学的是**初始化**；RL² 让 RNN 自己学出内循环算法，meta 学的是**算法本身**（藏在 RNN 权重 + 隐藏状态动态里）。MAML 透明但受限于「内循环是梯度下降」这一归纳偏置；RL² 灵活但黑箱、难调试。后续 **PEARL**（[Rakelly et al., 2019]）走第三条路：学一个**上下文变量** $z$ 的后验 $q_\phi(z\mid c)$（$c$ 是任务的一小批 transition），策略 $\pi(a\mid s,z)$ 条件化于 $z$——把「任务身份」显式编码成可推断的潜变量，且是 off-policy（样本效率高）。
 
-### 可运行演示:MAML 内/外循环
+### 可运行演示：MAML 内/外循环
 
-用一个一维玩具体会 MAML 双层优化的数学:任务族是「找抛物线顶点」$y=-(x-a)^2+1$,每个任务的顶点位置 $a\sim\text{Uniform}(-2,2)$ 不同。模型就一个参数 $a_0$(初始顶点猜测),内循环 1 步梯度下降适配任务 $a_i$,外循环 meta 梯度对 $a_0$ 求导。损失 $\mathcal L_{\mathcal T_i}(a)=(a-a_i)^2$,故内循环 $a'_i=a_0-2\alpha(a_0-a_i)$,meta 目标 $\mathbb E_{\mathcal T_i}[(a'_i-a_i)^2]=(1-2\alpha)^2\mathbb E[(a_0-a_i)^2]$,meta 梯度 $2(1-2\alpha)^2(a_0-\bar a)$ 指向任务族均值 $\bar a$。
+用一个一维玩具体会 MAML 双层优化的数学：任务族是「找抛物线顶点」$y=-(x-a)^2+1$，每个任务的顶点位置 $a\sim\text{Uniform}(-2,2)$ 不同。模型就一个参数 $a_0$（初始顶点猜测），内循环 1 步梯度下降适配任务 $a_i$，外循环 meta 梯度对 $a_0$ 求导。损失 $\mathcal L_{\mathcal T_i}(a)=(a-a_i)^2$，故内循环 $a'_i=a_0-2\alpha(a_0-a_i)$，meta 目标 $\mathbb E_{\mathcal T_i}[(a'_i-a_i)^2]=(1-2\alpha)^2\mathbb E[(a_0-a_i)^2]$，meta 梯度 $2(1-2\alpha)^2(a_0-\bar a)$ 指向任务族均值 $\bar a$。
 
-<CodeRunner title="MAML 双层优化:一维抛物线顶点任务族" language="python" defaultCode={`import random
+<CodeRunner title="MAML 双层优化：一维抛物线顶点任务族" language="python" defaultCode={`import random
 
 # 任务族: 顶点 a ~ Uniform(-2,2), 模型参数 a0, 内循环 1 步梯度下降
 ALPHA, BETA = 0.1, 0.1  # 内/外循环步长
@@ -2019,7 +2020,7 @@ print(f"  naive init a0=5.0   : {naive:.4f}")
 print(f"  MAML 优势: naive/MAML = {naive/maml:.1f}x")
 `} />
 
-预期输出:
+预期输出：
 
 ```
 meta 训练前: a0=5.0000
@@ -2031,39 +2032,39 @@ meta 训练后: a0=-0.0398 (任务族 a~U(-2,2) 均值=0)
   MAML 优势: naive/MAML = 5.1x
 ```
 
-> 💡 **看图要点**:meta 训练把 $a_0$ 从 5.0 拉到 -0.04(趋近任务族均值 0),新任务 1 步适配误差 MAML 0.85 vs naive 4.36——**5.1 倍优势**。但要诚实:这个玩具里 MAML 退化成「学到任务族均值」,因为损失是凸的 $(a-a_i)^2$、任务族对称,最优 $a_0$ 就是均值。真实 MAML 的威力在**非凸的策略神经网络 + 结构更复杂的任务族**(如机器人不同质量/摩擦):那里「学均值」没用,「学一个几步梯度就到达好解的初始化」才显价值——meta 梯度穿过内循环让 $\theta$ 落在「各任务好解的公共可达邻域」,这是 MAML 区别于「直接在任务族上联合训练取平均」的核心。
+> 💡 **看图要点**：meta 训练把 $a_0$ 从 5.0 拉到 -0.04（趋近任务族均值 0），新任务 1 步适配误差 MAML 0.85 vs naive 4.36——**5.1 倍优势**。但要诚实：这个玩具里 MAML 退化成「学到任务族均值」，因为损失是凸的 $(a-a_i)^2$、任务族对称，最优 $a_0$ 就是均值。真实 MAML 的威力在**非凸的策略神经网络 + 结构更复杂的任务族**（如机器人不同质量/摩擦）：那里「学均值」没用，「学一个几步梯度就到达好解的初始化」才显价值——meta 梯度穿过内循环让 $\theta$ 落在「各任务好解的公共可达邻域」，这是 MAML 区别于「直接在任务族上联合训练取平均」的核心。
 
-> 📌 **MAML vs RL² vs 普通 fine-tune**:普通 fine-tune 在新任务上从随机初始化(或通用预训练初始化)出发走很多步;MAML 从「meta 学到的易微调初始化」出发走几步;RL² 不走梯度,靠 RNN 跨 episode 隐藏状态「记住」新任务的特征。三者对应「不学学先验 / 学初始化先验 / 学算法先验」。MAML 透明可配任意梯度模型但二阶算力贵、受限于梯度下降内循环;RL² 一阶省算力但黑箱、靠 RNN 容量记忆任务。元 RL 与 [课程学习](/tutorials/reinforcement-learning#课程学习从易到难的教学法)、迁移学习同源——都是「用过往任务的结构帮新任务」——但 meta-RL 显式建模任务分布 $p(\mathcal T)$ 与 meta 目标,是「学会学习」的最形式化版本。
+> 📌 **MAML vs RL² vs 普通 fine-tune**：普通 fine-tune 在新任务上从随机初始化（或通用预训练初始化）出发走很多步；MAML 从「meta 学到的易微调初始化」出发走几步；RL² 不走梯度，靠 RNN 跨 episode 隐藏状态「记住」新任务的特征。三者对应「不学学先验 / 学初始化先验 / 学算法先验」。MAML 透明可配任意梯度模型但二阶算力贵、受限于梯度下降内循环；RL² 一阶省算力但黑箱、靠 RNN 容量记忆任务。元 RL 与 [课程学习](/tutorials/reinforcement-learning#课程学习从易到难的教学法)、迁移学习同源——都是「用过往任务的结构帮新任务」——但 meta-RL 显式建模任务分布 $p(\mathcal T)$ 与 meta 目标，是「学会学习」的最形式化版本。
 
-### FOMAML:把 meta 梯度的二阶项砍掉
+### FOMAML：把 meta 梯度的二阶项砍掉
 
-MAML 透明、有原则,但 line 1592 推导里那句「meta 梯度穿过内循环,含二阶 Hessian 项」是它工程上的阿喀琉斯之踵。算 Hessian-向量积 $\nabla^2\mathcal L\,\mathbf v$ 在深度网络里要额外一次反向传播(与 [TRPO 共轭梯度法里的 Hessian-向量积](#二阶近似目标一阶约束二阶)同源),且内循环多步时 Hessian 链式相乘,数值不稳、显存翻倍。Finn et al. 2017 在原论文里就给了一个工程兜底——**FOMAML(first-order MAML)**:把 meta 梯度里的二阶项直接砍掉,只用一阶信息 [9]。
+MAML 透明、有原则，但 line 1592 推导里那句「meta 梯度穿过内循环，含二阶 Hessian 项」是它工程上的阿喀琉斯之踵。算 Hessian-向量积 $\nabla^2\mathcal L\,\mathbf v$ 在深度网络里要额外一次反向传播（与 [TRPO 共轭梯度法里的 Hessian-向量积](#二阶近似目标一阶约束二阶)同源），且内循环多步时 Hessian 链式相乘，数值不稳、显存翻倍。Finn et al. 2017 在原论文里就给了一个工程兜底——**FOMAML(first-order MAML)**：把 meta 梯度里的二阶项直接砍掉，只用一阶信息 [9]。
 
-**完整 meta 梯度怎么来。** 单步内循环 $\theta'_i=\theta-\alpha\nabla_\theta\mathcal L_{\mathcal T_i}(\theta)$,meta 目标是 $\min_\theta\mathbb E_{\mathcal T_i}[\mathcal L_{\mathcal T_i}(\theta'_i)]$。对 $\theta$ 求导要穿过内循环的梯度更新本身——链式法则给
+**完整 meta 梯度怎么来。** 单步内循环 $\theta'_i=\theta-\alpha\nabla_\theta\mathcal L_{\mathcal T_i}(\theta)$，meta 目标是 $\min_\theta\mathbb E_{\mathcal T_i}[\mathcal L_{\mathcal T_i}(\theta'_i)]$。对 $\theta$ 求导要穿过内循环的梯度更新本身——链式法则给
 
 $$
 \nabla_\theta\,\mathcal L_{\mathcal T_i}(\theta'_i)\;=\;\underbrace{\left(\frac{\partial\theta'_i}{\partial\theta}\right)^{\!\top}}_{\text{内循环雅可比}}\nabla_{\theta'_i}\,\mathcal L_{\mathcal T_i}(\theta'_i)\;=\;\bigl(I-\alpha\,\nabla^2_\theta\mathcal L_{\mathcal T_i}(\theta)\bigr)^{\!\top}\nabla_{\theta'_i}\,\mathcal L_{\mathcal T_i}(\theta'_i).
 $$
 
-关键是中间那个 $I-\alpha\nabla^2\mathcal L$:它是内循环梯度更新 $\theta'=\theta-\alpha\nabla\mathcal L$ 对 $\theta$ 的雅可比,$\nabla^2\mathcal L$ 是损失在 $\theta$ 处的 **Hessian**。算它要二次反向传播,贵且不稳。多步内循环时雅可比链式相乘 $(I-\alpha H_1)(I-\alpha H_2)\cdots$,更贵。
+关键是中间那个 $I-\alpha\nabla^2\mathcal L$：它是内循环梯度更新 $\theta'=\theta-\alpha\nabla\mathcal L$ 对 $\theta$ 的雅可比，$\nabla^2\mathcal L$ 是损失在 $\theta$ 处的 **Hessian**。算它要二次反向传播，贵且不稳。多步内循环时雅可比链式相乘 $(I-\alpha H_1)(I-\alpha H_2)\cdots$，更贵。
 
-**FOMAML 的近似。** 把雅可比里的 $\alpha\nabla^2\mathcal L$ 项**直接舍掉**,只留 $I$:
+**FOMAML 的近似。** 把雅可比里的 $\alpha\nabla^2\mathcal L$ 项**直接舍掉**，只留 $I$：
 
 $$
 \nabla_\theta^{\,\text{FO}}\,\mathcal L_{\mathcal T_i}(\theta'_i)\;\approx\;\nabla_{\theta'_i}\,\mathcal L_{\mathcal T_i}(\theta'_i).
 $$
 
-即 FOMAML 直接拿「**适配后参数 $\theta'_i$ 处的损失梯度**」当 meta 梯度——内循环照常走梯度下降得 $\theta'_i$,但外循环对 $\theta$ 更新时假装 $\theta'_i$ 与 $\theta$ 无关(雅可比 $\approx I$)。计算上只要一次反向传播(算 $\nabla_{\theta'}\mathcal L$),与普通 SGD 同价。
+即 FOMAML 直接拿「**适配后参数 $\theta'_i$ 处的损失梯度**」当 meta 梯度——内循环照常走梯度下降得 $\theta'_i$，但外循环对 $\theta$ 更新时假装 $\theta'_i$ 与 $\theta$ 无关（雅可比 $\approx I$）。计算上只要一次反向传播（算 $\nabla_{\theta'}\mathcal L$），与普通 SGD 同价。
 
-**偏差有多大。** 令 $\mathbf g'=\nabla_{\theta'}\mathcal L(\theta'_i)$, $H=\nabla^2\mathcal L(\theta)$,则 MAML 梯度 $=\mathbf g'-\alpha H\mathbf g'$, FOMAML 梯度 $=\mathbf g'$,偏差正是被砍掉的那项:
+**偏差有多大。** 令 $\mathbf g'=\nabla_{\theta'}\mathcal L(\theta'_i)$， $H=\nabla^2\mathcal L(\theta)$，则 MAML 梯度 $=\mathbf g'-\alpha H\mathbf g'$， FOMAML 梯度 $=\mathbf g'$，偏差正是被砍掉的那项：
 
 $$
 \underbrace{\nabla^{\,\text{FO}}}_{\text{FOMAML}}\;-\;\underbrace{\nabla}_{\text{MAML}}\;=\;\alpha\,H\,\mathbf g'.
 $$
 
-这个偏差**沿 $H\mathbf g'$ 方向**,大小正比于 $\alpha$、Hessian 的曲率、以及适配后梯度本身。当 $\alpha$ 小(内循环走一小步,$\theta'\approx\theta$,Hessian 项小)或损失近二次($H$ 接近常数,梯度方向变化小)时,偏差主要是**幅值缩放**而非方向偏转——FOMAML 与 MAML 的梯度方向高度一致,只是步长略有差异。这正是 FOMAML 在深度 RL 里能用的根因:它没把 meta 梯度方向带歪,只是少校正了一点幅值。
+这个偏差**沿 $H\mathbf g'$ 方向**，大小正比于 $\alpha$、Hessian 的曲率、以及适配后梯度本身。当 $\alpha$ 小（内循环走一小步，$\theta'\approx\theta$，Hessian 项小）或损失近二次（$H$ 接近常数，梯度方向变化小）时，偏差主要是**幅值缩放**而非方向偏转——FOMAML 与 MAML 的梯度方向高度一致，只是步长略有差异。这正是 FOMAML 在深度 RL 里能用的根因：它没把 meta 梯度方向带歪，只是少校正了一点幅值。
 
-下面三段代码把偏差量化:① 二次损失(Hessian 恒等)看偏差的解析结构;② 非二次损失(Hessian 随 $\theta$ 变)看方向是否仍一致;③ 8 任务 meta 梯度均值对比,看真实 meta 更新方向的偏差。
+下面三段代码把偏差量化：① 二次损失（Hessian 恒等）看偏差的解析结构；② 非二次损失（Hessian 随 $\theta$ 变）看方向是否仍一致；③ 8 任务 meta 梯度均值对比，看真实 meta 更新方向的偏差。
 
 <CodeRunner defaultCode={`import numpy as np
 
@@ -2142,37 +2143,37 @@ print(f"     深度 RL 实践中 alpha 小 + Adam 自适应步长会进一步吸
 print(f"     这正是 Finn 2017 原论文发现 FOMAML 与 MAML 性能相当的根因 [9]。")
 `} title="FOMAML vs MAML: meta 梯度二阶项偏差" />
 
-> 💡 **与 TRPO→PPO 的跨篇呼应**:MAML 的二阶 Hessian 算力贵,与 [TRPO 的 Fisher-向量积](#二阶近似目标一阶约束二阶)完全同病——两者都要算 Hessian-向量积(二次反向传播)、都对深度网络数值敏感。FOMAML 砍二阶项保留一阶,与 PPO 砍 KL 约束保留裁剪,是**同一类工程哲学**:牺牲一点理论精度换大幅算力节省与数值稳定。差别在 PPO 用 clip 近似 KL 约束,FOMAML 用 $I$ 近似内循环雅可比——前者近似「分布距离」,后者近似「参数依赖」。两者都靠「近似误差主要是幅值缩放、不改方向」兜底,所以工程上鲁棒。
+> 💡 **与 TRPO→PPO 的跨篇呼应**：MAML 的二阶 Hessian 算力贵，与 [TRPO 的 Fisher-向量积](#二阶近似目标一阶约束二阶)完全同病——两者都要算 Hessian-向量积（二次反向传播）、都对深度网络数值敏感。FOMAML 砍二阶项保留一阶，与 PPO 砍 KL 约束保留裁剪，是**同一类工程哲学**：牺牲一点理论精度换大幅算力节省与数值稳定。差别在 PPO 用 clip 近似 KL 约束，FOMAML 用 $I$ 近似内循环雅可比——前者近似「分布距离」，后者近似「参数依赖」。两者都靠「近似误差主要是幅值缩放、不改方向」兜底，所以工程上鲁棒。
 
-**FOMAML 何时失准。** 偏差 $\alpha H\mathbf g'$ 在三种情况下不再只是良性的幅值缩放:① **$\alpha$ 大**(内循环走远,$\theta'$ 偏离 $\theta$ 大,Hessian 在两点间变化大,$I$ 近似失真);② **损失曲面强非凸**(Hessian 方向随 $\theta$ 急剧变化,$H\mathbf g'$ 与 $\mathbf g'$ 不再近似共线,方向偏转出现);③ **内循环多步**(雅可比链式相乘 $(I-\alpha H_1)\cdots(I-\alpha H_k)$,每步舍掉的 $\alpha H$ 误差累积)。实践中 MAML 用小 $\alpha$ + 1-5 步内循环,这三种失准条件都不严重;但若把内循环步数推到很大或 $\alpha$ 调高,FOMAML 与 MAML 的差距会显现。
+**FOMAML 何时失准。** 偏差 $\alpha H\mathbf g'$ 在三种情况下不再只是良性的幅值缩放：① **$\alpha$ 大**（内循环走远，$\theta'$ 偏离 $\theta$ 大，Hessian 在两点间变化大，$I$ 近似失真）；② **损失曲面强非凸**（Hessian 方向随 $\theta$ 急剧变化，$H\mathbf g'$ 与 $\mathbf g'$ 不再近似共线，方向偏转出现）；③ **内循环多步**（雅可比链式相乘 $(I-\alpha H_1)\cdots(I-\alpha H_k)$，每步舍掉的 $\alpha H$ 误差累积）。实践中 MAML 用小 $\alpha$ + 1-5 步内循环，这三种失准条件都不严重；但若把内循环步数推到很大或 $\alpha$ 调高，FOMAML 与 MAML 的差距会显现。
 
-**一阶 meta-RL 家族。** FOMAML 不是唯一的一阶近似。**Reptile**(Nichol et al. 2018)走得更远:连外循环的「在 $\theta'$ 处算梯度」都省了,直接把 $\theta$ 沿 $\theta'-\theta$ 方向更新(即「朝适配后的参数走」),完全无需反向传播穿过内循环——它是 FOMAML 的进一步简化,在简单任务族上与 MAML 表现相近。**ANIL**(almost no inner loop,Raghu et al. 2020)则发现内循环只更新网络最后一层就足够,前面层靠外循环一阶梯度自然学出——把 FOMAML「一阶够用」的洞察推到极致。这三者(FOMAML / Reptile / ANIL)构成一阶 meta-RL 的谱系,核心洞见都是 Finn 2017 原论文的那个经验发现:**meta 梯度里二阶项的贡献小到可以忽略** [9]。这也解释了为何工业界 meta-RL 几乎不用完整 MAML——二阶精度的理论收益抵不过一阶近似的工程节省。
+**一阶 meta-RL 家族。** FOMAML 不是唯一的一阶近似。**Reptile**（Nichol et al. 2018）走得更远：连外循环的「在 $\theta'$ 处算梯度」都省了，直接把 $\theta$ 沿 $\theta'-\theta$ 方向更新（即「朝适配后的参数走」），完全无需反向传播穿过内循环——它是 FOMAML 的进一步简化，在简单任务族上与 MAML 表现相近。**ANIL**（almost no inner loop,Raghu et al. 2020）则发现内循环只更新网络最后一层就足够，前面层靠外循环一阶梯度自然学出——把 FOMAML「一阶够用」的洞察推到极致。这三者（FOMAML / Reptile / ANIL）构成一阶 meta-RL 的谱系，核心洞见都是 Finn 2017 原论文的那个经验发现：**meta 梯度里二阶项的贡献小到可以忽略** [9]。这也解释了为何工业界 meta-RL 几乎不用完整 MAML——二阶精度的理论收益抵不过一阶近似的工程节省。
 
-## 持续学习:对抗灾难性遗忘
+## 持续学习：对抗灾难性遗忘
 
-元 RL 学的是「**新任务来之前**的先验」——它假设任务分布静止、可以反复采样训练。但现实里智能体面对的常常是**一条流式任务序列**:任务 A 训完部署一段时间,任务 B 来了,B 训完又来 C……并且 A 的数据往往已不可得(隐私、存储、在线流)。这种设定下,朴素的「在 B 上继续微调 $\theta$」会触发一个臭名昭著的现象——**灾难性遗忘(catastrophic forgetting)**:网络为学好 B 而改写的那部分参数,恰好破坏了 A 已学到的表征,导致 A 的性能断崖式下跌。连接主义模型(参数共享的神经网络)天然易遗忘:所有知识混在同一组权重里,新梯度无差别地覆盖旧解。这正是持续学习 / 终身学习(continual / lifelong RL)要解决的核心难题。
+元 RL 学的是「**新任务来之前**的先验」——它假设任务分布静止、可以反复采样训练。但现实里智能体面对的常常是**一条流式任务序列**：任务 A 训完部署一段时间，任务 B 来了，B 训完又来 C……并且 A 的数据往往已不可得（隐私、存储、在线流）。这种设定下，朴素的「在 B 上继续微调 $\theta$」会触发一个臭名昭著的现象——**灾难性遗忘（catastrophic forgetting）**：网络为学好 B 而改写的那部分参数，恰好破坏了 A 已学到的表征，导致 A 的性能断崖式下跌。连接主义模型（参数共享的神经网络）天然易遗忘：所有知识混在同一组权重里，新梯度无差别地覆盖旧解。这正是持续学习 / 终身学习（continual / lifelong RL）要解决的核心难题。
 
-> 💡 **为什么记忆回放(experience replay)不算持续学习的解?** 最朴素的反遗忘办法是把 A 的数据存下来,训 B 时混着回放。它有效,但有三处硬伤:① **存储与隐私**——任务流可能横跨几年、数据量爆炸,且 A 的原始数据常因隐私/合规不能留存;② **任务边界假设**——需要明确知道「哪些样本属于 A」,在线流里任务切换往往是渐变的;③ **与 on-policy 策略法冲突**——PPO 这类算法要求采集策略与当前策略同分布,旧任务的离策略数据会引入 off-policy 偏差(这点与 [DQN 的 experience replay](/tutorials/dqn#经验回放) 之所以能用在 Q-learning 而非直接 PPO 上是同一个道理)。持续学习的研究主线因此转向**不靠存旧数据**的路线:参数保护、架构扩张。
+> 💡 **为什么记忆回放（experience replay）不算持续学习的解？** 最朴素的反遗忘办法是把 A 的数据存下来，训 B 时混着回放。它有效，但有三处硬伤：① **存储与隐私**——任务流可能横跨几年、数据量爆炸，且 A 的原始数据常因隐私/合规不能留存；② **任务边界假设**——需要明确知道「哪些样本属于 A」，在线流里任务切换往往是渐变的；③ **与 on-policy 策略法冲突**——PPO 这类算法要求采集策略与当前策略同分布，旧任务的离策略数据会引入 off-policy 偏差（这点与 [DQN 的 experience replay](/tutorials/dqn#经验回放) 之所以能用在 Q-learning 而非直接 PPO 上是同一个道理）。持续学习的研究主线因此转向**不靠存旧数据**的路线：参数保护、架构扩张。
 
-### EWC:Fisher 信息标记「重要参数」
+### EWC：Fisher 信息标记「重要参数」
 
-**弹性权重巩固(Elastic Weight Consolidation, EWC)**[17] 的思路是:不存 A 的数据,只存一个「**A 训完后,每个参数有多重要**」的摘要,训 B 时对重要参数施加软约束——允许它们动,但动得越远罚得越重。
+**弹性权重巩固（Elastic Weight Consolidation, EWC）**[17] 的思路是：不存 A 的数据，只存一个「**A 训完后，每个参数有多重要**」的摘要，训 B 时对重要参数施加软约束——允许它们动，但动得越远罚得越重。<Cite n={17} />
 
-参数重要性用什么度量?EWC 选用该参数处损失曲面的**Fisher 信息对角** $F_i$。直觉:若参数 $i$ 在 A 的解 $\theta^*_A$ 处损失曲面很陡($F_i$ 大),微动它就让 A 的损失大涨——它对 A「关键」,训 B 时要保护;若曲面很平($F_i$ 小),动它对 A 无伤——放它自由去适配 B。Fisher 信息的对角元正是损失在当前解处的二阶曲率(负对数似然的 Hessian 期望,见本篇 [自然梯度](#自然梯度换一种距离让收敛更稳) 小节用 Fisher 作策略分布度量的同一概念;在 [DQN 篇 VIME](/tutorials/dqn#vime用信息增益驱动探索) 里它还以 KL 近似形式驱动探索),EWC 把它从「度量策略空间距离」转用为「度量参数重要性」。
+参数重要性用什么度量？EWC 选用该参数处损失曲面的**Fisher 信息对角** $F_i$。直觉：若参数 $i$ 在 A 的解 $\theta^*_A$ 处损失曲面很陡（$F_i$ 大），微动它就让 A 的损失大涨——它对 A「关键」，训 B 时要保护；若曲面很平（$F_i$ 小），动它对 A 无伤——放它自由去适配 B。Fisher 信息的对角元正是损失在当前解处的二阶曲率（负对数似然的 Hessian 期望，见本篇 [自然梯度](#自然梯度换一种距离让收敛更稳) 小节用 Fisher 作策略分布度量的同一概念；在 [DQN 篇 VIME](/tutorials/dqn#vime用信息增益驱动探索) 里它还以 KL 近似形式驱动探索），EWC 把它从「度量策略空间距离」转用为「度量参数重要性」。
 
-训 B 时,EWC 在 B 的损失上加一个**二次惩罚项**:
+训 B 时，EWC 在 B 的损失上加一个**二次惩罚项**：
 
 $$
 \mathcal{L}_{\text{total}}(\theta) \;=\; \mathcal{L}_{B}(\theta) \;+\; \frac{\lambda}{2}\sum_{i} F_i\,(\theta_i - \theta^{*}_{A,i})^2
 $$
 
-其中 $\theta^{*}_{A,i}$ 是 A 训完后冻结的参数值,$F_i$ 是在该点算得的 Fisher 对角,$\lambda$ 控制保护强度。关键对比:
+其中 $\theta^{*}_{A,i}$ 是 A 训完后冻结的参数值，$F_i$ 是在该点算得的 Fisher 对角，$\lambda$ 控制保护强度。关键对比：
 
-- **朴素(无约束)**:$\lambda=0$,只优化 $\mathcal L_B$ → $\theta$ 直接滑向 $\theta^*_B$,A 被彻底覆盖;
-- **L2 正则(同等保护)**:把 $\sum_i(\theta_i-\theta^*_{A,i})^2$ 不加权地罚 → 所有参数一视同仁,但「对 A 重要的参数」与「不重要的参数」受同等阻力,要么过度束缚 B(为保护不重要的参数白白牺牲 B 的适配),要么保护力度不足;
-- **EWC**:用 $F_i$ **加权**——重要参数($F_i$ 大)强保护、自由参数($F_i$ 小)放行,精准地「只锁住对 A 关键的方向」。
+- **朴素（无约束）**：$\lambda=0$,只优化 $\mathcal L_B$ → $\theta$ 直接滑向 $\theta^*_B$,A 被彻底覆盖;
+- **L2 正则（同等保护）**：把 $\sum_i(\theta_i-\theta^*_{A,i})^2$ 不加权地罚 → 所有参数一视同仁,但「对 A 重要的参数」与「不重要的参数」受同等阻力,要么过度束缚 B（为保护不重要的参数白白牺牲 B 的适配）,要么保护力度不足;
+- **EWC**：用 $F_i$ **加权**——重要参数（$F_i$ 大）强保护、自由参数（$F_i$ 小）放行,精准地「只锁住对 A 关键的方向」.
 
-下面这个 2 维玩具把三种策略的差异算出来:任务 A 的最优参数 $\theta^*_A=(3,0)$、Fisher 对角 $F=(4,0.5)$(参数 1 对 A 重要、参数 2 不重要);任务 B 的最优参数 $\theta^*_B=(0,3)$,与 $\theta^*_A$ **正交**(梯度冲突,逼出遗忘)。三种方式从 $\theta^*_A$ 出发学 B,看 A 损失(越小=A 保留越好)与 B 损失(越小=B 学得越好)的权衡。
+下面这个 2 维玩具把三种策略的差异算出来：任务 A 的最优参数 $\theta^*_A=(3,0)$、Fisher 对角 $F=(4,0.5)$（参数 1 对 A 重要、参数 2 不重要）；任务 B 的最优参数 $\theta^*_B=(0,3)$，与 $\theta^*_A$ **正交**（梯度冲突，逼出遗忘）。三种方式从 $\theta^*_A$ 出发学 B，看 A 损失（越小=A 保留越好）与 B 损失（越小=B 学得越好）的权衡。
 
 <CodeRunner defaultCode={`
 import numpy as np
@@ -2224,141 +2225,259 @@ print("  L2  遗忘量: %.3f  (保护但牺牲 B)" % (L_A(theta_l2)   - L_A(thet
 print("  EWC 遗忘量: %.3f  (精准保护关键参数)" % (L_A(theta_ewc)  - L_A(theta_A)))
 `}/>
 
-> 💡 **看图要点**:$F=(4,0.5)$ 意味着参数 1 对 A 重要、参数 2 不重要。朴素直接跳到 $\theta^*_B=(0,3)$,A 损失从 0 飙到 20.25——灾难性遗忘。L2 把两个参数同等拉向 $\theta^*_A$,落在 $(1.5,1.5)$:A 损失 5.06(保护住了),但 B 损失 2.25(B 也没学好,被不重要的参数拖累)。EWC 用 $F$ 加权,落在 $(2.4,2.0)$:参数 1(重要)被强力拉回 3 附近守住、参数 2(不重要)自由地滑向 3 去适配 B——A 损失仅 1.72,B 损失虽略高于朴素但远好于 L2。**同样是「保护」,$F$ 加权让保护精准落在关键方向上**。梯度下降 2000 步的数值解与解析解误差 0.0,验证了 EWC 损失的最优解就是解析公式。
+> 💡 **看图要点**：$F=(4,0.5)$ 意味着参数 1 对 A 重要、参数 2 不重要。朴素直接跳到 $\theta^*_B=(0,3)$，A 损失从 0 飙到 20.25——灾难性遗忘。L2 把两个参数同等拉向 $\theta^*_A$，落在 $(1.5,1.5)$：A 损失 5.06（保护住了），但 B 损失 2.25（B 也没学好，被不重要的参数拖累）。EWC 用 $F$ 加权，落在 $(2.4,2.0)$：参数 1（重要）被强力拉回 3 附近守住、参数 2（不重要）自由地滑向 3 去适配 B——A 损失仅 1.72，B 损失虽略高于朴素但远好于 L2。**同样是「保护」，$F$ 加权让保护精准落在关键方向上**。梯度下降 2000 步的数值解与解析解误差 0.0，验证了 EWC 损失的最优解就是解析公式。
 
-### Progressive Networks:加列而非改列
+### Progressive Networks：加列而非改列
 
-EWC 走的是「**保护参数**」路线——不动结构,只约束已有权重的更新。另一条截然不同的路线是「**扩张架构**」:**为每个新任务加一列全新网络,旧列冻结、新列随机初始化后训练,列间用侧向连接(lateral connections)传递特征**。这是 Progressive Networks(渐进式网络,Rusu et al. 2016)[18] 的设计。
+EWC 走的是「**保护参数**」路线——不动结构，只约束已有权重的更新。另一条截然不同的路线是「**扩张架构**」:**为每个新任务加一列全新网络，旧列冻结、新列随机初始化后训练，列间用侧向连接（lateral connections）传递特征**。这是 Progressive Networks（渐进式网络，Rusu et al. 2016）[18] 的设计。<Cite n={18} />
 
-设任务 A 训完得到列 1 的权重 $\theta^{(1)}$(冻结)。任务 B 来了:新增列 2 $\theta^{(2)}$(可训练),列 1 保持冻结;列 2 的每一层 $l$ 通过一个侧向连接 $U^{(2\leftarrow 1)}_l$ 读列 1 同层特征,新列输出 $h^{(2)}_l = f(W^{(2)}_l h^{(2)}_{l-1} + U^{(2\leftarrow 1)}_l h^{(1)}_l)$。列 1 因冻结而**绝对不遗忘**(A 的表征原封不动),列 2 学 B 时通过侧向连接**复用 A 已学到的有用特征**(类似迁移学习的早期特征复用,但显式化、不破坏)。任务 C 来了再加列 3,侧向连列 1、列 2……
+设任务 A 训完得到列 1 的权重 $\theta^{(1)}$（冻结）。任务 B 来了：新增列 2 $\theta^{(2)}$（可训练），列 1 保持冻结；列 2 的每一层 $l$ 通过一个侧向连接 $U^{(2\leftarrow 1)}_l$ 读列 1 同层特征，新列输出 $h^{(2)}_l = f(W^{(2)}_l h^{(2)}_{l-1} + U^{(2\leftarrow 1)}_l h^{(1)}_l)$。列 1 因冻结而**绝对不遗忘**（A 的表征原封不动），列 2 学 B 时通过侧向连接**复用 A 已学到的有用特征**（类似迁移学习的早期特征复用，但显式化、不破坏）。任务 C 来了再加列 3，侧向连列 1、列 2……
 
-代价是**容量随任务数线性增长**(每任务一列),且任务数多了以后侧向连接的参数也膨胀;另外新任务的「列数」是先验(需知道任务边界)。但它的优点也很硬:**零遗忘**(旧列冻结)、**正向迁移**(侧向连接复用旧特征),在 Atari 多任务序列上显著优于「朴素微调」与「每任务独立网络」。EWC 与 Progressive Networks 代表持续学习的两条哲学——**约束参数更新 vs 扩张网络容量**——各有适用场景。
+代价是**容量随任务数线性增长**（每任务一列），且任务数多了以后侧向连接的参数也膨胀；另外新任务的「列数」是先验（需知道任务边界）。但它的优点也很硬：**零遗忘**（旧列冻结）、**正向迁移**（侧向连接复用旧特征），在 Atari 多任务序列上显著优于「朴素微调」与「每任务独立网络」。EWC 与 Progressive Networks 代表持续学习的两条哲学——**约束参数更新 vs 扩张网络容量**——各有适用场景。
 
 | 方法 | 核心机制 | 旧任务遗忘 | 正向迁移 | 存储 | 容量增长 | 任务边界 |
 |---|---|---|---|---|---|---|
 | **朴素微调** | 在新任务上直接 SGD | ❌ 灾难性 | 无 | 无 | 不变 | 不需 |
-| **experience replay** | 混入旧任务数据回放 | ✅ 低 | 可有 | ❌ 存旧数据(隐私/存储) | 不变 | 需标注 |
+| **experience replay** | 混入旧任务数据回放 | ✅ 低 | 可有 | ❌ 存旧数据（隐私/存储） | 不变 | 需标注 |
 | **L2 正则** | 向 $\theta^*_A$ 同等加权约束 | ⚠️ 中 | 无 | 存 $\theta^*_A$ | 不变 | 需知道切任务 |
-| **EWC**[17] | Fisher 加权约束**重要**参数 | ✅ 低 | 无 | 存 $\theta^*_A+F$(轻量) | 不变 | 需知道切任务 |
+| **EWC**[17] | Fisher 加权约束**重要**参数 | ✅ 低 | 无 | 存 $\theta^*_A+F$（轻量） | 不变 | 需知道切任务 |
 | **Progressive Nets**[18] | 加列冻结旧列 + 侧向连接 | ✅ 零 | ✅ 强 | 无 | ❌ 线性增长 | 需知道切任务 |
 
 ### 跨任务学习的三种范式
 
-把本节的持续学习放回更大的图景里,「跨任务学习」至少有三种典型范式,各自回答「过往任务如何帮新任务」这个共同问题的不同侧面:
+把本节的持续学习放回更大的图景里，「跨任务学习」至少有三种典型范式，各自回答「过往任务如何帮新任务」这个共同问题的不同侧面：
 
-- **元强化学习(meta-RL,本篇上文)**:任务分布 $p(\mathcal T)$ 静止、可反复采样,**训练前**学一个易适配的先验(初始化或算法),新任务来几步梯度/几条轨迹就适配。问题:假设能反复访问任务分布;
-- **多任务 RL**(见 [DQN 篇多任务](/tutorials/dqn)与分布式 RL 的讨论):**同时**持有所有任务、联合优化一个共享网络(或参数共享 + 任务头),任务间相互正则。问题:需要同时拥有所有任务数据,无法处理流式到来的新任务;
-- **持续学习(本节)**:任务**依次流式到来、旧数据不可得**,目标是在学新任务的同时不破坏旧任务。问题:任务边界、遗忘-迁移权衡。
+- **元强化学习（meta-RL，本篇上文）**：任务分布 $p(\mathcal T)$ 静止、可反复采样,**训练前**学一个易适配的先验（初始化或算法）,新任务来几步梯度/几条轨迹就适配.问题:假设能反复访问任务分布;
+- **多任务 RL**（见 [DQN 篇多任务](/tutorials/dqn)与分布式 RL 的讨论）：**同时**持有所有任务、联合优化一个共享网络（或参数共享 + 任务头），任务间相互正则。问题：需要同时拥有所有任务数据，无法处理流式到来的新任务；
+- **持续学习（本节）**：任务**依次流式到来、旧数据不可得**,目标是在学新任务的同时不破坏旧任务.问题:任务边界、遗忘-迁移权衡.
 
-三者并非互斥:meta-RL 学到的先验可以作持续学习的起点(先 meta 训一个易微调初始化,再在新任务序列上用 EWC 保护),多任务的共享表征也是持续学习里「新列复用旧列」的天然基础。理解三者的假设差异(任务可否反复访问 / 同时持有 / 流式到来),才能为手头的跨任务场景选对工具。
+三者并非互斥：meta-RL 学到的先验可以作持续学习的起点（先 meta 训一个易微调初始化，再在新任务序列上用 EWC 保护），多任务的共享表征也是持续学习里「新列复用旧列」的天然基础。理解三者的假设差异（任务可否反复访问 / 同时持有 / 流式到来），才能为手头的跨任务场景选对工具。
 
-## 典型案例:策略梯度都用在哪
+## 源码走读：从 Spinning Up 到生产实现
+
+前面各节的 CodeRunner 都是为教学手写的玩具，这一节换一个视角：**到真实项目的代码里，看策略梯度定理、GAE、PPO 裁剪落地后长什么样**。挑三份有代表性的实现——OpenAI Spinning Up 的 VPG/PPO（官方教学标杆，代码极简）、CleanRL 的单文件 PPO（「一个文件读懂整个算法」的典范，注释与配套实验文档极全）、Stable-Baselines3 的 PPO（生产库，向量化环境/回调/日志全家桶）。三份代码定位不同，但内核完全同构：**采集整批轨迹 → GAE 算优势 → 优势归一化 → 裁剪目标多 epoch 小批量更新**——正是上文「策略梯度定理 → Actor-Critic → GAE → PPO」这条推导链的工程化身。<Cite n={[2,20,21]} />
+
+| 实现 | 定位 | 篇幅 | 适合谁读 |
+|---|---|---|---|
+| [Spinning Up](https://github.com/openai/spinningup) `spinup/algos/pytorch/vpg/vpg.py` | OpenAI 官方教学实现，VPG/PPO 共用一套骨架（TRPO 仅 TF1 版） | ~350 行/文件 | 想看「教材公式 ↔ 代码」逐行对应的人 |
+| [CleanRL](https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py) `cleanrl/ppo.py` | 单文件 PPO，配套 [docs.cleanrl.dev](https://docs.cleanrl.dev/rl-algorithms/ppo/#ppopy) 逐行实验文档 | ~310 行 | 想一次读懂「采集 + GAE + 裁剪 + 多 epoch」全流程的人 |
+| [Stable-Baselines3](https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/ppo/ppo.py) `stable_baselines3/ppo/ppo.py` | 生产级通用 RL 库，单测覆盖 95% 代码 | ~320 行 + 框架层 | 想直接在项目里用、或研究工程加固细节的人 |
+
+### VPG 损失：对数导数技巧的最终代码形态
+
+先看 Spinning Up 的 VPG（vanilla policy gradient）——它就是 REINFORCE + GAE 优势 + Actor/Critic 分开优化的完整版。整份文件的心脏只有这几行：<Cite n={2} />
+
+```python
+# spinup/algos/pytorch/vpg/vpg.py（节选，注释为本站所加）
+    # Set up function for computing VPG policy loss
+    def compute_loss_pi(data):
+        obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
+
+        # Policy loss
+        pi, logp = ac.pi(obs, act)
+        # 策略梯度定理的最终形态:∇J = E[∇logπ · A]
+        # logp = logπ_θ(a|s)(对采样动作重算 log 概率),adv 即 GAE 优势
+        # 取负号是因为优化器做梯度下降,而我们要梯度上升
+        loss_pi = -(logp * adv).mean()
+
+        # Useful extra info(监控用,不参与损失)
+        approx_kl = (logp_old - logp).mean().item()
+        ent = pi.entropy().mean().item()
+        pi_info = dict(kl=approx_kl, ent=ent)
+
+        return loss_pi, pi_info
+```
+
+上文「策略梯度定理」小节的四步推导——轨迹似然分解、对数导数技巧、EGLP 减基线、reward-to-go 因果性——穿过全部数学之后，落到代码里就是 `-(logp * adv).mean()` 这一行：`logp` 是 $\log\pi_\theta(a_t\mid s_t)$（autograd 自动给出 $\nabla_\theta\log\pi$），`adv` 是权重 $\hat A_t$（buffer 里已用 GAE 算好并归一化），`.mean()` 用 batch 均值估期望。**推导链上的每一步降方差（reward-to-go、减 $V$ 基线、GAE 插值），在这里都只剩一个更干净的 `adv`，乘法本身从未变过。**
+
+值得注意的还有它的更新方式：策略损失只走**一步**梯度（`pi_optimizer.step()` 一次），随后 Critic 用同一批数据跑 `train_v_iters=80` 步 MSE 回归。原因正是上文「Actor-Critic」小节讲的 on-policy 约束——策略一变，旧数据的分布就过期了，VPG 没有 PPO 那样的裁剪保护，多走一步就偏离推导成立的前提；而 Critic 回归的是 $V(s)$ 对回报的拟合，与策略新旧无关，可以放心多步。
+
+### GAE：CleanRL 的前向递推
+
+GAE 小节给出的定义是求和形式 $\hat A_t^{\mathrm{GAE}}=\sum_{l\ge0}(\gamma\lambda)^l\delta_{t+l}$，实现里没人真的存下所有 $\delta$ 再加权求和——统一写成**从轨迹末尾倒着走的递推**。CleanRL 的版本连 `dones`（episode 边界切断自举）都一并处理了：<Cite n={20} />
+
+```python
+# cleanrl/ppo.py（节选，注释为本站所加）
+        # bootstrap value if not done
+        with torch.no_grad():
+            # 轨迹在 num_steps 步被硬截断(不是自然终止)时,用 V(s_T) 自举,
+            # 而不是错当成终止状态(价值记 0)
+            next_value = agent.get_value(next_obs).reshape(1, -1)
+            advantages = torch.zeros_like(rewards).to(device)
+            lastgaelam = 0
+            # 从最后一步倒着走:递推 A_t = δ_t + γλ·A_{t+1}
+            for t in reversed(range(args.num_steps)):
+                if t == args.num_steps - 1:
+                    nextnonterminal = 1.0 - next_done
+                    nextvalues = next_value
+                else:
+                    # done[t+1]=1 说明 t+1 是新 episode 起点:切断自举,
+                    # δ_t 不再借下一个 episode 的价值给自己「买单」
+                    nextnonterminal = 1.0 - dones[t + 1]
+                    nextvalues = values[t + 1]
+                # TD 误差 δ_t = r_t + γV(s_{t+1}) - V(s_t)
+                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                # 递推展开恰是 GAE 定义:Σ(γλ)^l δ_{t+l} 一行写完
+                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+            # TD(λ) 目标:returns = A + V,作价值损失的回归目标
+            returns = advantages + values
+```
+
+三处细节值得对着教程概念细看：
+
+- **`delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]`**：就是 GAE 定义里的 TD 误差 $\delta_t=r_t+\gamma V(s_{t+1})-V(s_t)$，一行原文。上文 CodeRunner 演示的「前向累加 `A = delta + g*lam*A`」，在真实实现里就是这个 `lastgaelam` 变量——从后往前一遍循环，$\sum_l(\gamma\lambda)^l\delta_{t+l}$ 就地展开，不需要任何显式求和。
+- **`nextnonterminal`**：episode 边界处把自举项归零。这与上文 PPO 骨架里「轨迹被步数截断而非自然结束」的 bootstrap 处理是同一件事的两面——截断用 $V(s_T)$ 续账（`next_value`），自然终止把账结清（乘 0）。混着多个 episode 的批量 buffer 里，这两行判断就是 GAE 不跨 episode 泄漏的保证。
+- **`returns = advantages + values`**：GAE 小节讲过 $\hat A^{\mathrm{GAE}(\gamma,\lambda)}$ 与 TD(λ) 价值目标的关系——优势加上基线 $V$ 恰是 $\hat R_t$ 的估计，直接拿来当价值损失的回归目标，不必另算一遍 reward-to-go。
+
+### PPO 裁剪目标：三份实现，同一行公式
+
+PPO 小节的核心公式 $L^{\text{CLIP}}=\min(rA,\text{clip}(r,1-\varepsilon,1+\varepsilon)A)$，在 CleanRL 里是这样（注意它把取负号搬到了每一支上，用 `max` 而非 `min`）：<Cite n={[5,20]} />
+
+```python
+# cleanrl/ppo.py（节选，注释为本站所加）
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                    b_obs[mb_inds], b_actions.long()[mb_inds])
+                # ratio = π_θ(a|s) / π_θold(a|s) = exp(logπ_new - logπ_old)
+                # 存 log 概率再取指数,避免直接存概率的数值下溢
+                logratio = newlogprob - b_logprobs[mb_inds]
+                ratio = logratio.exp()
+
+                with torch.no_grad():
+                    # k3 近似 KL:(ratio - 1) - logratio ≥ 0,比朴素的 -logratio 更稳
+                    approx_kl = ((ratio - 1) - logratio).mean()
+                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+
+                mb_advantages = b_advantages[mb_inds]
+                # 优势归一化:论文没写、工程标配,降方差「免费午餐」
+                if args.norm_adv:
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+
+                # Policy loss
+                # 两支都取负号(max of 负 = 负的 min),clamp 即 clip(r, 1-ε, 1+ε)
+                pg_loss1 = -mb_advantages * ratio
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+```
+
+对照 Spinning Up 的同一段（`spinup/algos/pytorch/ppo/ppo.py` 的 `compute_loss_pi`），公式一个字符不差，只是写法取向不同：Spinning Up 存正目标取 `min` 再加负号，CleanRL 两支先取负再取 `max`——数学上完全等价。而「KL 早停」小节里那个 `target_kl` 熔断，两份实现也都原样保留：CleanRL 在每个 epoch 结束后检查 `approx_kl > args.target_kl` 即 `break`，Spinning Up 则放在每步梯度之前并留了 1.5 倍余量（`kl > 1.5 * target_kl` 才停）。<Cite n={2} />
+
+真正把「生产库」与「教学实现」区分开的，是 CleanRL 与 SB3 都默认带上、而教程伪代码省略的那些工程加固：**价值损失裁剪**（把 $V_\theta$ 的新预测也拴在旧值附近，CleanRL 的 `clip_vloss=True`）、**梯度范数裁剪**（`max_grad_norm=0.5`，防离群批量把参数推飞）、**正交初始化**（`layer_init`，actor 输出层 `std=0.01` 让初始策略接近均匀）、**学习率退火**（`anneal_lr` 随进度线性衰减）。SB3 的 `PPO.train()` 里还能看到 `clip_range` 支持传函数（随训练进度动态调整 $\varepsilon$）、`clip_range_vf` 可选开启价值裁剪、`target_kl` 早停同样在列——每一项都对应上文「工程超参数表」里的一行，只是生产库把它们做成了可配置项而非硬编码。<Cite n={21} />
+
+> 💡 **三份实现怎么选着读**：先读 Spinning Up 的 `vpg.py`（350 行看懂「定理 → 一行损失」），再读 CleanRL 的 `ppo.py`（把 GAE 递推、裁剪、多 epoch 小批量、工程加固串成完整闭环，配套文档逐行给实验结果），最后翻 SB3（看同一算法如何被包进向量化环境、回调与日志体系变成生产件）。顺带一提：PPO 精读页的[源码走读](/papers/ppo-schulman)从 SB3 与 TRL 两个实现再走了一遍裁剪目标，并延伸到 RLHF 场景下的 token 级 GAE 与 KL 惩罚奖励，可与本节对照。
+
+三份实现的源码：[Spinning Up vpg.py / ppo.py](https://github.com/openai/spinningup/tree/master/spinup/algos/pytorch)（注意仓库内目录是 `spinup` 而非 `spinningup`；PyTorch 版 TRPO 尚未实现，TF1 版在 `spinup/algos/tf1/trpo/`）、[cleanrl/ppo.py](https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py)、[stable_baselines3/ppo/ppo.py](https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/ppo/ppo.py)。想自己动手改，从 CleanRL 起步最省力：把 `clip_coef` 调到 1.0 感受裁剪的作用、把 `norm_adv` 关掉看方差变化、把 `gae_lambda` 从 0.95 拖到 0 和 1 对照 GAE 两端退化——「动手作业」的几个实验它都装得下。
+
+## 典型案例：策略梯度都用在哪
 
 | 系统 | 用到的算法 | 为什么用策略法而非价值法 |
 |---|---|---|
-| **OpenAI Five / AlphaStar**(Dota2 / 星际争霸) | PPO / actor-critic | 动作空间巨大且含连续量,$\max_a Q$ 不可行;需随机策略防被对手预判 |
-| **机器人 / 机械臂控制** | PPO、SAC、DDPG | 动作是连续力矩/角度,价值法要离散化会爆炸 |
-| **ChatGPT / Claude 对齐**([RLHF](/tutorials/rlhf)) | PPO(+反向 KL) | 「动作」是生成的整句话,天然是策略;要随机采样保持多样性 |
-| **DeepSeek-R1 推理训练** | GRPO(PPO 变体) | 用组内平均当基线,省掉 critic,详见 [RLHF 篇](/tutorials/rlhf) |
+| **OpenAI Five / AlphaStar**（Dota2 / 星际争霸） | PPO / actor-critic | 动作空间巨大且含连续量，$\max_a Q$ 不可行；需随机策略防被对手预判 |
+| **机器人 / 机械臂控制** | PPO、SAC、DDPG | 动作是连续力矩/角度，价值法要离散化会爆炸 |
+| **ChatGPT / Claude 对齐**（[RLHF](/tutorials/rlhf)） | PPO（+反向 KL） | 「动作」是生成的整句话，天然是策略；要随机采样保持多样性 |
+| **DeepSeek-R1 推理训练** | GRPO（PPO 变体） | 用组内平均当基线，省掉 critic，详见 [RLHF 篇](/tutorials/rlhf) |
 
-> 💡 规律很清楚:**只要动作连续、或需要随机性、或「动作」本身就是一段生成序列**,主流方案几乎都是策略梯度这一支。价值法(DQN)则在 Atari 这类离散小动作空间里更省样本。
+> 💡 规律很清楚：**只要动作连续、或需要随机性、或「动作」本身就是一段生成序列**，主流方案几乎都是策略梯度这一支。价值法（DQN）则在 Atari 这类离散小动作空间里更省样本。
 
 ## 与价值法的对比
 
-| | 价值法(Q-learning) | 策略法(Policy Gradient) |
+| | 价值法（Q-learning） | 策略法（Policy Gradient） |
 |---|---|---|
-| 学什么 | 价值 $Q(s,a)$,再导出策略 | 直接学策略 $\pi_\theta(a\mid s)$ |
-| 动作空间 | 离散(要取 $\max_a$) | 离散**或连续**都行 |
-| 策略类型 | 确定性(贪心) | **随机**策略,天然会探索 |
-| 典型难点 | 大状态空间靠 DQN 近似 | 高方差,靠基线 / Critic 压 |
+| 学什么 | 价值 $Q(s,a)$，再导出策略 | 直接学策略 $\pi_\theta(a\mid s)$ |
+| 动作空间 | 离散（要取 $\max_a$） | 离散**或连续**都行 |
+| 策略类型 | 确定性（贪心） | **随机**策略，天然会探索 |
+| 典型难点 | 大状态空间靠 DQN 近似 | 高方差，靠基线 / Critic 压 |
 
 ## 常见问题 FAQ
 
-**Q:策略梯度和 Q-learning,该用哪个?**
-动作离散且不多、要样本效率高 → 价值法(Q-learning/DQN)。动作连续(机器人控制)、或需要随机策略(博弈、探索) → 策略法。现代大规模应用(机器人、RLHF)大多是策略法或 actor-critic。
+**Q：策略梯度和 Q-learning，该用哪个？**
+动作离散且不多、要样本效率高 → 价值法（Q-learning/DQN）。动作连续（机器人控制）、或需要随机策略（博弈、探索） → 策略法。现代大规模应用（机器人、RLHF）大多是策略法或 actor-critic。
 
-**Q:为什么策略梯度天生会「探索」?**
-它学的是一个**概率分布** $\pi_\theta(a\mid s)$,采样时本就带随机性,不像贪心那样非最优不选。训练中分布逐渐变尖,探索自然减少——不需要额外的 ε-贪心。
+**Q：为什么策略梯度天生会「探索」？**
+它学的是一个**概率分布** $\pi_\theta(a\mid s)$，采样时本就带随机性，不像贪心那样非最优不选。训练中分布逐渐变尖，探索自然减少——不需要额外的 ε-贪心。
 
-**Q:优势函数 $A=Q-V$ 到底好在哪?**
-它把「绝对回报」换成「相对基准的好坏」。同一个状态里,$V(s)$ 是共同的水位线,减掉它只留下**动作之间的差异**,梯度信号干净、方差低,又因为是常数基线而**无偏**。
+**Q：优势函数 $A=Q-V$ 到底好在哪？**
+它把「绝对回报」换成「相对基准的好坏」。同一个状态里，$V(s)$ 是共同的水位线，减掉它只留下**动作之间的差异**，梯度信号干净、方差低，又因为是常数基线而**无偏**。
 
-**Q:优势 $A$ 具体怎么估?什么是 GAE?**
-两个极端:用**一步 TD 误差** $\delta_t=r_t+\gamma V(s_{t+1})-V(s_t)$ 估——偏差大、方差小;用**整条回报**减 $V$ 估(蒙特卡洛)——无偏、但方差大。**GAE(广义优势估计)** $\hat A_t^{\mathrm{GAE}}=\sum_{l\ge0}(\gamma\lambda)^l\delta_{t+l}$ 用一个 $\lambda\in[0,1]$ 把两端连续插值(定义、等价形式、两参数解耦的完整推导见上面「GAE:在偏差与方差之间连续插值」小节)。$\lambda=0$ 退化为 1-step TD、$\lambda=1$ 退化为蒙特卡洛,PPO 实践中常用 $\lambda\approx0.95$——这就是上面 PPO 目标里那个优势 $A$ 的真实来源。
+**Q：优势 $A$ 具体怎么估？什么是 GAE?**
+两个极端：用**一步 TD 误差** $\delta_t=r_t+\gamma V(s_{t+1})-V(s_t)$ 估——偏差大、方差小；用**整条回报**减 $V$ 估（蒙特卡洛）——无偏、但方差大。**GAE（广义优势估计）** $\hat A_t^{\mathrm{GAE}}=\sum_{l\ge0}(\gamma\lambda)^l\delta_{t+l}$ 用一个 $\lambda\in[0,1]$ 把两端连续插值（定义、等价形式、两参数解耦的完整推导见上面「GAE：在偏差与方差之间连续插值」小节）。$\lambda=0$ 退化为 1-step TD、$\lambda=1$ 退化为蒙特卡洛，PPO 实践中常用 $\lambda\approx0.95$——这就是上面 PPO 目标里那个优势 $A$ 的真实来源。
 
-**拖动 $\lambda$ 看权重如何从「只有一步」连续展开成「一整条轨迹」**,以及偏差与方差如何此消彼长:
+**拖动 $\lambda$ 看权重如何从「只有一步」连续展开成「一整条轨迹」**，以及偏差与方差如何此消彼长：
 
 <GAELambdaViz />
 
-> 💡 别被「MSE 最优」绑架:这里的权衡不是去找让均方误差最小的 $\lambda$(那往往落在 $\lambda\to0$),而是**用偏大的 $\lambda$ 把偏差压下去**——因为策略梯度的方向错误(高偏差)比走得晃荡(高方差)更致命,方差可以靠 PPO 裁剪和多次采样扛住,方向错了再多样本也救不回来。所以实践中 $\lambda$ 取 $0.9\sim0.95$ 偏向无偏端,把方差问题交给算法层面的裁剪与批量大小去消化。
+> 💡 别被「MSE 最优」绑架：这里的权衡不是去找让均方误差最小的 $\lambda$（那往往落在 $\lambda\to0$），而是**用偏大的 $\lambda$ 把偏差压下去**——因为策略梯度的方向错误（高偏差）比走得晃荡（高方差）更致命，方差可以靠 PPO 裁剪和多次采样扛住，方向错了再多样本也救不回来。所以实践中 $\lambda$ 取 $0.9\sim0.95$ 偏向无偏端，把方差问题交给算法层面的裁剪与批量大小去消化。
 
-**Q:reward-to-go 里的折扣到底写成 $\gamma^{t'}$ 还是 $\gamma^{t'-t}$?**
-写 **$\gamma^{t'}$**(原指数)。reward-to-go 是「把第 $t$ 步之前的项删掉」,不是「把时间原点重置到 $t$」。若误写成 $\gamma^{t'-t}$,会引入 $\gamma^{-t}$ 的缩放因子,把无偏估计变成有偏——本页「策略梯度定理」小节的 CodeRunner 里专门留了这处对照。Spinning Up [2] 原文用未折扣的 $R(\tau)=\sum r_t$、$\hat R_t=\sum_{t'\ge t}r_{t'}$,两者一致;一旦 $R(\tau)$ 带了 $\gamma^{t'}$,reward-to-go 就得跟着带 $\gamma^{t'}$。
+**Q：reward-to-go 里的折扣到底写成 $\gamma^{t'}$ 还是 $\gamma^{t'-t}$？**
+写 **$\gamma^{t'}$**（原指数）。reward-to-go 是「把第 $t$ 步之前的项删掉」，不是「把时间原点重置到 $t$」。若误写成 $\gamma^{t'-t}$，会引入 $\gamma^{-t}$ 的缩放因子，把无偏估计变成有偏——本页「策略梯度定理」小节的 CodeRunner 里专门留了这处对照。Spinning Up [2] 原文用未折扣的 $R(\tau)=\sum r_t$、$\hat R_t=\sum_{t'\ge t}r_{t'}$，两者一致；一旦 $R(\tau)$ 带了 $\gamma^{t'}$，reward-to-go 就得跟着带 $\gamma^{t'}$。
 
-**Q:PPO 里的 $\varepsilon$ 怎么选?**
-常用 $0.1\sim0.3$。太小则每步几乎不动、学得慢;太大则失去「拴住」的作用,退化回可能崩溃的原始策略梯度。上面的图里把 $\varepsilon$ 拖大,可见封顶的平台变宽。
+**Q：PPO 里的 $\varepsilon$ 怎么选？**
+常用 $0.1\sim0.3$。太小则每步几乎不动、学得慢；太大则失去「拴住」的作用，退化回可能崩溃的原始策略梯度。上面的图里把 $\varepsilon$ 拖大，可见封顶的平台变宽。
 
-**Q:TRPO 和 PPO 到底什么关系?为什么现在都用 PPO?**
-见上面的「TRPO:信赖域与单调提升」小节:TRPO 用 KL 硬约束 + 二阶自然梯度,理论可证**单调提升**但工程沉重(Fisher-向量积 + 共轭梯度 + 回溯,超参敏感);**PPO 是它的一阶近似**——丢掉 Hessian/CG,改用概率比 $r$ 的裁剪把「分布约束」翻译成「$r\in[1-\varepsilon,1+\varepsilon]$」,牺牲严格单调提升的证明,换来实现简单、训练快、调参容易,在绝大多数任务上追平甚至超过 TRPO。一句话:**TRPO 是理论标杆,PPO 是工程赢家。**
+**Q：TRPO 和 PPO 到底什么关系？为什么现在都用 PPO?**
+见上面的「TRPO：信赖域与单调提升」小节：TRPO 用 KL 硬约束 + 二阶自然梯度，理论可证**单调提升**但工程沉重（Fisher-向量积 + 共轭梯度 + 回溯，超参敏感）；**PPO 是它的一阶近似**——丢掉 Hessian/CG，改用概率比 $r$ 的裁剪把「分布约束」翻译成「$r\in[1-\varepsilon,1+\varepsilon]$」，牺牲严格单调提升的证明，换来实现简单、训练快、调参容易，在绝大多数任务上追平甚至超过 TRPO。一句话：**TRPO 是理论标杆，PPO 是工程赢家。**
 
-**Q:既然 A2C 已经取代了 A3C,为什么还要讲 A3C?现代到底用哪个?**
-A3C(Mnih et al. 2016 [3])的历史价值在于**首次**证明「并行 worker 去相关 + 异步更新」能稳定训练纯策略方法、还不用 experience replay 和 target network——这是 on-policy 深度 RL 能跑起来的工程奠基。但它的异步无锁更新有 staleness(梯度基于过时参数)、GPU 利用差,工程不如同步批量干净。现代主流是 **A2C 式同步批量采集 + GAE 优势 + PPO 裁剪**(即 PPO 的标准实现 [5]),采集层就是 A2C 那个 coordinator-batch 模式;真正的大规模分布式(如 IMPALA 的 V-trace,Lilian Weng [8] 有梳理)则在 A2C 基础上加了偏策略修正来容忍 actor 与 learner 之间的轻度 staleness。所以「学 A3C」是理解并行去相关这个机理,「用 A2C/PPO」是工程落地。
+**Q：既然 A2C 已经取代了 A3C，为什么还要讲 A3C？现代到底用哪个？**
+A3C（Mnih et al. 2016 [3]）的历史价值在于**首次**证明「并行 worker 去相关 + 异步更新」能稳定训练纯策略方法、还不用 experience replay 和 target network——这是 on-policy 深度 RL 能跑起来的工程奠基。但它的异步无锁更新有 staleness（梯度基于过时参数）、GPU 利用差，工程不如同步批量干净。现代主流是 **A2C 式同步批量采集 + GAE 优势 + PPO 裁剪**（即 PPO 的标准实现 [5]），采集层就是 A2C 那个 coordinator-batch 模式；真正的大规模分布式（如 IMPALA 的 V-trace,Lilian Weng [8] 有梳理）则在 A2C 基础上加了偏策略修正来容忍 actor 与 learner 之间的轻度 staleness。所以「学 A3C」是理解并行去相关这个机理，「用 A2C/PPO」是工程落地。
 
 ## 动手作业
 
-1. **加基线到 REINFORCE**:在第一个代码框里维护一个滑动平均 `b`,把更新改成 `lr*(r-b)*grad`,对比收敛是否更稳。
-2. **调学习率**:把 `lr` 从 0.1 改到 0.5 和 0.01,看策略收敛的快慢与稳定性。
-3. **扫描 $\varepsilon$**:结合上面的 PPO 图,思考 $\varepsilon\to 0$ 和 $\varepsilon\to\infty$ 两个极端分别退化成什么。
-4. **连续动作**:查一下高斯策略 $\pi_\theta(a\mid s)=\mathcal N(\mu_\theta(s),\sigma^2)$——策略梯度如何天然支持连续动作,而 Q-learning 不行。
-5. **复现降方差**:在「策略梯度定理」小节的 CodeRunner 里,把 `reward_prob` 改成「动作 0 在偶数状态更好、动作 1 在奇数状态更好」(对称设定),观察真梯度为何接近零、而三种估计器的方差排序不变。再把 reward-to-go 的 `gamma**tp` 故意改成 `gamma**(tp-t)`,看均值是否偏离真梯度(变成有偏)。
-6. **并行去相关实验**:在「A2C 与 A3C」小节的 CodeRunner 里,把 worker 数 `K` 从 8 改成 1 和 32,观察「单 worker 轨迹 lag-1 自相关」是否不变(轨迹动态没变),而「并行 batch 去相关」随 K 增大增强;再把 `dt_worker` 调大(模拟更慢的 rollout),观察 A3C 的 staleness 均值如何增长,体会为何 A2C 用同步避免了 staleness 却要等最慢的 worker。
+1. **加基线到 REINFORCE**：在第一个代码框里维护一个滑动平均 `b`，把更新改成 `lr*(r-b)*grad`，对比收敛是否更稳。
+2. **调学习率**：把 `lr` 从 0.1 改到 0.5 和 0.01，看策略收敛的快慢与稳定性。
+3. **扫描 $\varepsilon$**：结合上面的 PPO 图，思考 $\varepsilon\to 0$ 和 $\varepsilon\to\infty$ 两个极端分别退化成什么。
+4. **连续动作**：查一下高斯策略 $\pi_\theta(a\mid s)=\mathcal N(\mu_\theta(s),\sigma^2)$——策略梯度如何天然支持连续动作，而 Q-learning 不行。
+5. **复现降方差**：在「策略梯度定理」小节的 CodeRunner 里，把 `reward_prob` 改成「动作 0 在偶数状态更好、动作 1 在奇数状态更好」（对称设定），观察真梯度为何接近零、而三种估计器的方差排序不变。再把 reward-to-go 的 `gamma**tp` 故意改成 `gamma**(tp-t)`，看均值是否偏离真梯度（变成有偏）。
+6. **并行去相关实验**：在「A2C 与 A3C」小节的 CodeRunner 里，把 worker 数 `K` 从 8 改成 1 和 32，观察「单 worker 轨迹 lag-1 自相关」是否不变（轨迹动态没变），而「并行 batch 去相关」随 K 增大增强；再把 `dt_worker` 调大（模拟更慢的 rollout），观察 A3C 的 staleness 均值如何增长，体会为何 A2C 用同步避免了 staleness 却要等最慢的 worker.
 
 ## 小结
 
 | 概念 | 含义 |
 |---|---|
-| 策略梯度定理 | $\nabla J=\mathbb{E}[\nabla\log\pi_\theta\cdot G_t]$,直接优化策略 |
-| 定理推导链 | 轨迹似然分解 → 对数导数技巧 $\nabla P=P\nabla\log P$ → EGLP 引理(减基线无偏)→ 因果性(reward-to-go 删过去噪声无偏);四等价形式:全回报/reward-to-go/优势/Q |
-| REINFORCE | 用整条回报当权重,最朴素但高方差 |
-| 基线 $b$ | 减去它无偏(EGLP lemma)、却大幅降方差 |
-| 优势 $A=Q-V$ | 「比平均好多少」,最优基线,Actor-Critic 的核心 |
-| Critic 训练 | $V_\psi$ 用 MSE 拟合 reward-to-go $\hat R_t$,Actor/Critic 交替更新 |
-| 优势估计谱系 | TD(0) $\delta_t$ → n-step → 蒙特卡洛,偏差↑/方差↓ 的三段连续谱 |
-| GAE(λ) | 用 $(\gamma\lambda)^l$ 在一步 TD($\lambda=0$)与蒙特卡洛($\lambda=1$)间插值估优势 |
-| A2C / A3C | actor-critic 的两种采集:同步批量(GPU 友好,主流)vs 异步多 worker(天然去相关)。A3C 并行 worker 替代 experience replay 实现 on-policy 去相关 + Hogwild 无锁异步更新(有 staleness);A2C 同步 batch 消除 staleness、GPU 友好,配 GAE+PPO 成主流。n-step return $\sum\gamma^i r_{t+i}+\gamma^n V(s_{t+n})$ + entropy 正则 $\beta H(\pi)$ 防过早收敛 |
-| TRPO | 替代优势 $L=\mathbb E[\frac{\pi_\theta}{\pi_{\theta_k}}A]$ + KL 信赖域 $\bar D_{\mathrm{KL}}\le\delta$;二阶近似得自然梯度 $\theta_k+\sqrt{2\delta/(g^\top H^{-1}g)}H^{-1}g$,CG + Fisher-向量积避开 $H^{-1}$,回溯线搜索兜底;单调提升但工程重 |
-| PPO 裁剪 | TRPO 的一阶近似,$\min(rA,\text{clip}(r)A)$ 把每步更新拴在旧策略附近 |
-| PPO 完整目标 | $L^{\text{CLIP}}-c_vL^{\text{VF}}+c_sS$,裁剪 + 价值 MSE + 熵正则三项合一 |
-| PPO-Penalty | 另一变体:不裁剪,加自适应 $\beta$·KL 惩罚项近似 TRPO 的硬约束 |
-| KL 早停 | 裁剪之外的第二道保险:批次级 $\bar D_{\text{KL}}>$ `target_kl` 即停 |
-| 元强化学习(MAML/RL²) | 跨任务学先验让新任务几步适配:MAML 学「易微调初始化」(双层优化 + 二阶 meta 梯度),RL² 把算法本身编码进 RNN 权重(跨 episode 隐藏状态) |
+| 策略梯度定理 | $\nabla J=\mathbb{E}[\nabla\log\pi_\theta\cdot G_t]$，直接优化策略 |
+| 定理推导链 | 轨迹似然分解 → 对数导数技巧 $\nabla P=P\nabla\log P$ → EGLP 引理（减基线无偏）→ 因果性（reward-to-go 删过去噪声无偏）；四等价形式：全回报/reward-to-go/优势/Q |
+| REINFORCE | 用整条回报当权重，最朴素但高方差 |
+| 基线 $b$ | 减去它无偏（EGLP lemma）、却大幅降方差 |
+| 优势 $A=Q-V$ | 「比平均好多少」，最优基线，Actor-Critic 的核心 |
+| Critic 训练 | $V_\psi$ 用 MSE 拟合 reward-to-go $\hat R_t$，Actor/Critic 交替更新 |
+| 优势估计谱系 | TD(0) $\delta_t$ → n-step → 蒙特卡洛，偏差↑/方差↓ 的三段连续谱 |
+| GAE(λ) | 用 $(\gamma\lambda)^l$ 在一步 TD($\lambda=0$)与蒙特卡洛（$\lambda=1$）间插值估优势 |
+| A2C / A3C | actor-critic 的两种采集：同步批量（GPU 友好，主流）vs 异步多 worker（天然去相关）。A3C 并行 worker 替代 experience replay 实现 on-policy 去相关 + Hogwild 无锁异步更新（有 staleness）；A2C 同步 batch 消除 staleness、GPU 友好，配 GAE+PPO 成主流。n-step return $\sum\gamma^i r_{t+i}+\gamma^n V(s_{t+n})$ + entropy 正则 $\beta H(\pi)$ 防过早收敛 |
+| TRPO | 替代优势 $L=\mathbb E[\frac{\pi_\theta}{\pi_{\theta_k}}A]$ + KL 信赖域 $\bar D_{\mathrm{KL}}\le\delta$；二阶近似得自然梯度 $\theta_k+\sqrt{2\delta/(g^\top H^{-1}g)}H^{-1}g$，CG + Fisher-向量积避开 $H^{-1}$，回溯线搜索兜底；单调提升但工程重 |
+| PPO 裁剪 | TRPO 的一阶近似，$\min(rA,\text{clip}(r)A)$ 把每步更新拴在旧策略附近 |
+| PPO 完整目标 | $L^{\text{CLIP}}-c_vL^{\text{VF}}+c_sS$，裁剪 + 价值 MSE + 熵正则三项合一 |
+| PPO-Penalty | 另一变体：不裁剪，加自适应 $\beta$·KL 惩罚项近似 TRPO 的硬约束 |
+| KL 早停 | 裁剪之外的第二道保险：批次级 $\bar D_{\text{KL}}>$ `target_kl` 即停 |
+| 元强化学习（MAML/RL²） | 跨任务学先验让新任务几步适配：MAML 学「易微调初始化」（双层优化 + 二阶 meta 梯度），RL² 把算法本身编码进 RNN 权重（跨 episode 隐藏状态） |
 
-> 🎯 一句话记住:**策略梯度 = 不学价值表,直接把「好动作」的概率推高;减基线降方差、用 Critic 估优势、用 PPO 裁剪稳更新。** 下一篇把 actor-critic 推向**连续动作**——[DDPG 到 SAC 的连续控制](/tutorials/continuous-control);而它在大模型时代的杀手级应用则是 [RLHF](/tutorials/rlhf)。
+> 🎯 一句话记住：**策略梯度 = 不学价值表，直接把「好动作」的概率推高；减基线降方差、用 Critic 估优势、用 PPO 裁剪稳更新。** 下一篇把 actor-critic 推向**连续动作**——[DDPG 到 SAC 的连续控制](/tutorials/continuous-control)；而它在大模型时代的杀手级应用则是 [RLHF](/tutorials/rlhf)。
 
 ## 延伸阅读
 
-- **站内论文笔记**:[PPO](/papers/ppo-schulman) —— 本篇 PPO 一节的论文区姊妹篇:裁剪目标的原始动机与后续影响
-- **站内论文笔记**:[GRPO 与 DeepSeek-R1](/papers/grpo-deepseek-r1) —— PPO 的「做减法」后续:砍掉 critic、用组内基线,通往大模型推理 RL
-- **站内论文笔记**:[DPO](/papers/dpo-rafailov) —— 策略梯度的「绕过 RL」对手:同样带 KL 约束,但把整个 RL 循环压成一个分类损失
+- **站内论文笔记**：[PPO](/papers/ppo-schulman) —— 本篇 PPO 一节的论文区姊妹篇：裁剪目标的原始动机与后续影响
+- **站内论文笔记**：[GRPO 与 DeepSeek-R1](/papers/grpo-deepseek-r1) —— PPO 的「做减法」后续：砍掉 critic、用组内基线，通往大模型推理 RL
+- **站内论文笔记**：[DPO](/papers/dpo-rafailov) —— 策略梯度的「绕过 RL」对手：同样带 KL 约束，但把整个 RL 循环压成一个分类损失
 
-## 参考文献
+## 参考资料
 
-1. Schulman, J., Moritz, P., Levine, S., Jordan, M., & Abbeel, P. (2016). *High-Dimensional Continuous Control Using Generalized Advantage Estimation*. ICLR 2016. [arXiv:1506.02438](https://arxiv.org/abs/1506.02438). —— GAE 原始论文:提出 $\hat A^{\mathrm{GAE}(\gamma,\lambda)}=\sum_{l\ge0}(\gamma\lambda)^l\delta_{t+l}^V$,即所有 $n$-step 优势的几何加权凸组合,用 $\lambda$ 在 TD(0) 与蒙特卡洛间连续插值控制偏差-方差,$\gamma$ 与 $\lambda$ 解耦;并用 trust region 同时优化策略与价值函数,3D 双足/四足机器人步态学习 SOTA。本文是本篇「GAE:在偏差与方差之间连续插值」小节的直接来源。
-2. OpenAI Spinning Up — *Intro to Policy Optimization* 与 *Key Equations in RL*. [spinningup.openai.com](https://spinningup.openai.com/en/latest/spinningup/rl_intro3.html). —— 策略梯度定理的现代化讲解:EGLP lemma、基线 $V^\pi$ 的方差缩减、$V_\psi$ 的 MSE 训练目标、reward-to-go;VPG/TRPO/PPO/A2C 共用同一 Critic 套路。
-3. Mnih, Badia, Mirza, Graves, Lillicrap, Harley, Silver, Kavukcuoglu (2016). *Asynchronous Methods for Deep Reinforcement Learning*. [arXiv:1602.01783](https://arxiv.org/abs/1602.01783). —— A3C 原始论文:多个异步 worker 并行探索、写共享参数实现样本去相关,无需经验回放;同步批量版(A2C)是其工程简化,后成主流。
+<References>
+1. Schulman, J., Moritz, P., Levine, S., Jordan, M., & Abbeel, P. (2016). *High-Dimensional Continuous Control Using Generalized Advantage Estimation*. ICLR 2016. [arXiv:1506.02438](https://arxiv.org/abs/1506.02438). —— GAE 原始论文：提出 $\hat A^{\mathrm{GAE}(\gamma,\lambda)}=\sum_{l\ge0}(\gamma\lambda)^l\delta_{t+l}^V$，即所有 $n$-step 优势的几何加权凸组合，用 $\lambda$ 在 TD（0） 与蒙特卡洛间连续插值控制偏差-方差，$\gamma$ 与 $\lambda$ 解耦；并用 trust region 同时优化策略与价值函数，3D 双足/四足机器人步态学习 SOTA。本文是本篇「GAE：在偏差与方差之间连续插值」小节的直接来源。
+2. OpenAI Spinning Up — *Intro to Policy Optimization* 与 *Key Equations in RL*。 [spinningup.openai.com](https://spinningup.openai.com/en/latest/spinningup/rl_intro3.html)。 —— 策略梯度定理的现代化讲解：EGLP lemma、基线 $V^\pi$ 的方差缩减、$V_\psi$ 的 MSE 训练目标、reward-to-go;VPG/TRPO/PPO/A2C 共用同一 Critic 套路。
+3. Mnih, Badia, Mirza, Graves, Lillicrap, Harley, Silver, Kavukcuoglu (2016). *Asynchronous Methods for Deep Reinforcement Learning*. [arXiv:1602.01783](https://arxiv.org/abs/1602.01783). —— A3C 原始论文：多个异步 worker 并行探索、写共享参数实现样本去相关，无需经验回放；同步批量版（A2C）是其工程简化，后成主流。
 4. Sutton, Barto (2018). *Reinforcement Learning: An Introduction*, Ch.13 Policy Gradient Methods. [MIT Press](http://incompleteideas.net/book/RLbook2020.pdf). —— 策略梯度定理的教材级推导、REINFORCE、基线减方差、actor-critic 框架的经典表述。
-5. Schulman, Wolski, Dhariwal, Radford, Klimov (2017). *Proximal Policy Optimization Algorithms*. [arXiv:1707.06347](https://arxiv.org/abs/1707.06347). —— PPO 原始论文:提出裁剪 surrogate 目标 $L^{\text{CLIP}}=\min(rA,\text{clip}(r,1-\varepsilon,1+\varepsilon)A)$ 与自适应 KL 惩罚变体 PPO-Penalty;支持同一批数据多 epoch 小批量更新;在 Atari/连续控制/Mujoco 上权衡样本效率、简洁性、墙钟时间,优于 TRPO 等 on-policy 方法,成为 RLHF 时代的主力算法。
-6. Schulman, Levine, Abbeel, Jordan, Moritz (2015). *Trust Region Policy Optimization*. [arXiv:1502.05477](https://arxiv.org/abs/1502.05477). —— TRPO 原始论文:在 KL 散度硬约束 $\bar D_{\text{KL}}\le\delta$ 下最大化 surrogate 优势,基于 Kakade & Langford 2002 的策略提升界;用共轭梯度求解二阶自然梯度,理论可证策略单调提升,PPO 是其一阶近似。
-7. Sutton, R. S., McAllester, D. A., Singh, S. P., & Mansour, Y. (1999). *Policy Gradient Methods for Reinforcement Learning with Function Approximation*. NeurIPS 1999. [papers.nips.cc](https://papers.nips.cc/paper_files/paper/1999/hash/464d828b85b0bed98e80ade0a5c43b0f-Abstract.html). —— 策略梯度定理的原始论文:首次给出 $\nabla_\theta J\propto\sum_s\mu(s)\sum_a Q^\pi(s,a)\nabla\pi(a\mid s)$ 的一般形式(对状态分布 $\mu$ 求和),把对数导数技巧引入 RL,使策略法可与函数逼近(神经网络)结合;本篇「策略梯度定理:从期望到可采样梯度」小节推导链的源头。
-8. Lilian Weng (2018). *Policy Gradient Algorithms*. [lilianweng.github.io](https://lilianweng.github.io/posts/2018-04-08-policy-gradient/). —— A3C/A2C 架构的清晰梳理:全局共享 $\theta/w$ + 线程本地副本 $\theta'/w'$ + 本地 n-step rollout + Hogwild! 式无锁异步更新 + policy 梯度累加 $d\theta\leftarrow d\theta+\nabla\log\pi(a_i|s_i)(R-V(s_i))$ + value MSE + n-step return 后向累加 $R\leftarrow\gamma R+r_i$;A2C 作为同步版(coordinator 等齐再批量更新、消除 staleness、GPU 友好);advantage $A=Q-V$ 减基线降方差;entropy 正则 $\beta H(\pi)$ 在 PPO/SAC/IMPALA 通用。本篇「A2C 与 A3C」小节工程细节的直接来源。
-9. Finn, Abbeel, Levine (2017). *Model-Agnostic Meta-Learning for Fast Adaptation of Deep Networks*. ICML 2017. [arXiv:1703.03400](https://arxiv.org/abs/1703.03400). —— MAML 原始论文:学一个「易微调的初始化」$\theta$,双层优化(内循环几步梯度得 $\theta'_i$、外循环 meta 梯度穿过内循环对 $\theta$ 求导含二阶 Hessian 项,可用 FOMAML 一阶近似);模型无关——兼容任意梯度训练模型(分类/回归/RL);RL 应用内循环用 policy gradient 在任务 $\mathcal T_i$ 几条轨迹上更新、外循环评估适配后策略。本篇「元强化学习」小节 MAML 双层优化的直接来源。
-10. Duan, Schulman, Chen, Bartlett, Sutskever, Abbeel (2016). *RL²: Fast Reinforcement Learning via Slow Reinforcement Learning*. [arXiv:1611.02779](https://arxiv.org/abs/1611.02779). —— RL² 原始论文:把快速 RL 算法本身编码进 RNN 权重(慢速标准 RL 训练学出),RNN 跨 episode 维持隐藏状态(同 MDP 内不重置)充当面对未见 MDP 的算法记忆,输入 $(o_t,a_{t-1},r_{t-1},\text{done}_{t-1})$;双时间尺度(训练慢权重、测试快激活)。本篇「元强化学习」小节 RL² 范式的直接来源。
-11. Achiam, Held, Tamar, Abbeel (2017). *Constrained Policy Optimization*. ICML 2017. [arXiv:1705.10528](https://arxiv.org/abs/1705.10528). —— CPO 原始论文:在 TRPO 的 KL 信赖域 $\bar D_{KL}\le\delta$ 上加代价约束,得到 CMDP 下的 trust-region 更新;局部线性-二次近似把每步更新转成凸规划(线性目标 + 线性代价约束 + 二次 KL 约束),对偶求解后原问题解 $\theta^*=\theta_k+\frac1{\lambda^*}H^{-1}(g-B\nu^*)$;当线性化不可行($c_i>0$)走可行恢复投影 $\theta^*=\theta_k-\sqrt{2\delta/(b^\top H^{-1}b)}\,H^{-1}b$ 纯降代价;Proposition 2 给出每步约束违反界 $J_{C_i}(\pi_{k+1})\le d_i+\frac{\sqrt{2\delta}\gamma\epsilon^{\pi_{k+1}}_{C_i}}{(1-\gamma)^2}$,即每次迭代近约束满足。本篇「安全强化学习」小节 CPO 推导与 CodeRunner toy 的直接来源。
-12. Altman, E. (1999). *Constrained Markov Decision Processes*. Chapman & Hall/CRC, Stochastic Modeling Series. ISBN 1-58488-009-8. —— CMDP 理论专著:系统建立约束马尔可夫决策过程框架——在标准 MDP 的奖励 $r$ 之上引入辅助代价函数 $C_i$ 与上限 $d_i$,可行策略集 $\Pi_C=\{\pi:\forall i,J_{C_i}(\pi)\le d_i\}$,优化目标 $\pi^*=\arg\max_{\pi\in\Pi_C}J(\pi)$;涵盖线性规划/拉格朗日对偶求解、约束下策略迭代、凸性分析等理论基础。本篇「CMDP:把约束写进问题定义」小节问题设定的权威出处。
-13. Thananjeyan, Balakrishna, Nair, Luo, Srinivasan, Hwang, Gonzalez, Ibarz, Finn, Goldberg (2021). *Recovery RL: Safe Reinforcement Learning with Learned Recovery Zones*. IEEE Robotics and Automation Letters (RA-L) / ICRA 2021. [arXiv:2010.15920](https://arxiv.org/abs/2010.15920). —— Recovery RL 原始论文:把任务与安全拆给两个策略——任务策略 $\pi_{\text{task}}$ 用任意基座算法(原文 SAC)只优化奖励;安全 critic $\hat Q^{\pi}_{\text{risk}}(s,a)=E_\pi[\sum\gamma_{\text{risk}}^{t'-t}c_{t'}]$ 估未来违反折扣概率,终止于违反的 Bellman 目标 $Q_{\text{risk}}=c+(1-c)\gamma_{\text{risk}}E[Q_{\text{risk}}]$;恢复策略 $\pi_{\text{rec}}$ 最小化 $\hat Q_{\text{risk}}(s,\pi_{\text{rec}}(s))$;安全滤波规则按阈值 $\varepsilon_{\text{risk}}$ 二分安全集/恢复集决定是否覆盖动作;离线数据预学危险区使在线违反率比 CPO/PPO-Lagrangian 等 5 种方法低 2-20 倍。本篇「Recovery RL:安全滤波的双策略分解」小节三策略 + Bellman 目标 + 滤波规则 + CodeRunner toy 的直接来源。
-14. Williams, R. J. (1992). *Simple statistical gradient-following algorithms for connectionist reinforcement learning*. Machine Learning, 8(3-4), 229–256. [DOI:10.1007/BF00992696](https://doi.org/10.1007/BF00992696). —— REINFORCE 族算法的奠基论文:首次系统建立「用对数导数技巧(score function / log-derivative trick,$\pi_\theta\cdot\nabla_\theta\log\pi_\theta=\nabla_\theta\pi_\theta$)把期望回报的梯度转成可采样的蒙特卡洛估计」这一框架,并证明该估计是 $\nabla_\theta J(\theta)$ 的**无偏估计**;「REINFORCE 是无偏梯度估计」一节的直接来源。无偏性是后续 actor-critic / TRPO / PPO 一切降方差工作的前提——它们都在改善方差,不改变无偏。
-15. Kakade, S. (2001). *A Natural Policy Gradient*. NeurIPS 2001 (Advances in Neural Information Processing Systems 14). [papers.nips.cc](https://papers.nips.cc/paper_files/paper/2001/hash/4b86abe48d358ecf194c56c69108433e-Abstract.html). —— 自然梯度应用于策略优化的开山作:指出欧氏参数空间里「$\theta$ 接近」≠「$\pi_\theta$ 接近」,提出用 KL 散度作策略分布空间的度量,在该度量下的最陡上升方向 $\tilde g=F(\theta)^{-1}\nabla_\theta J(\theta)$ 即自然梯度($F$ 为策略的 Fisher 信息矩阵);在「策略变化剧烈」方向自动减小步长、「迟钝」方向加大步长,使每步更新在策略分布意义上等距;是 TRPO 信赖域($\bar D_{\mathrm{KL}}\le\delta$)的理论前身。「自然梯度:换一种距离让收敛更稳」一节的直接来源。**注:历史轮次曾误猜 arXiv ID,据 R39 教训改引 NeurIPS 2001 proceedings 稳定页**。
-16. Levine, S. (2020). *CS 285: Deep Reinforcement Learning, Lecture 5 — Policy Gradients*. UC Berkeley. [rail.eecs.berkeley.edu](https://rail.eecs.berkeley.edu/deeprlcourse/). —— Berkeley 深度 RL 课程的策略梯度讲义:系统讲策略梯度定理、REINFORCE、基线、reward-to-go、高方差问题与工程对策(大 batch、Adam「凑合」、调学习率极难);本篇「实践含义」段「策略梯度用比监督学习大得多的 batch、自适应步长、trust region」的实证依据来源。
-17. Kirkpatrick, J., Pascanu, R., Rabinowitz, N., Veness, J., Desjardins, G., Rusu, A. A., Milan, K., Quan, J., Ramalho, T., Grabska-Barwinska, A., Hassabis, D., Clopath, C., Kumaran, D., Hadsell, R. (2017). *Overcoming catastrophic forgetting in neural networks*. PNAS 114(13):3521-3526. [arXiv:1612.00796](https://arxiv.org/abs/1612.00796) / [DOI:10.1073/pnas.1611835114](https://doi.org/10.1073/pnas.1611835114). —— EWC 原始论文:指出连接主义模型在序列任务上「灾难性遗忘」源于参数共享、新梯度无差别覆盖旧解;提出用任务 A 收敛点 $\theta^*_A$ 处的 Fisher 信息对角 $F_i$ 作参数重要性度量,在任务 B 的损失上加二次惩罚 $\mathcal L_{\text{total}}=\mathcal L_B+\frac{\lambda}{2}\sum_i F_i(\theta_i-\theta^*_{A,i})^2$ 精准保护关键参数,对比 L2 同等约束过度束缚、朴素微调彻底遗忘;在 MNIST 序列 + Atari 多任务上验证。本篇「持续学习:EWC」小节概念、Fisher 重要性度量、二次惩罚公式与 CodeRunner toy 的直接来源。
-18. Rusu, A. A., Rabinowitz, N. C., Desjardins, G., Soyer, H., Kirkpatrick, J., Kavukcuoglu, K., Pascanu, R., Hadsell, R. (2016). *Progressive Neural Networks*. arXiv:1606.04671. [arXiv:1606.04671](https://arxiv.org/abs/1606.04671). —— Progressive Networks 原始论文:提出为每个新任务新增一列网络、冻结旧列、列间用侧向连接 $h^{(2)}_l=f(W^{(2)}_l h^{(2)}_{l-1}+U^{(2\leftarrow 1)}_l h^{(1)}_l)$ 传递特征的架构扩张路线;旧列冻结实现零遗忘、侧向连接实现正向迁移,代价是容量随任务数线性增长;在 Atari 多任务序列与 3D 跑酷上显著优于朴素微调与独立网络。本篇「Progressive Networks:加列而非改列」小节机制与对比表的直接来源。
-19. Espeholt, L., Soyer, H., Munos, R., Simonyan, K., Mnih, V., Ward, T., Doron, Y., Firoiu, V., Harley, T., Dunning, I., Legg, S., Kavukcuoglu, K. (2018). *IMPALA: Scalable Distributed Deep-RL with Importance Weighted Actor-Learner Architectures*. ICML 2018. arXiv:1802.01561. [arXiv:1802.01561](https://arxiv.org/abs/1802.01561). —— IMPALA 原始论文(12 作者):提出 actor-learner 解耦架构(actor 只 rollout 产轨迹入队、learner 单点算梯度更新 $\theta$ 再定期推回 actor)+ V-trace off-policy 价值目标 $v_s=V(x_s)+\sum_{t=s}^{s+n-1}\gamma^{t-s}(\prod_{i=s}^{t-1}c_i)\rho_t(r_t+\gamma V(x_{t+1})-V(x_t))$ + 截断 IS 比 $\rho_t=\min(\bar\rho,\pi/\mu)$、$c_i=\min(\bar c,\pi/\mu)$ + $\bar\rho\geq\bar c$ 假设(Theorem 1 收敛保证)+ $\bar\rho$ 决定不动点($\bar\rho=\infty\to V^\pi$,$\bar\rho\approx0\to V^\mu$)、$\bar c$ 决定收敛速度 + Atari 实验默认 $\bar c=\bar\rho=1.0$(搜过 $\bar\rho\in\{1,10,100\}$,$\bar\rho=1$ 最稳)+ on-policy $\pi=\mu$ 时 $\rho_t=c_i=1$ 退化为 n-step Bellman。本篇「IMPALA 与 V-trace」小节架构、公式、截断系数语义、三种分布式架构对照表的直接来源。
+5. Schulman, Wolski, Dhariwal, Radford, Klimov (2017). *Proximal Policy Optimization Algorithms*. [arXiv:1707.06347](https://arxiv.org/abs/1707.06347). —— PPO 原始论文：提出裁剪 surrogate 目标 $L^{\text{CLIP}}=\min(rA,\text{clip}(r,1-\varepsilon,1+\varepsilon)A)$ 与自适应 KL 惩罚变体 PPO-Penalty；支持同一批数据多 epoch 小批量更新；在 Atari/连续控制/Mujoco 上权衡样本效率、简洁性、墙钟时间，优于 TRPO 等 on-policy 方法，成为 RLHF 时代的主力算法。
+6. Schulman, Levine, Abbeel, Jordan, Moritz (2015). *Trust Region Policy Optimization*. [arXiv:1502.05477](https://arxiv.org/abs/1502.05477). —— TRPO 原始论文：在 KL 散度硬约束 $\bar D_{\text{KL}}\le\delta$ 下最大化 surrogate 优势，基于 Kakade & Langford 2002 的策略提升界；用共轭梯度求解二阶自然梯度，理论可证策略单调提升，PPO 是其一阶近似。
+7. Sutton, R. S., McAllester, D. A., Singh, S. P., & Mansour, Y. (1999). *Policy Gradient Methods for Reinforcement Learning with Function Approximation*. NeurIPS 1999. [papers.nips.cc](https://papers.nips.cc/paper_files/paper/1999/hash/464d828b85b0bed98e80ade0a5c43b0f-Abstract.html). —— 策略梯度定理的原始论文：首次给出 $\nabla_\theta J\propto\sum_s\mu(s)\sum_a Q^\pi(s,a)\nabla\pi(a\mid s)$ 的一般形式（对状态分布 $\mu$ 求和），把对数导数技巧引入 RL，使策略法可与函数逼近（神经网络）结合；本篇「策略梯度定理：从期望到可采样梯度」小节推导链的源头。
+8. Lilian Weng (2018). *Policy Gradient Algorithms*. [lilianweng.github.io](https://lilianweng.github.io/posts/2018-04-08-policy-gradient/). —— A3C/A2C 架构的清晰梳理：全局共享 $\theta/w$ + 线程本地副本 $\theta'/w'$ + 本地 n-step rollout + Hogwild！ 式无锁异步更新 + policy 梯度累加 $d\theta\leftarrow d\theta+\nabla\log\pi(a_i|s_i)(R-V(s_i))$ + value MSE + n-step return 后向累加 $R\leftarrow\gamma R+r_i$；A2C 作为同步版（coordinator 等齐再批量更新、消除 staleness、GPU 友好）；advantage $A=Q-V$ 减基线降方差；entropy 正则 $\beta H(\pi)$ 在 PPO/SAC/IMPALA 通用。本篇「A2C 与 A3C」小节工程细节的直接来源。
+9. Finn, Abbeel, Levine (2017). *Model-Agnostic Meta-Learning for Fast Adaptation of Deep Networks*. ICML 2017. [arXiv:1703.03400](https://arxiv.org/abs/1703.03400). —— MAML 原始论文：学一个「易微调的初始化」$\theta$，双层优化（内循环几步梯度得 $\theta'_i$、外循环 meta 梯度穿过内循环对 $\theta$ 求导含二阶 Hessian 项，可用 FOMAML 一阶近似）；模型无关——兼容任意梯度训练模型（分类/回归/RL）；RL 应用内循环用 policy gradient 在任务 $\mathcal T_i$ 几条轨迹上更新、外循环评估适配后策略。本篇「元强化学习」小节 MAML 双层优化的直接来源。
+10. Duan, Schulman, Chen, Bartlett, Sutskever, Abbeel (2016). *RL²: Fast Reinforcement Learning via Slow Reinforcement Learning*. [arXiv:1611.02779](https://arxiv.org/abs/1611.02779). —— RL² 原始论文：把快速 RL 算法本身编码进 RNN 权重（慢速标准 RL 训练学出），RNN 跨 episode 维持隐藏状态（同 MDP 内不重置）充当面对未见 MDP 的算法记忆，输入 $(o_t,a_{t-1},r_{t-1},\text{done}_{t-1})$；双时间尺度（训练慢权重、测试快激活）。本篇「元强化学习」小节 RL² 范式的直接来源。
+11. Achiam, Held, Tamar, Abbeel (2017). *Constrained Policy Optimization*. ICML 2017. [arXiv:1705.10528](https://arxiv.org/abs/1705.10528). —— CPO 原始论文：在 TRPO 的 KL 信赖域 $\bar D_{KL}\le\delta$ 上加代价约束，得到 CMDP 下的 trust-region 更新；局部线性-二次近似把每步更新转成凸规划（线性目标 + 线性代价约束 + 二次 KL 约束），对偶求解后原问题解 $\theta^*=\theta_k+\frac1{\lambda^*}H^{-1}(g-B\nu^*)$；当线性化不可行（$c_i>0$）走可行恢复投影 $\theta^*=\theta_k-\sqrt{2\delta/(b^\top H^{-1}b)}\,H^{-1}b$ 纯降代价；Proposition 2 给出每步约束违反界 $J_{C_i}(\pi_{k+1})\le d_i+\frac{\sqrt{2\delta}\gamma\epsilon^{\pi_{k+1}}_{C_i}}{(1-\gamma)^2}$，即每次迭代近约束满足。本篇「安全强化学习」小节 CPO 推导与 CodeRunner toy 的直接来源。
+12. Altman, E. (1999). *Constrained Markov Decision Processes*. Chapman & Hall/CRC, Stochastic Modeling Series. ISBN 1-58488-009-8. —— CMDP 理论专著：系统建立约束马尔可夫决策过程框架——在标准 MDP 的奖励 $r$ 之上引入辅助代价函数 $C_i$ 与上限 $d_i$，可行策略集 $\Pi_C=\{\pi:\forall i,J_{C_i}(\pi)\le d_i\}$，优化目标 $\pi^*=\arg\max_{\pi\in\Pi_C}J(\pi)$；涵盖线性规划/拉格朗日对偶求解、约束下策略迭代、凸性分析等理论基础。本篇「CMDP：把约束写进问题定义」小节问题设定的权威出处。
+13. Thananjeyan, Balakrishna, Nair, Luo, Srinivasan, Hwang, Gonzalez, Ibarz, Finn, Goldberg (2021). *Recovery RL: Safe Reinforcement Learning with Learned Recovery Zones*. IEEE Robotics and Automation Letters (RA-L) / ICRA 2021. [arXiv:2010.15920](https://arxiv.org/abs/2010.15920). —— Recovery RL 原始论文：把任务与安全拆给两个策略——任务策略 $\pi_{\text{task}}$ 用任意基座算法（原文 SAC）只优化奖励；安全 critic $\hat Q^{\pi}_{\text{risk}}(s,a)=E_\pi[\sum\gamma_{\text{risk}}^{t'-t}c_{t'}]$ 估未来违反折扣概率，终止于违反的 Bellman 目标 $Q_{\text{risk}}=c+(1-c)\gamma_{\text{risk}}E[Q_{\text{risk}}]$；恢复策略 $\pi_{\text{rec}}$ 最小化 $\hat Q_{\text{risk}}(s,\pi_{\text{rec}}(s))$；安全滤波规则按阈值 $\varepsilon_{\text{risk}}$ 二分安全集/恢复集决定是否覆盖动作；离线数据预学危险区使在线违反率比 CPO/PPO-Lagrangian 等 5 种方法低 2-20 倍。本篇「Recovery RL：安全滤波的双策略分解」小节三策略 + Bellman 目标 + 滤波规则 + CodeRunner toy 的直接来源。
+14. Williams, R. J. (1992). *Simple statistical gradient-following algorithms for connectionist reinforcement learning*. Machine Learning, 8(3-4), 229–256. [DOI:10.1007/BF00992696](https://doi.org/10.1007/BF00992696). —— REINFORCE 族算法的奠基论文：首次系统建立「用对数导数技巧（score function / log-derivative trick,$\pi_\theta\cdot\nabla_\theta\log\pi_\theta=\nabla_\theta\pi_\theta$）把期望回报的梯度转成可采样的蒙特卡洛估计」这一框架，并证明该估计是 $\nabla_\theta J(\theta)$ 的**无偏估计**；「REINFORCE 是无偏梯度估计」一节的直接来源。无偏性是后续 actor-critic / TRPO / PPO 一切降方差工作的前提——它们都在改善方差，不改变无偏。
+15. Kakade, S. (2001). *A Natural Policy Gradient*. NeurIPS 2001 (Advances in Neural Information Processing Systems 14). [papers.nips.cc](https://papers.nips.cc/paper_files/paper/2001/hash/4b86abe48d358ecf194c56c69108433e-Abstract.html). —— 自然梯度应用于策略优化的开山作：指出欧氏参数空间里「$\theta$ 接近」≠「$\pi_\theta$ 接近」，提出用 KL 散度作策略分布空间的度量，在该度量下的最陡上升方向 $\tilde g=F(\theta)^{-1}\nabla_\theta J(\theta)$ 即自然梯度（$F$ 为策略的 Fisher 信息矩阵）；在「策略变化剧烈」方向自动减小步长、「迟钝」方向加大步长，使每步更新在策略分布意义上等距；是 TRPO 信赖域（$\bar D_{\mathrm{KL}}\le\delta$）的理论前身。「自然梯度：换一种距离让收敛更稳」一节的直接来源。**注：历史轮次曾误猜 arXiv ID，据 R39 教训改引 NeurIPS 2001 proceedings 稳定页**。
+16. Levine, S. (2020). *CS 285: Deep Reinforcement Learning, Lecture 5 — Policy Gradients*。 UC Berkeley。 [rail.eecs.berkeley.edu](https://rail.eecs.berkeley.edu/deeprlcourse/)。 —— Berkeley 深度 RL 课程的策略梯度讲义：系统讲策略梯度定理、REINFORCE、基线、reward-to-go、高方差问题与工程对策（大 batch、Adam「凑合」、调学习率极难）；本篇「实践含义」段「策略梯度用比监督学习大得多的 batch、自适应步长、trust region」的实证依据来源。
+17. Kirkpatrick, J., Pascanu, R., Rabinowitz, N., Veness, J., Desjardins, G., Rusu, A. A., Milan, K., Quan, J., Ramalho, T., Grabska-Barwinska, A., Hassabis, D., Clopath, C., Kumaran, D., Hadsell, R. (2017). *Overcoming catastrophic forgetting in neural networks*. PNAS 114(13):3521-3526. [arXiv:1612.00796](https://arxiv.org/abs/1612.00796) / [DOI:10.1073/pnas.1611835114](https://doi.org/10.1073/pnas.1611835114). —— EWC 原始论文：指出连接主义模型在序列任务上「灾难性遗忘」源于参数共享、新梯度无差别覆盖旧解；提出用任务 A 收敛点 $\theta^*_A$ 处的 Fisher 信息对角 $F_i$ 作参数重要性度量，在任务 B 的损失上加二次惩罚 $\mathcal L_{\text{total}}=\mathcal L_B+\frac{\lambda}{2}\sum_i F_i(\theta_i-\theta^*_{A,i})^2$ 精准保护关键参数，对比 L2 同等约束过度束缚、朴素微调彻底遗忘；在 MNIST 序列 + Atari 多任务上验证。本篇「持续学习：EWC」小节概念、Fisher 重要性度量、二次惩罚公式与 CodeRunner toy 的直接来源。
+18. Rusu, A. A., Rabinowitz, N. C., Desjardins, G., Soyer, H., Kirkpatrick, J., Kavukcuoglu, K., Pascanu, R., Hadsell, R. (2016). *Progressive Neural Networks*. arXiv:1606.04671. [arXiv:1606.04671](https://arxiv.org/abs/1606.04671). —— Progressive Networks 原始论文：提出为每个新任务新增一列网络、冻结旧列、列间用侧向连接 $h^{(2)}_l=f(W^{(2)}_l h^{(2)}_{l-1}+U^{(2\leftarrow 1)}_l h^{(1)}_l)$ 传递特征的架构扩张路线；旧列冻结实现零遗忘、侧向连接实现正向迁移，代价是容量随任务数线性增长；在 Atari 多任务序列与 3D 跑酷上显著优于朴素微调与独立网络。本篇「Progressive Networks：加列而非改列」小节机制与对比表的直接来源。
+19. Espeholt, L., Soyer, H., Munos, R., Simonyan, K., Mnih, V., Ward, T., Doron, Y., Firoiu, V., Harley, T., Dunning, I., Legg, S., Kavukcuoglu, K. (2018). *IMPALA: Scalable Distributed Deep-RL with Importance Weighted Actor-Learner Architectures*. ICML 2018. arXiv:1802.01561. [arXiv:1802.01561](https://arxiv.org/abs/1802.01561). —— IMPALA 原始论文（12 作者）：提出 actor-learner 解耦架构（actor 只 rollout 产轨迹入队、learner 单点算梯度更新 $\theta$ 再定期推回 actor）+ V-trace off-policy 价值目标 $v_s=V(x_s)+\sum_{t=s}^{s+n-1}\gamma^{t-s}(\prod_{i=s}^{t-1}c_i)\rho_t(r_t+\gamma V(x_{t+1})-V(x_t))$ + 截断 IS 比 $\rho_t=\min(\bar\rho,\pi/\mu)$、$c_i=\min(\bar c,\pi/\mu)$ + $\bar\rho\geq\bar c$ 假设（Theorem 1 收敛保证）+ $\bar\rho$ 决定不动点（$\bar\rho=\infty\to V^\pi$,$\bar\rho\approx0\to V^\mu$）、$\bar c$ 决定收敛速度 + Atari 实验默认 $\bar c=\bar\rho=1.0$（搜过 $\bar\rho\in\{1,10,100\}$，$\bar\rho=1$ 最稳）+ on-policy $\pi=\mu$ 时 $\rho_t=c_i=1$ 退化为 n-step Bellman。本篇「IMPALA 与 V-trace」小节架构、公式、截断系数语义、三种分布式架构对照表的直接来源。
+20. Huang, S., Dossa, R. F. J., Ye, C., Braga, J., Chakraborty, D., Mehta, K., Araújo, J. G. M. (2022). *CleanRL: High-quality Single-file Implementations of Deep Reinforcement Learning Algorithms*. JMLR 23(274):1-18. [jmlr.org/papers/v23/21-1342.html](https://jmlr.org/papers/v23/21-1342.html). [cleanrl/ppo.py 源码](https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo.py). —— 单文件 PPO 实现：`Agent`（actor/critic 双头 MLP + `layer_init` 正交初始化）+ 向量化采集 + GAE 倒序递推（`nextnonterminal` 切断 episode 边界自举）+ ratio 裁剪 + k3 近似 KL + 优势归一化 + 价值损失裁剪 + 梯度范数裁剪 + 学习率退火，全文件 ~310 行可一次读完；配套 [docs.cleanrl.dev](https://docs.cleanrl.dev/rl-algorithms/ppo/#ppopy) 给出逐行对照实验结果。本文是本篇「源码走读」一节 CleanRL GAE 递推与 PPO 裁剪目标片段的直接来源（原始源码 2026-09 经 raw.githubusercontent.com 拉取核对）。
+21. Raffin, A., Hill, A., Gleave, A., Kanervisto, A., Ernestus, M., Dormann, N. (2021). *Stable-Baselines3: Reliable Reinforcement Learning Implementations*. JMLR 22(268):1-8. [jmlr.org/papers/v22/20-1364.html](https://jmlr.org/papers/v22/20-1364.html). [stable_baselines3/ppo/ppo.py 源码](https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/ppo/ppo.py). —— 生产级通用 RL 库的 PPO 实现：`PPO.train()` 的裁剪策略损失与 SB3 版完全同构，另提供 `clip_range`/`clip_range_vf` 调度（可传函数随进度变化）、`normalize_advantage`、`target_kl` 早停（1.5 倍余量）、`max_grad_norm` 梯度裁剪等可配置工程加固；GAE 在 `RolloutBuffer.compute_returns_and_advantage()` 中递推。库带自动化单元测试（覆盖 95% 代码）并对标参考实现基准测试。本文是本篇「源码走读」一节 SB3 工程加固描述的直接来源（原始源码 2026-09 经 raw.githubusercontent.com 拉取核对）。
+</References>
